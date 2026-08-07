@@ -1,0 +1,6 @@
+{
+  "mode": "local",
+  "base_url": "http://127.0.0.1:8188",
+  "comfy_dir": "../ComfyUI",
+  "auto_start_local": true
+}

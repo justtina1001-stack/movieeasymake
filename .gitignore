@@ -1,0 +1,25 @@
+# Local ComfyUI installation and model weights (never commit these)
+/ComfyUI/
+/.hf_cache/
+
+# User settings, uploaded assets, job history, generated videos, and logs
+/H3Studio/config.json
+/H3Studio/data/
+
+# Python environments and caches
+/.venv/
+/H3Studio/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated presentation/build artifacts
+/presentation_build/
+/*.pptx
+/*.ndjson
+
+# Editors and operating system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

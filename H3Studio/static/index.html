@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiniMax H3 Studio</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <header class="topbar">
+    <a class="brand" href="#">
+      <span class="brand-mark">H3</span>
+      <span><strong>MiniMax H3 Studio</strong><small>Cinematic workflow workspace</small></span>
+    </a>
+    <div class="engine-status">
+      <span id="statusDot" class="status-dot"></span>
+      <span id="statusText">檢查生成引擎...</span>
+      <button id="startEngine" class="button ghost small" type="button">啟動引擎</button>
+      <button id="openConnectionSettings" class="button ghost small" type="button">引擎設定</button>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">CREATE WITH MINIMAX H3</p>
+        <h1>把素材、角色與分鏡<br><span>編排成一支影片。</span></h1>
+        <p class="hero-copy">選擇生成方式，指定角色名稱與聲音，剩下的標籤和 ComfyUI 節點由工具自動處理。</p>
+      </div>
+      <div class="hero-meter">
+        <div><span>GPU</span><strong id="deviceName">RTX 5060 Ti</strong></div>
+        <div><span>工作流</span><strong>7 種</strong></div>
+        <div><span>執行方式</span><strong id="executionMode">本機 GPU</strong></div>
+      </div>
+    </section>
+
+    <section class="mode-section">
+      <div class="section-heading">
+        <div><span class="step-number">01</span><h2>選擇生成方式</h2></div>
+        <p>隨時切換，已填寫的內容會保留。</p>
+      </div>
+      <div class="mode-grid" id="modeGrid">
+        <button class="mode-card active" data-mode="t2v" type="button">
+          <span class="mode-icon text-icon">T</span>
+          <span><strong>文生影片</strong><small>從完整敘述建立畫面與聲音</small></span>
+          <i></i>
+        </button>
+        <button class="mode-card" data-mode="fl2va" type="button">
+          <span class="mode-icon frame-icon"></span>
+          <span><strong>首尾圖片</strong><small>控制第一幀與最後一幀</small></span>
+          <i></i>
+        </button>
+        <button class="mode-card" data-mode="r2v" type="button">
+          <span class="mode-icon refs-icon"><b></b><b></b><b></b></span>
+          <span><strong>多模態參考</strong><small>角色、背景、聲音與分鏡</small></span>
+          <i></i>
+        </button>
+        <button class="mode-card" data-mode="replace" type="button">
+          <span class="mode-icon replace-icon">⇄</span>
+          <span><strong>角色替換</strong><small>新形象接手原影片表演</small></span>
+          <i></i>
+        </button>
+        <button class="mode-card" data-mode="symbol_loop" type="button">
+          <span class="mode-icon symbol-icon">∞</span>
+          <span><strong>圖騰循環</strong><small>固定尺寸與頭尾無縫循環</small></span>
+          <i></i>
+        </button>
+        <button class="mode-card" data-mode="extend" type="button">
+          <span class="mode-icon extend-icon">↳</span>
+          <span><strong>續接影片</strong><small>從上一段最後畫面繼續表演</small></span>
+          <i></i>
+        </button>
+        <button class="mode-card" data-mode="popup_panel" type="button">
+          <span class="mode-icon popup-icon">▣</span>
+          <span><strong>彈窗面板動畫</strong><small>固定底板，製作面板進場、表演與退場</small></span>
+          <i></i>
+        </button>
+      </div>
+    </section>
+
+    <div class="studio-grid">
+      <div class="editor-column">
+        <section class="panel settings-panel">
+          <div class="panel-title"><span class="step-number">02</span><div><h2>影片設定</h2><p>六種模式共用的輸出規格</p></div></div>
+          <div class="job-identity">
+            <label class="job-name-field"><span>本次任務名稱</span><input id="jobName" maxlength="80" placeholder="例如：金色圖騰循環 01"></label>
+            <div class="filename-rule"><span>預計儲存檔名</span><strong id="filenamePreview">未命名時：年-月-日_時-分-秒_微秒</strong><small>有任務名稱就優先使用名稱；空白時才使用實際開始生成時間</small></div>
+          </div>
+          <div class="form-grid four">
+            <label>畫面比例<select id="aspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label>
+            <label>解析度<select id="megapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">原生畫質 · 0.98MP</option></select></label>
+            <label>時長<div class="field-unit"><input id="duration" type="number" min="5" max="15" step="0.5" value="5"><span>秒</span></div></label>
+            <label>Seed<div class="seed-row"><input id="seed" type="number" min="0" value="1"><button id="randomSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div></label>
+          </div>
+          <details class="advanced">
+            <summary>進階採樣設定</summary>
+            <div class="form-grid three">
+              <label>採樣步數<input id="steps" type="number" min="4" max="40" value="20"></label>
+              <label>Scheduler<select id="scheduler"><option value="simple">simple</option><option value="beta">beta</option><option value="normal">normal</option><option value="sgm_uniform">sgm_uniform</option><option value="karras">karras</option></select></label>
+              <label id="refSizeWrap" class="hidden">參考圖精度<select id="refImageSize"><option value="match">match · 較快</option><option value="max">max · 身份較準</option></select></label>
+            </div>
+          </details>
+          <div class="motion-director">
+            <div class="motion-director-copy">
+              <span class="motion-kicker">MOTION DIRECTOR</span>
+              <strong>動態導演</strong>
+              <small id="motionPresetHint">自然力學、重心轉移與連續收勢</small>
+            </div>
+            <div class="form-grid four">
+              <label>動態類型<select id="motionProfile"><option value="natural">自然動態</option><option value="impact">打擊與碰撞</option><option value="action">動作場面</option><option value="dance">舞蹈與節奏</option><option value="chase">追逐與奔跑</option><option value="vfx">特效與能量</option><option value="none">不自動強化</option></select></label>
+              <label>動態強度<select id="motionIntensity"><option value="1">1 · 克制</option><option value="2">2 · 穩定</option><option value="3" selected>3 · 平衡</option><option value="4">4 · 明顯</option><option value="5">5 · 強烈</option></select></label>
+              <label>物理表現<select id="physicsStyle"><option value="realistic">寫實</option><option value="balanced" selected>電影化平衡</option><option value="stylized">風格化</option></select></label>
+              <label>鏡頭反應<select id="cameraResponse"><option value="stable">穩定</option><option value="follow" selected>平滑跟隨</option><option value="handheld">克制手持</option><option value="impact">碰撞震動</option></select></label>
+            </div>
+          </div>
+          <div id="dimensionPreview" class="dimension-preview">預計輸出 864 × 480 · 24 FPS</div>
+        </section>
+
+        <section id="symbolLoopPanel" class="panel hidden">
+          <div class="panel-title"><span class="step-number">03</span><div><h2>圖騰固定畫布</h2><p>自動選擇解析度並擴張畫布，不裁切、不拉伸原圖</p></div></div>
+          <div class="symbol-source-grid">
+            <div id="symbolUpload" class="symbol-upload-zone">
+              <input id="symbolImageInput" type="file" accept="image/*" hidden>
+              <span>∞</span><strong>拖入靜態圖騰</strong><small>或點擊選擇 PNG、JPG、WebP</small>
+            </div>
+            <div id="symbolPreview" class="symbol-preview empty">
+              <div class="symbol-canvas-preview"></div>
+              <div><span class="motion-kicker horizontal">FIXED CANVAS</span><strong id="symbolSourceName">尚未選擇圖片</strong><small id="symbolSourceInfo">上傳後會自動選擇畫布與解析度</small></div>
+            </div>
+          </div>
+          <div class="symbol-locks">
+            <div><strong>中心 Pivot</strong><span>固定在畫布中心，不依發光或粒子範圍重新定位</span></div>
+            <div><strong>尺寸鎖定</strong><span id="symbolScaleInfo">原圖容得下時保留原始像素尺寸</span></div>
+            <div><strong>循環鎖定</strong><span>同一張擴邊圖會同時作為第一幀與最後一幀</span></div>
+          </div>
+          <div class="replacement-safety"><strong>擴邊規則</strong><span>以圖片邊緣的背景色補足空白；若原圖帶透明邊緣則保留透明擴邊。物件本身不會被拉寬、壓扁或裁切。</span></div>
+        </section>
+
+        <section id="keyframePanel" class="panel hidden">
+          <div class="panel-title"><span class="step-number">03</span><div><h2>首尾畫面</h2><p>至少上傳一張，尾圖可以省略</p></div></div>
+          <div class="keyframe-options">
+            <label>圖片適配
+              <select id="keyframeFit">
+                <option value="contain">完整擴邊（不裁切）</option>
+                <option value="cover">置中裁切（填滿畫面）</option>
+                <option value="stretch">強制拉伸</option>
+              </select>
+            </label>
+            <div id="keyframeFitHint"><strong>完整擴邊</strong><span>保留原圖比例，以邊緣顏色補足輸出畫布。</span></div>
+          </div>
+          <div class="upload-pair">
+            <div class="upload-box" data-upload-target="first">
+              <input id="firstImageInput" type="file" accept="image/*" hidden>
+              <div id="firstImagePreview" class="upload-preview"><span class="upload-plus">＋</span><strong>起始圖片</strong><small>點擊或拖入圖片</small></div>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="upload-box" data-upload-target="last">
+              <input id="lastImageInput" type="file" accept="image/*" hidden>
+              <div id="lastImagePreview" class="upload-preview"><span class="upload-plus">＋</span><strong>結束圖片</strong><small>選填</small></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="referencePanel" class="panel hidden">
+          <div class="panel-title action-title">
+            <div><span class="step-number">03</span><div><h2 id="referencePanelTitle">角色與參考素材</h2><p id="referencePanelDescription">在敘述詞中直接使用名稱代號</p></div></div>
+            <button id="addReference" class="button secondary" type="button">＋ 新增素材</button>
+          </div>
+          <div class="info-strip"><strong id="referenceInfoTitle">自動映射</strong><span id="referenceInfoText">圖片、動作影片與聲音會轉成 &lt;Picture n&gt;、&lt;Video n&gt;、&lt;Audio n&gt;，不需要手動編號。</span></div>
+          <div id="referenceList" class="reference-list"></div>
+          <div id="referenceEmpty" class="empty-state"><span>◎</span><strong>尚未加入參考素材</strong><p>先新增一位角色或一個背景。</p></div>
+        </section>
+
+        <section id="replacementPanel" class="panel hidden">
+          <div class="panel-title"><span class="step-number">03</span><div><h2>角色替換素材</h2><p>只設定新角色與原始表演影片，不要再加入舊角色</p></div></div>
+          <div class="form-grid two replacement-fields">
+            <label>新角色名稱<input id="replacementAlias" value="新角色" placeholder="例如：妲己"></label>
+            <label>要替換的位置／原角色<input id="replacementTarget" value="動態參考影片中的主要角色" placeholder="例如：影片左側穿白衣的狐妖"></label>
+          </div>
+          <label class="replacement-description">新角色固定特徵<input id="replacementDescription" placeholder="例如：黑色長髮、紅色古裝、金色髮飾"></label>
+          <div class="replacement-assets">
+            <div id="replacementImageZone" class="asset-zone replacement-zone" data-replacement-kind="images">
+              <input id="replacementImageInput" type="file" accept="image/*" multiple hidden>
+              <div class="asset-zone-title"><span>新角色圖片 · <b id="replacementImageCount">0/9</b></span><button id="addReplacementImages" type="button">＋ 選擇圖片</button></div>
+              <div id="replacementImageList" class="thumb-grid"><span class="asset-placeholder">拖入 1～9 張新角色圖片；建議包含臉部、半身與全身</span></div>
+            </div>
+            <div id="replacementVideoZone" class="asset-zone replacement-zone" data-replacement-kind="video">
+              <input id="replacementVideoInput" type="file" accept="video/mp4,video/webm,video/quicktime,.mov,.mkv,.avi" hidden>
+              <div class="asset-zone-title"><span>原始表演影片</span><button id="addReplacementVideo" type="button">＋ 選擇影片</button></div>
+              <div id="replacementVideoPreview" class="thumb-grid"><span class="asset-placeholder">拖入含有要被替換角色的原影片</span></div>
+              <label class="check-row"><input id="replacementUseAudio" type="checkbox"><span>保留原影片聲音</span></label>
+            </div>
+          </div>
+          <div class="replacement-safety"><strong>16GB VRAM 安全起點</strong><span>建議先用 0.4MP、5 秒測試；長片請先切成短段再逐段替換。</span></div>
+        </section>
+
+        <section id="continuationPanel" class="panel hidden">
+          <div class="panel-title"><span class="step-number">03</span><div><h2 id="continuationTitle">選擇上一段影片</h2><p id="continuationDescription">自動擷取最後一幀，作為新影片的精確起始畫面</p></div></div>
+          <div id="multimodalContinuationNote" class="info-strip hidden"><strong>多模態開頭參考</strong><span>上一段最後一幀會自動排為 &lt;Picture 1&gt;；角色、場景與物件圖片會從 &lt;Picture 2&gt; 開始對應。</span></div>
+          <div class="continuation-source-grid">
+            <div class="continuation-job-source">
+              <label>已完成的 H3 Studio 工作<select id="continuationJob"><option value="">選擇一支已完成影片</option></select></label>
+              <button id="useContinuationJob" class="button secondary wide" type="button">使用選擇的影片</button>
+            </div>
+            <div id="continuationUpload" class="continuation-upload-zone">
+              <input id="continuationVideoInput" type="file" accept="video/mp4,video/webm,video/quicktime,.mov,.mkv,.avi" hidden>
+              <span>↥</span><strong>拖入外部影片</strong><small>或點擊選擇 MP4、MOV、WebM</small>
+            </div>
+          </div>
+          <div id="continuationPreview" class="continuation-preview empty">
+            <div class="continuation-frame"></div>
+            <div><span id="continuationSourceKind" class="motion-kicker horizontal">CONTINUATION SOURCE</span><strong id="continuationSourceName">尚未選擇影片</strong><small id="continuationSourceInfo">選擇後會顯示最後一幀與影片資訊</small></div>
+          </div>
+          <div id="continuationOptions" class="form-grid three continuation-options">
+            <label class="check-option"><input id="continuationMerge" type="checkbox" checked><span><strong>自動串接完整影片</strong><small>完成後把上一段與新片段合併</small></span></label>
+            <label>聲音銜接<select id="continuationAudio"><option value="both">保留兩段聲音</option><option value="new">上一段靜音，只保留新聲音</option><option value="mute">完整影片靜音</option></select></label>
+            <div class="continuation-note"><strong>無縫處理</strong><span>自動略過新片段重複的第一幀</span></div>
+          </div>
+        </section>
+
+        <section class="panel prompt-panel">
+          <div class="panel-title"><span class="step-number" id="promptStep">03</span><div><h2>影片敘述</h2><p>描述事件、動作、鏡頭、台詞和聲音</p></div></div>
+          <textarea id="prompt" rows="10" placeholder="例如：小明走進神殿，看見金色佛像後停下腳步。攝影機從背後緩慢推進，小明轉頭說：「有人在這裡嗎？」背景只有微弱風聲與遠處鐘聲。"></textarea>
+          <div class="prompt-footer"><span id="promptCount">0 字</span><button id="insertPromptTemplate" class="text-button" type="button">插入提示詞範本</button></div>
+        </section>
+
+        <section class="panel storyboard-panel">
+          <div class="panel-title action-title">
+            <div><span class="step-number">05</span><div><h2>分鏡時間軸</h2><p id="storyboardHint">可加入文字分鏡；多模態模式還能上傳構圖參考圖</p></div></div>
+            <button id="addStoryboard" class="button secondary" type="button">＋ 新增鏡頭</button>
+          </div>
+          <div id="storyboardList" class="storyboard-list"></div>
+          <div id="storyboardEmpty" class="empty-state compact"><span>⌁</span><strong>沒有分鏡</strong><p>影片會依主敘述一次完成。</p></div>
+        </section>
+      </div>
+
+      <aside class="render-column">
+        <div class="sticky-stack">
+          <section class="panel render-panel">
+            <div class="render-orb"><span></span><b>H3</b></div>
+            <p class="eyebrow">READY TO COMPILE</p>
+            <h2>生成控制台</h2>
+            <div class="summary-list">
+              <div><span>模式</span><strong id="summaryMode">文生影片</strong></div>
+              <div><span>尺寸</span><strong id="summarySize">864 × 480</strong></div>
+              <div><span>時長</span><strong id="summaryDuration">約 5.17 秒</strong></div>
+              <div><span>動態</span><strong id="summaryMotion">自然動態 · 3</strong></div>
+              <div><span>參考素材</span><strong id="summaryAssets">0 個</strong></div>
+            </div>
+            <button id="compileButton" class="button secondary wide" type="button">預覽編譯提示詞</button>
+            <button id="renderButton" class="button primary wide" type="button"><span>開始生成影片</span><i>→</i></button>
+            <p id="renderNote" class="render-note">工作會依序進入本機 GPU 佇列。</p>
+          </section>
+
+          <section id="compiledPanel" class="panel compiled-panel hidden">
+            <div class="mini-title"><h3>編譯後提示詞</h3><button id="copyCompiled" class="text-button" type="button">複製</button></div>
+            <pre id="compiledPrompt"></pre>
+          </section>
+        </div>
+      </aside>
+    </div>
+
+    <section class="jobs-section">
+      <div class="section-heading jobs-heading">
+        <div><span class="step-number">06</span><h2>生成工作</h2></div>
+        <div class="job-toolbar"><input id="jobSearch" type="search" placeholder="搜尋任務名稱或編號"><button id="refreshJobs" class="button ghost small" type="button">重新整理</button></div>
+      </div>
+      <div id="jobList" class="job-list"></div>
+      <div id="jobEmpty" class="empty-state"><span>□</span><strong>還沒有生成工作</strong><p>設定完成後，按下「開始生成影片」。</p></div>
+      <div id="jobPagination" class="job-pagination hidden"><button id="previousJobPage" class="button ghost small" type="button">← 上一頁</button><span id="jobPageLabel">第 1 / 1 頁</span><button id="nextJobPage" class="button ghost small" type="button">下一頁 →</button></div>
+    </section>
+  </main>
+
+  <div id="connectionModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="connectionTitle">
+    <div class="modal-backdrop" data-close-connection></div>
+    <section class="modal-card">
+      <div class="modal-heading">
+        <div><p class="eyebrow">COMFYUI BACKEND</p><h2 id="connectionTitle">生成引擎設定</h2></div>
+        <button class="icon-button modal-close" type="button" data-close-connection aria-label="關閉">×</button>
+      </div>
+      <div class="connection-modes">
+        <label class="connection-option"><input type="radio" name="connectionMode" value="local"><span><strong>使用這台電腦</strong><small>連線或自動啟動本機 ComfyUI 與模型</small></span></label>
+        <label class="connection-option"><input type="radio" name="connectionMode" value="remote"><span><strong>連線遠端電腦</strong><small>面板留在本機，模型與 GPU 在另一台電腦</small></span></label>
+      </div>
+      <div class="connection-fields">
+        <label>ComfyUI 網址<input id="connectionUrl" type="url" placeholder="http://127.0.0.1:8188"></label>
+        <label id="comfyDirField">本機 ComfyUI 資料夾<input id="connectionComfyDir" type="text" placeholder="例如 E:\ComfyUI"></label>
+        <label id="autoStartField" class="check-row"><input id="connectionAutoStart" type="checkbox"><span>開啟面板時自動啟動本機 ComfyUI</span></label>
+      </div>
+      <p id="connectionHint" class="connection-hint"></p>
+      <div class="modal-actions">
+        <button id="testConnection" class="button secondary" type="button">測試連線</button>
+        <button id="saveConnection" class="button primary" type="button">儲存設定</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
