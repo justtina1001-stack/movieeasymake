@@ -2,3 +2,5 @@ aiohttp>=3.12,<4
 av>=16,<19
 numpy>=2,<3
 Pillow>=11,<13
+huggingface_hub>=1,<2
+hf-xet>=1,<2

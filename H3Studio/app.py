@@ -22,6 +22,7 @@ from PIL import Image, ImageOps
 
 from comfy_client import ComfyClient
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids
+from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
 from settings import ConnectionSettings, SettingsError, SettingsStore
 
 
@@ -714,11 +715,23 @@ def create_app() -> web.Application:
     settings = SettingsStore(CONFIG_PATH, APP_DIR)
     comfy = ComfyClient(settings.current, DATA_DIR)
     jobs = JobManager(assets, comfy)
+
+    async def use_installed_engine(target: Path) -> None:
+        updated = settings.update({
+            "mode": "local",
+            "base_url": "http://127.0.0.1:8188",
+            "comfy_dir": str(target),
+            "auto_start_local": True,
+        })
+        comfy.configure(updated)
+
+    installer = EngineInstaller(APP_DIR, DATA_DIR, use_installed_engine)
     app = web.Application(client_max_size=2 * 1024**3)
     app["assets"] = assets
     app["comfy"] = comfy
     app["jobs"] = jobs
     app["settings"] = settings
+    app["installer"] = installer
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
@@ -766,6 +779,34 @@ def create_app() -> web.Application:
             stats = await probe.system_stats()
             return web.json_response({"ready": bool(stats), "device": (stats.get("devices") or [{}])[0].get("name") if stats else None})
         except (SettingsError, json.JSONDecodeError, TypeError) as error:
+            return json_response_error(error)
+
+    async def engine_installer_preflight(request: web.Request) -> web.Response:
+        try:
+            target = resolve_install_target(request.query.get("comfy_dir"), APP_DIR)
+            result = await asyncio.to_thread(installer_preflight, target)
+            return web.json_response(result)
+        except (InstallerError, OSError, ValueError) as error:
+            return json_response_error(error)
+
+    async def engine_installer_status(_: web.Request) -> web.Response:
+        return web.json_response(installer.public_status())
+
+    async def start_engine_installer(request: web.Request) -> web.Response:
+        if jobs.gpu_lock.locked():
+            return json_response_error(RequestError("目前有影片正在生成，請完成後再安裝本機引擎。"), 409)
+        try:
+            payload = await request.json()
+            target = resolve_install_target(payload.get("comfy_dir"), APP_DIR)
+            result = await installer.start(target, payload.get("accepted_license") is True)
+            return web.json_response(result, status=202)
+        except (InstallerError, json.JSONDecodeError, OSError, ValueError) as error:
+            return json_response_error(error)
+
+    async def cancel_engine_installer(_: web.Request) -> web.Response:
+        try:
+            return web.json_response(await installer.cancel())
+        except InstallerError as error:
             return json_response_error(error)
 
     async def start_comfy(_: web.Request) -> web.Response:
@@ -970,6 +1011,10 @@ def create_app() -> web.Application:
     app.router.add_get("/api/connection", connection)
     app.router.add_post("/api/connection", update_connection)
     app.router.add_post("/api/connection/test", test_connection)
+    app.router.add_get("/api/engine-installer/preflight", engine_installer_preflight)
+    app.router.add_get("/api/engine-installer/status", engine_installer_status)
+    app.router.add_post("/api/engine-installer/start", start_engine_installer)
+    app.router.add_post("/api/engine-installer/cancel", cancel_engine_installer)
     app.router.add_post("/api/comfy/start", start_comfy)
     app.router.add_post("/api/assets", upload)
     app.router.add_post("/api/keyframes/prepare", prepare_keyframe)

@@ -156,7 +156,7 @@ input:focus, select:focus, textarea:focus { border-color: rgba(255,101,66,.66); 
 
 .modal { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; }
 .modal-backdrop { position: absolute; inset: 0; background: rgba(2,4,8,.78); backdrop-filter: blur(10px); }
-.modal-card { position: relative; width: min(620px, 100%); border: 1px solid rgba(255,255,255,.13); border-radius: 22px; background: #141820; box-shadow: 0 28px 100px rgba(0,0,0,.55); padding: 26px; }
+.modal-card { position: relative; width: min(680px, 100%); max-height: min(880px, calc(100vh - 48px)); overflow-y: auto; border: 1px solid rgba(255,255,255,.13); border-radius: 22px; background: #141820; box-shadow: 0 28px 100px rgba(0,0,0,.55); padding: 26px; }
 .modal-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
 .modal-heading h2 { margin: 0; font-size: 22px; }
 .modal-heading .eyebrow { margin-bottom: 7px; }
@@ -173,6 +173,31 @@ input:focus, select:focus, textarea:focus { border-color: rgba(255,101,66,.66); 
 .check-row input { width: 16px; height: 16px; margin: 0; }
 .connection-hint { min-height: 38px; margin: 14px 0; padding: 10px 12px; border-radius: 10px; background: rgba(85,215,208,.06); color: var(--muted); font-size: 11px; line-height: 1.55; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.local-installer { margin-top: 16px; border: 1px solid rgba(255,171,71,.2); border-radius: 14px; background: rgba(255,171,71,.035); }
+.local-installer > summary { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 15px; cursor: pointer; list-style: none; }
+.local-installer > summary::-webkit-details-marker { display: none; }
+.local-installer > summary strong, .local-installer > summary small { display: block; }
+.local-installer > summary strong { font-size: 12px; }
+.local-installer > summary small { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.local-installer > summary b { color: var(--accent-2); font-size: 11px; white-space: nowrap; }
+.installer-body { display: grid; gap: 11px; padding: 0 15px 15px; border-top: 1px solid rgba(255,255,255,.06); }
+.installer-warning { display: grid; gap: 4px; margin-top: 13px; padding: 10px 12px; border-radius: 10px; background: rgba(255,93,113,.06); font-size: 10px; line-height: 1.55; }
+.installer-warning strong { color: #ff8c9a; }
+.installer-warning span { color: var(--muted); }
+.installer-preflight { padding: 11px 12px; border-radius: 10px; background: #10141b; color: #dce1e8; font-size: 10px; line-height: 1.65; white-space: pre-line; }
+.installer-preflight.muted { color: var(--muted); }
+.installer-preflight.error { color: #ff8292; border: 1px solid rgba(255,93,113,.22); }
+.installer-preflight.ready { color: #7ae5b0; border: 1px solid rgba(85,215,146,.2); }
+.license-check { display: flex; align-items: flex-start; gap: 9px; padding: 2px 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+.license-check input { width: 15px; height: 15px; margin: 1px 0 0; flex: none; }
+.license-check a { color: var(--accent-2); }
+.installer-progress { display: grid; gap: 8px; padding: 12px; border-radius: 11px; background: #10141b; }
+.installer-progress > div:first-child { display: flex; justify-content: space-between; gap: 15px; font-size: 10px; }
+.installer-progress .progress-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+.installer-progress p { margin: 0; color: var(--danger); font-size: 10px; }
+.installer-progress details summary { color: var(--muted); font-size: 10px; cursor: pointer; }
+.installer-progress pre { max-height: 120px; overflow: auto; margin: 7px 0 0; padding: 8px; background: #090c11; color: #99a2b0; font: 9px/1.5 Consolas, monospace; white-space: pre-wrap; }
+.installer-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .keyframe-options { display: grid; grid-template-columns: minmax(220px, 340px) 1fr; gap: 14px; align-items: end; margin-bottom: 14px; }
 .keyframe-options label { margin: 0; }

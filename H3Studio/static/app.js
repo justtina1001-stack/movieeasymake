@@ -50,6 +50,8 @@ let toastTimer;
 let engineStartingAt = 0;
 let keyframePrepareVersion = 0;
 let connectionSettings = null;
+let installerPreflightData = null;
+let lastInstallerStatus = "idle";
 
 const modeLabels = { t2v: "文生影片", fl2va: "首尾圖片", r2v: "多模態參考", replace: "角色替換", symbol_loop: "圖騰循環", extend: "續接影片", popup_panel: "彈窗面板動畫" };
 const keyframeFitHints = {
@@ -131,6 +133,7 @@ function refreshConnectionFields() {
   const remote = $("input[name='connectionMode']:checked")?.value === "remote";
   $("#comfyDirField").classList.toggle("hidden", remote);
   $("#autoStartField").classList.toggle("hidden", remote);
+  $("#localInstallerSection").classList.toggle("hidden", remote);
   $("#connectionHint").textContent = remote
     ? "遠端主機需先啟動 ComfyUI，建議透過公司內網或 VPN 連線，不要直接把 8188 連接埠公開到網際網路。"
     : "本機模式會使用這台電腦的模型；開啟自動啟動後，面板可代為啟動指定資料夾內的 ComfyUI。";
@@ -145,10 +148,83 @@ async function loadConnectionSettings(openModal = false) {
   $("#connectionAutoStart").checked = Boolean(connectionSettings.auto_start_local);
   refreshConnectionFields();
   if (openModal) $("#connectionModal").classList.remove("hidden");
+  await loadInstallerStatus().catch(error => console.warn(error));
 }
 
 function closeConnectionSettings() {
   $("#connectionModal").classList.add("hidden");
+}
+
+function updateInstallerButton() {
+  const accepted = $("#acceptH3License").checked && $("#confirmH3Territory").checked;
+  const active = ["starting", "running", "cancelling"].includes(lastInstallerStatus);
+  const ready = Boolean(installerPreflightData?.ready_to_install);
+  $("#installLocalEngine").disabled = !accepted || !ready || active;
+  $("#installLocalEngine").textContent = installerPreflightData?.installed ? "套用此本機引擎" : "開始一鍵安裝";
+}
+
+function renderInstallerPreflight(data) {
+  installerPreflightData = data;
+  const panel = $("#installerPreflight");
+  const lines = [];
+  lines.push(`GPU：${data.gpu ? `${data.gpu.name} · ${data.gpu.vram_gb} GB VRAM` : "未偵測到 NVIDIA GPU"}`);
+  lines.push(`記憶體：${data.ram_gb ?? "未知"} GB · 可用磁碟：${data.disk_free_gb} GiB`);
+  lines.push(`本次還需要：約 ${data.required_gb} GiB · 模型完成：${data.models.filter(item => item.ready).length} / ${data.models.length}`);
+  if (data.installed) lines.push("✓ 這個資料夾已具備完整的 H3 本機引擎，可直接套用。");
+  for (const warning of data.warnings || []) lines.push(`注意：${warning}`);
+  for (const issue of data.issues || []) lines.push(`錯誤：${issue}`);
+  panel.textContent = lines.join("\n");
+  panel.className = `installer-preflight ${data.issues?.length ? "error" : "ready"}`;
+  updateInstallerButton();
+}
+
+async function runInstallerPreflight() {
+  const button = $("#checkLocalEngine");
+  button.disabled = true;
+  button.textContent = "檢查中...";
+  try {
+    const target = $("#connectionComfyDir").value.trim();
+    const data = await api(`/api/engine-installer/preflight?comfy_dir=${encodeURIComponent(target)}`);
+    renderInstallerPreflight(data);
+    return data;
+  } catch (error) {
+    installerPreflightData = null;
+    $("#installerPreflight").textContent = error.message;
+    $("#installerPreflight").className = "installer-preflight error";
+    updateInstallerButton();
+    throw error;
+  } finally {
+    button.disabled = false;
+    button.textContent = "檢查這台電腦";
+  }
+}
+
+function renderInstallerStatus(data) {
+  const previous = lastInstallerStatus;
+  lastInstallerStatus = data.status || "idle";
+  const active = ["starting", "running", "cancelling"].includes(lastInstallerStatus);
+  const showProgress = lastInstallerStatus !== "idle";
+  $("#installerProgress").classList.toggle("hidden", !showProgress);
+  $("#installerStep").textContent = data.step || "準備安裝";
+  const progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
+  $("#installerPercent").textContent = `${progress}%`;
+  $("#installerProgressBar").style.width = `${progress}%`;
+  $("#installerError").textContent = data.error || "";
+  $("#installerError").classList.toggle("hidden", !data.error);
+  $("#installerLogs").textContent = (data.logs || []).join("\n");
+  $("#cancelLocalEngine").classList.toggle("hidden", !active);
+  $("#connectionComfyDir").disabled = active;
+  updateInstallerButton();
+  if (lastInstallerStatus === "completed" && previous !== "completed") {
+    toast("本機引擎已安裝完成並套用");
+    loadConnectionSettings().then(checkStatus).catch(error => console.warn(error));
+  }
+}
+
+async function loadInstallerStatus() {
+  const data = await api("/api/engine-installer/status");
+  renderInstallerStatus(data);
+  return data;
 }
 
 function chooseFiles(accept, multiple = false) {
@@ -898,6 +974,42 @@ function bindEvents() {
   });
   $$("[data-close-connection]").forEach(element => element.addEventListener("click", closeConnectionSettings));
   $$("input[name='connectionMode']").forEach(element => element.addEventListener("change", refreshConnectionFields));
+  $("#connectionComfyDir").addEventListener("input", () => {
+    installerPreflightData = null;
+    $("#installerPreflight").textContent = "安裝路徑已變更，請重新檢查這台電腦。";
+    $("#installerPreflight").className = "installer-preflight muted";
+    updateInstallerButton();
+  });
+  $("#checkLocalEngine").addEventListener("click", async () => {
+    try { await runInstallerPreflight(); } catch (error) { toast(error.message, true); }
+  });
+  ["acceptH3License", "confirmH3Territory"].forEach(id => {
+    $(`#${id}`).addEventListener("change", updateInstallerButton);
+  });
+  $("#installLocalEngine").addEventListener("click", async () => {
+    const button = $("#installLocalEngine");
+    button.disabled = true;
+    try {
+      if (!installerPreflightData) await runInstallerPreflight();
+      const result = await api("/api/engine-installer/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          comfy_dir: $("#connectionComfyDir").value.trim(),
+          accepted_license: $("#acceptH3License").checked && $("#confirmH3Territory").checked,
+        }),
+      });
+      renderInstallerStatus(result);
+      toast(installerPreflightData?.installed ? "已套用本機引擎" : "已開始安裝，可關閉視窗後稍後回來查看");
+    } catch (error) { toast(error.message, true); }
+    finally { updateInstallerButton(); }
+  });
+  $("#cancelLocalEngine").addEventListener("click", async () => {
+    try {
+      renderInstallerStatus(await api("/api/engine-installer/cancel", { method: "POST" }));
+      toast("安裝已取消；已下載的完整檔案會保留，之後可以續裝");
+    } catch (error) { toast(error.message, true); }
+  });
   $("#testConnection").addEventListener("click", async () => {
     const button = $("#testConnection");
     button.disabled = true;
@@ -1297,6 +1409,7 @@ function initialize() {
   checkStatus();
   loadJobs(true);
   setInterval(checkStatus, 10000);
+  setInterval(() => loadInstallerStatus().catch(error => console.warn(error)), 2500);
   setInterval(() => engineStartingAt && showEngineStarting(), 1000);
   setInterval(loadJobs, 3000);
 }

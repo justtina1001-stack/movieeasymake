@@ -10,6 +10,8 @@ MiniMax H3 Studio 是 ComfyUI MiniMax H3 工作流的中文操作面板。專案
 4. 雙擊 `start_h3_studio.bat`，開啟 <http://127.0.0.1:8787>。
 5. 點右上角「引擎設定」，選擇本機或遠端模式。
 
+若電腦完全沒有 ComfyUI，選「使用這台電腦」，展開「這台電腦還沒有引擎？」即可執行一鍵安裝。安裝器會先檢查 NVIDIA GPU、Python、Git、記憶體及磁碟空間，並要求使用者自行閱讀和接受 MiniMax H3 授權。
+
 ## 兩種生成架構
 
 ### 使用同事電腦的模型
@@ -17,6 +19,8 @@ MiniMax H3 Studio 是 ComfyUI MiniMax H3 工作流的中文操作面板。專案
 選「使用這台電腦」，網址維持 `http://127.0.0.1:8188`，並指定同事自己的 ComfyUI 資料夾。若勾選自動啟動，面板會尋找 ComfyUI 的 `.venv`、`venv` 或 portable `python_embeded` 環境後啟動引擎。
 
 同事的 ComfyUI 必須自行安裝 MiniMax H3 節點與所需模型；模型檔不會從 Git 專案下載。
+
+也可以使用面板內的一鍵安裝器，自動安裝經本專案驗證的 ComfyUI、CUDA 13.0 PyTorch 及五個 H3 模型。模型下載約 59.1 GiB，連同程式、環境與暫存，建議安裝磁碟至少保留 80 GiB。下載可重複執行，已完成的模型檔會略過。
 
 ### 使用你的電腦的模型
 

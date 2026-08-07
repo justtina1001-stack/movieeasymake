@@ -6,6 +6,8 @@ MiniMax H3 Studio 是 ComfyUI 的簡化操作介面，可使用本機 ComfyUI，
 
 第一次使用先執行專案根目錄的 `setup_h3_studio.bat`，再雙擊 `start_h3_studio.bat`。瀏覽器會開啟 <http://127.0.0.1:8787>。右上角「引擎設定」可切換本機與遠端模式。
 
+本機沒有 ComfyUI 時，可在「引擎設定」展開一鍵安裝器。安裝前會檢查 NVIDIA GPU、Git、Python、記憶體與磁碟空間，並要求使用者閱讀 MiniMax H3 Community License。完整模型約 59.1 GiB，建議保留至少 80 GiB。
+
 ## 功能
 
 - 文生影片、首尾圖片、多模態參考、角色替換、圖騰循環、續接影片與彈窗面板動畫
@@ -18,6 +20,7 @@ MiniMax H3 Studio 是 ComfyUI 的簡化操作介面，可使用本機 ComfyUI，
 - 文字分鏡時間軸；可逐鏡填寫動態節拍與特效時序，多模態模式可加入分鏡構圖參考圖
 - 工作佇列、進度、取消、影片預覽和下載
 - 本機／遠端 ComfyUI 切換；遠端輸出自動回存面板電腦
+- 一鍵安裝本機 ComfyUI、CUDA PyTorch 與五個 H3 模型，支援中斷後續裝
 
 ## 分鏡限制
 
