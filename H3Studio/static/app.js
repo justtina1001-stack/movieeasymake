@@ -54,6 +54,14 @@ let installerPreflightData = null;
 let lastInstallerStatus = "idle";
 
 const modeLabels = { t2v: "文生影片", fl2va: "首尾圖片", r2v: "多模態參考", replace: "角色替換", symbol_loop: "圖騰循環", extend: "續接影片", popup_panel: "彈窗面板動畫" };
+const promptGuideModeAdvice = {
+  t2v: ["文生影片 · T2VA", "不使用參考圖片，直接描述完整的畫面、動作、鏡頭、對白與聲音時間線。"],
+  r2v: ["多模態參考 · Ref2VA", "在敘述中直接使用素材名稱；工具會自動建立 Subject、Picture、Video 與 Audio 對應。"],
+  replace: ["角色替換 · Ref2VA 影片編輯", "說明新角色要接手的原角色位置與表演，保留原場景、鏡頭、道具及其他人物。"],
+  symbol_loop: ["圖騰循環 · FL2VA", "同一張擴邊圖片作為首尾錨點；只完成一個動作週期並平順回到起始狀態。"],
+  extend: ["續接影片 · I2VA／Ref2VA", "只用尾幀時延續姿勢與動量；保留原影片作參考時則同時描述 video continuation 關係。"],
+  popup_panel: ["彈窗面板 · Ref2VA", "背景全程固定，只讓面板、分數、按鈕、壓暗層、裝飾與特效依時間表演。"],
+};
 const keyframeFitHints = {
   contain: ["完整擴邊", "保留原圖比例，以邊緣顏色補足輸出畫布。"],
   cover: ["置中裁切", "保留原圖比例並填滿畫面，超出輸出比例的部分會被裁切。"],
@@ -153,6 +161,35 @@ async function loadConnectionSettings(openModal = false) {
 
 function closeConnectionSettings() {
   $("#connectionModal").classList.add("hidden");
+}
+
+function promptGuideAdvice() {
+  if (state.mode !== "fl2va") return promptGuideModeAdvice[state.mode] || [modeLabels[state.mode], "依照目前模式描述完整的可見與可聽事件。"];
+  if (state.firstImage && state.lastImage) return ["首尾圖片 · FL2VA", "第一張與第二張是精確首尾幀；重點描述中間可觀察的連續變化與最後收斂路徑。"];
+  if (state.firstImage) return ["首尾圖片 · I2VA", "第一張是 0.00 秒精確首幀；先保持圖片中的身份、構圖與空間，再描述後續動作。"];
+  if (state.lastImage) return ["首尾圖片 · L2VA", "最後一張是精確尾幀；從合理的先前狀態逐步靠近指定姿勢、構圖與光線。"];
+  return ["首尾圖片 · I2VA／FL2VA／L2VA", "上傳首圖、尾圖或兩張圖片後，工具會依實際錨點選擇對應的官方提示方式。"];
+}
+
+function openPromptGuide() {
+  const [title, advice] = promptGuideAdvice();
+  $("#guideCurrentMode").textContent = title;
+  $("#guideModeAdvice").textContent = advice;
+  $("#promptGuideModal").classList.remove("hidden");
+  $(".prompt-guide-content").scrollTop = 0;
+  $$(".prompt-guide-nav button").forEach((button, index) => button.classList.toggle("active", index === 0));
+  requestAnimationFrame(() => $("#promptGuideModal .modal-close").focus());
+}
+
+function closePromptGuide() {
+  $("#promptGuideModal").classList.add("hidden");
+}
+
+async function copyGuideCode(key) {
+  const target = { base_schema: "guideCodeBase", camera_example: "guideCodeCamera", dialogue_example: "guideCodeDialogue" }[key.replaceAll("-", "_")];
+  if (!target) return;
+  await navigator.clipboard.writeText($(`#${target}`).textContent);
+  toast("指南範例已複製");
 }
 
 function updateInstallerButton() {
@@ -971,6 +1008,25 @@ function bindEvents() {
   });
   $("#openConnectionSettings").addEventListener("click", async () => {
     try { await loadConnectionSettings(true); } catch (error) { toast(error.message, true); }
+  });
+  $("#openPromptGuide").addEventListener("click", openPromptGuide);
+  $$('[data-close-prompt-guide]').forEach(element => element.addEventListener("click", closePromptGuide));
+  $$(".prompt-guide-nav button").forEach(button => button.addEventListener("click", () => {
+    $$(".prompt-guide-nav button").forEach(item => item.classList.toggle("active", item === button));
+    $(`#${button.dataset.guideTarget}`).scrollIntoView({ behavior: "smooth", block: "start" });
+  }));
+  $$('[data-copy-guide]').forEach(button => button.addEventListener("click", async () => {
+    try { await copyGuideCode(button.dataset.copyGuide); } catch (error) { toast("無法複製指南範例", true); }
+  }));
+  $("#guideGoToPrompt").addEventListener("click", () => {
+    closePromptGuide();
+    $("#prompt").scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => $("#prompt").focus(), 350);
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    if (!$("#promptGuideModal").classList.contains("hidden")) closePromptGuide();
+    else if (!$("#connectionModal").classList.contains("hidden")) closeConnectionSettings();
   });
   $$("[data-close-connection]").forEach(element => element.addEventListener("click", closeConnectionSettings));
   $$("input[name='connectionMode']").forEach(element => element.addEventListener("change", refreshConnectionFields));

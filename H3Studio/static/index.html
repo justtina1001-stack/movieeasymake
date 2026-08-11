@@ -17,6 +17,7 @@
     <div class="engine-status">
       <span id="statusDot" class="status-dot"></span>
       <span id="statusText">檢查生成引擎...</span>
+      <button id="openPromptGuide" class="button ghost small guide-toolbar-button" type="button" aria-haspopup="dialog" aria-label="開啟提示詞指南"><b>✦</b><span class="guide-button-label">提示詞指南</span></button>
       <button id="startEngine" class="button ghost small" type="button">啟動引擎</button>
       <button id="openConnectionSettings" class="button ghost small" type="button">引擎設定</button>
     </div>
@@ -83,7 +84,7 @@
     <div class="studio-grid">
       <div class="editor-column">
         <section class="panel settings-panel">
-          <div class="panel-title"><span class="step-number">02</span><div><h2>影片設定</h2><p>六種模式共用的輸出規格</p></div></div>
+          <div class="panel-title"><span class="step-number">02</span><div><h2>影片設定</h2><p>七種模式共用的輸出規格</p></div></div>
           <div class="job-identity">
             <label class="job-name-field"><span>本次任務名稱</span><input id="jobName" maxlength="80" placeholder="例如：金色圖騰循環 01"></label>
             <div class="filename-rule"><span>預計儲存檔名</span><strong id="filenamePreview">未命名時：年-月-日_時-分-秒_微秒</strong><small>有任務名稱就優先使用名稱；空白時才使用實際開始生成時間</small></div>
@@ -313,6 +314,104 @@
       <div class="modal-actions">
         <button id="testConnection" class="button secondary" type="button">測試連線</button>
         <button id="saveConnection" class="button primary" type="button">儲存設定</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="promptGuideModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="promptGuideTitle">
+    <div class="modal-backdrop" data-close-prompt-guide></div>
+    <section class="modal-card prompt-guide-card">
+      <div class="modal-heading prompt-guide-heading">
+        <div><p class="eyebrow">OFFICIAL PROMPT SKILL</p><h2 id="promptGuideTitle">MiniMax H3 提示詞指南</h2><p>依官方 Base 與 Ref2VA 格式整理，並適配目前操作面板。</p></div>
+        <button class="icon-button modal-close" type="button" data-close-prompt-guide aria-label="關閉提示詞指南">×</button>
+      </div>
+      <div class="prompt-guide-layout">
+        <nav class="prompt-guide-nav" aria-label="提示詞指南章節">
+          <button class="active" type="button" data-guide-target="guideQuickStart">快速開始</button>
+          <button type="button" data-guide-target="guideModes">模式對照</button>
+          <button type="button" data-guide-target="guideReferences">多模態素材</button>
+          <button type="button" data-guide-target="guideTimeline">鏡頭與時間</button>
+          <button type="button" data-guide-target="guideDialogue">對白與聲音</button>
+          <button type="button" data-guide-target="guideSlot">老虎機動畫</button>
+        </nav>
+        <div class="prompt-guide-content">
+          <section id="guideQuickStart" class="guide-section">
+            <div class="guide-current-mode"><span>目前選擇</span><strong id="guideCurrentMode">文生影片 · T2VA</strong><p id="guideModeAdvice">不使用參考圖片，直接描述完整的畫面、動作、鏡頭與聲音時間線。</p></div>
+            <h3>四個步驟寫出可執行提示詞</h3>
+            <ol class="guide-steps">
+              <li><b>1</b><span><strong>先選模式</strong><small>判斷圖片是精確幀，還是只用來參考角色、場景或風格。</small></span></li>
+              <li><b>2</b><span><strong>命名素材</strong><small>多模態模式直接使用面板中的名稱代號，不必手動編號。</small></span></li>
+              <li><b>3</b><span><strong>沿時間寫動作</strong><small>描述可看見的姿勢變化、物件互動、鏡頭運動、聲音與最後狀態。</small></span></li>
+              <li><b>4</b><span><strong>預覽編譯結果</strong><small>生成前確認角色、圖片、影片及聲音標籤的歸屬正確。</small></span></li>
+            </ol>
+            <div class="guide-note"><strong>本工具怎麼填？</strong><span>請在「影片敘述」輸入自然的時間線內容。工具會自動加入素材定義與保留規則；不要把完整六段式 Ref2VA 提示詞再貼進敘述欄。</span></div>
+          </section>
+
+          <section id="guideModes" class="guide-section">
+            <span class="guide-kicker">MODE MAP</span><h3>官方模式與工具模式對照</h3>
+            <div class="guide-mode-grid">
+              <article><strong>T2VA</strong><span>文生影片</span><p>無精確參考幀，從文字建立完整影音時間線。</p></article>
+              <article><strong>I2VA</strong><span>首尾圖片 · 只有首圖</span><p>首圖是 0.00 秒的精確第一幀，再向後發展動作。</p></article>
+              <article><strong>FL2VA</strong><span>首尾圖片 · 兩張圖</span><p>描述由第一幀逐步收斂到最後一幀的連續路徑。</p></article>
+              <article><strong>L2VA</strong><span>首尾圖片 · 只有尾圖</span><p>推導合理的開場，並在結尾準確落到指定圖片。</p></article>
+              <article><strong>Ref2VA</strong><span>多模態／替換／續接</span><p>圖片、影片、聲音用來定義角色、場景、動作或編輯關係。</p></article>
+            </div>
+            <div class="guide-code-block"><div><strong>官方 Base 核心欄位</strong><button type="button" data-copy-guide="base-schema">複製</button></div><pre id="guideCodeBase">integrated_multimodal_description: [Shot 1] ...
+
+overall_soundscape: ...
+
+non_diegetic_music: ...</pre></div>
+          </section>
+
+          <section id="guideReferences" class="guide-section">
+            <span class="guide-kicker">REFERENCE LABELS</span><h3>多模態素材怎麼對應</h3>
+            <div class="guide-reference-list">
+              <div><code>&lt;Subject N&gt;</code><span><strong>可重複使用的可見內容</strong>人物、動物、物件、背景、服裝、介面、特效、姿勢或風格。</span></div>
+              <div><code>&lt;Picture N&gt;</code><span><strong>具體圖片錨點</strong>精確首幀、尾幀、中間關鍵幀、分鏡或構圖參考。</span></div>
+              <div><code>&lt;Video N&gt;</code><span><strong>整支影片關係</strong>原片編輯、影片續接、動作節奏、運鏡、剪接或時間結構。</span></div>
+              <div><code>&lt;Audio N&gt;</code><span><strong>聲音複製或參考</strong>同步原音、角色音色、節拍、音樂或效果聲；與 Video 獨立編號。</span></div>
+            </div>
+            <div class="guide-do-dont"><div><b>✓ 在工具裡</b><p>把素材命名成「熊貓」、「背景圖」、「面板」，敘述時直接使用這些名稱。</p></div><div><b>× 不要這樣</b><p>不要自行猜測「熊貓是 &lt;Subject 2&gt;」，實際編號會依上傳順序自動決定。</p></div></div>
+          </section>
+
+          <section id="guideTimeline" class="guide-section">
+            <span class="guide-kicker">SHOT & CAMERA</span><h3>鏡頭、時間與動作路徑</h3>
+            <ul class="guide-rules">
+              <li>第一個鏡頭只寫 <code>[Shot 1]</code>，不要附時間。</li>
+              <li>後續剪接使用遞增時間，例如 <code>[Shot 2] At 00:03.500, the camera cuts to...</code></li>
+              <li>小幅改變角度或距離時優先使用運鏡，不需要為每個變化都切鏡。</li>
+              <li>運鏡要寫成自然句子，依需要加入類型、幅度與速度。</li>
+            </ul>
+            <div class="guide-camera-tags"><span>Push In / Pull Out</span><span>Pan Left / Right</span><span>Truck Left / Right</span><span>Tilt Up / Down</span><span>Arc Shot</span><span>Tracking Shot</span><span>Static Shot</span><span>Shake Slightly</span></div>
+            <div class="guide-code-block"><div><strong>運鏡範例</strong><button type="button" data-copy-guide="camera-example">複製</button></div><pre id="guideCodeCamera">The camera pushes in with small amplitude at slow speed toward the panel while the background remains completely static.</pre></div>
+          </section>
+
+          <section id="guideDialogue" class="guide-section">
+            <span class="guide-kicker">DIALOGUE & SOUND</span><h3>對白與聲音格式</h3>
+            <ul class="guide-rules">
+              <li>有發聲的角色依序使用固定的 <code>(S1)</code>、<code>(S2)</code>，跨鏡頭不得更換。</li>
+              <li>只有語言標記與原始台詞放在 <code>&lt;d&gt;...&lt;/d&gt;</code> 內；不可擅自翻譯或改寫。</li>
+              <li><code>overall_soundscape</code> 放環境聲、動作聲與非語言人聲，不重複台詞。</li>
+              <li><code>non_diegetic_music</code> 只寫角色聽不到、觀眾才聽到的配樂；無配樂填 <code>N/A</code>。</li>
+            </ul>
+            <div class="guide-code-block"><div><strong>中文台詞範例</strong><button type="button" data-copy-guide="dialogue-example">複製</button></div><pre id="guideCodeDialogue">The panda (S1) says with a bright, energetic voice: &lt;d&gt;[Chinese] 恭喜發財！&lt;/d&gt;</pre></div>
+          </section>
+
+          <section id="guideSlot" class="guide-section">
+            <span class="guide-kicker">SLOT PRODUCTION</span><h3>老虎機常用動畫重點</h3>
+            <div class="guide-slot-grid">
+              <article><strong>圖騰循環</strong><p>固定畫布、中心、比例與輪廓，只完成一個動作週期，逐步回到開場姿勢、光線與特效狀態。</p></article>
+              <article><strong>彈窗面板</strong><p>背景全程鎖定，只讓面板、分數、按鈕、裝飾、壓暗層與粒子表演，結尾只留下原背景。</p></article>
+              <article><strong>轉場進場</strong><p>寫清楚起始位置、移動或縮放路徑、撞擊／回彈、次級動態，以及最後穩定停留狀態。</p></article>
+              <article><strong>角色表演</strong><p>依序描述預備動作、重心轉移、主要動作、接觸反作用、跟隨動作、表情與收勢。</p></article>
+            </div>
+            <div class="guide-warning"><strong>製作提醒</strong><span>模型生成具有隨機性。像素級背景鎖定、精確文字、透明通道與無縫循環都應在產出後再次檢查，必要時進行穩定、去背或合成。</span></div>
+          </section>
+        </div>
+      </div>
+      <div class="prompt-guide-footer">
+        <div><a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md" target="_blank" rel="noreferrer">官方 Base 指南 ↗</a><a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md" target="_blank" rel="noreferrer">官方 Ref2VA 指南 ↗</a></div>
+        <button id="guideGoToPrompt" class="button primary" type="button">前往影片敘述</button>
       </div>
     </section>
   </div>
