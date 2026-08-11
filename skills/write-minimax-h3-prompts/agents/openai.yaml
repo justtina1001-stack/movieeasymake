@@ -1,0 +1,8 @@
+interface:
+  display_name: "MiniMax H3 官方提示詞"
+  short_description: "依 MiniMax H3 官方規格撰寫可直接使用的影片提示詞"
+  brand_color: "#FF5A67"
+  default_prompt: "Use $write-minimax-h3-prompts to turn my video idea and reference assets into a production-ready MiniMax H3 prompt."
+
+policy:
+  allow_implicit_invocation: true

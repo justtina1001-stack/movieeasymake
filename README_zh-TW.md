@@ -43,6 +43,12 @@ python main.py --listen 0.0.0.0 --lowvram --reserve-vram 1.5
 - 任務命名、生成歷史、折疊預覽、搜尋與每頁 20 筆分頁
 - 遠端結果自動回存面板端，續接影片不依賴遠端檔案路徑
 
+## MiniMax H3 官方提示詞 Skill
+
+專案內附 `skills/write-minimax-h3-prompts/`，依 MiniMax H3 官方的 Base 與 Ref2VA 提示詞指南整理，可協助 Codex 撰寫文生影片、首尾幀、多模態參考、影片續接、角色替換，以及老虎機圖騰循環與彈窗面板提示詞。
+
+安裝到 Codex 時，將整個 `write-minimax-h3-prompts` 資料夾複製到 `%USERPROFILE%\.codex\skills\`，然後重新啟動 Codex。使用時可直接說「用 MiniMax H3 官方提示詞 Skill 幫我寫……」，或明確輸入 `$write-minimax-h3-prompts`。
+
 ## 不會進入 Git 的資料
 
 `.gitignore` 已排除 `ComfyUI/`、模型快取、`H3Studio/config.json`、`H3Studio/data/`、虛擬環境及生成簡報。請勿強制加入任何 `.safetensors` 或同事不應取得的素材。
