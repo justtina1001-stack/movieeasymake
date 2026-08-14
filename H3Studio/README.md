@@ -46,3 +46,15 @@ MiniMax H3 Studio 是 ComfyUI 的簡化操作介面，可使用本機 ComfyUI，
 cd "E:\MINIMAX H3\H3Studio"
 ..\ComfyUI\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
+
+## MG 動畫模式
+
+「MG 動畫」使用 MiniMax H3 Ref2VA 工作流，預設提供三個不可刪除、但可補充額外素材的基礎欄位：
+
+- `背景圖`：MG 底板與場景空間。
+- `轉輪帶`：可見轉輪窗、停輪格與圖騰配置；不代表數學轉輪表。
+- `角色`：畫面中的主要角色形象。
+
+分層動態導演可獨立設定角色方位與表演、轉輪運動模型、圖騰移動方向、停輪順序、停輪間隔、停輪後圖騰表演、背景動態及鏡頭方式。編譯時會依 MiniMax H3 官方 Ref2VA 提示詞結構產生 `subject_definitions`、`summary`、`retention_analysis`、`detailed_description`、`overall_soundscape` 與 `non_diegetic_music` 六個區段。
+
+AI 生成無法保證數學停輪結果、精確文字或逐像素版面。正式製作仍應保留引擎端的數學轉輪表、動態數值與 UI 疊圖，並在生成後檢查停輪格幾何、角色遮擋、文字可讀性與最終收勢。

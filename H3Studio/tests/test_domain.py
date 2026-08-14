@@ -259,6 +259,60 @@ class CompileRequestTests(unittest.TestCase):
         self.assertTrue(any(value["class_type"] == "GetVideoComponents" for value in workflow.values()))
         self.assertTrue(any(value["class_type"] == "SaveVideo" for value in workflow.values()))
 
+    def test_mg_animation_compiles_separate_character_reel_and_background_direction(self):
+        payload = self.base("mg_animation")
+        payload["prompt"] = "保持高品質老虎機 MG 畫面，最後停在可讀的中獎結果。"
+        payload["references"] = [
+            {"alias": "背景圖", "type": "background", "image_asset_ids": [IMAGE_A]},
+            {"alias": "轉輪帶", "type": "object", "image_asset_ids": [IMAGE_B]},
+            {"alias": "角色", "type": "character", "image_asset_ids": [IMAGE_C]},
+        ]
+        payload["mg_animation"] = {
+            "character_position": "upper_left",
+            "character_position_detail": "位於轉輪左上方",
+            "character_motion": "角色先蓄力，再指向轉輪，最後開心收勢。",
+            "reel_motion_model": "continuous",
+            "reel_direction": "top_down",
+            "reel_stop_order": "left_right",
+            "reel_stop_stagger": 0.2,
+            "reel_motion": "五軸依序減速並停穩。",
+            "symbol_post_stop_motion": "中獎圖騰停穩後才放大與發光。",
+            "background_motion_level": "subtle",
+            "background_motion": "遠景環境光緩慢流動。",
+            "camera_motion": "static",
+        }
+        compiled = compile_request(payload)
+        self.assertEqual(compiled.reference_images, [IMAGE_A, IMAGE_B, IMAGE_C])
+        self.assertIn("summary:", compiled.prompt)
+        self.assertIn("retention_analysis:", compiled.prompt)
+        self.assertIn("overall_soundscape:", compiled.prompt)
+        self.assertIn("upper-left area", compiled.prompt)
+        self.assertIn("from top to bottom", compiled.prompt)
+        self.assertIn("left to right", compiled.prompt)
+        self.assertIn("中獎圖騰停穩後才放大與發光", compiled.prompt)
+        self.assertIn("never infer or alter mathematical reel-strip order", compiled.prompt)
+        workflow = build_workflow(compiled, {
+            IMAGE_A: "h3/background.png",
+            IMAGE_B: "h3/reels.png",
+            IMAGE_C: "h3/character.png",
+        }, "mg")
+        self.assertTrue(any(value["class_type"] == "MiniMaxH3ReferenceToVideo" for value in workflow.values()))
+        model = next(value for value in workflow.values() if value["class_type"] == "UNETLoader")
+        self.assertIn("ref2va", model["inputs"]["unet_name"])
+
+    def test_mg_animation_requires_three_named_base_layers(self):
+        payload = self.base("mg_animation")
+        payload["references"] = [
+            {"alias": "背景圖", "type": "background", "image_asset_ids": [IMAGE_A]},
+            {"alias": "轉輪帶", "type": "object", "image_asset_ids": [IMAGE_B]},
+        ]
+        with self.assertRaisesRegex(RequestError, "背景圖.*轉輪帶.*角色"):
+            compile_request(payload)
+
+        payload["references"].append({"alias": "角色", "type": "character", "image_asset_ids": []})
+        with self.assertRaisesRegex(RequestError, "角色.*至少一張"):
+            compile_request(payload)
+
 
 if __name__ == "__main__":
     unittest.main()

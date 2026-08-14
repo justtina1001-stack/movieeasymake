@@ -11,6 +11,27 @@ const defaultState = {
     { id: "popup-panel", alias: "面板", type: "object", description: "在背景圖上方進場、表演與退場的彈窗面板", images: [], video: null, videoUseAudio: false, audio: null, voiceMode: "timbre" },
   ],
   popupPanel: { safeDefaultsApplied: false },
+  mgReferences: [
+    { id: "mg-background", alias: "背景圖", type: "background", description: "MG 底板與場景空間；維持原始構圖與可讀性", images: [], video: null, videoUseAudio: false, audio: null, voiceMode: "timbre" },
+    { id: "mg-reels", alias: "轉輪帶", type: "object", description: "可見的轉輪窗、等尺寸停輪格與圖騰配置", images: [], video: null, videoUseAudio: false, audio: null, voiceMode: "timbre" },
+    { id: "mg-character", alias: "角色", type: "character", description: "MG 畫面中的主要角色；保持臉部、服裝、比例與身份一致", images: [], video: null, videoUseAudio: false, audio: null, voiceMode: "timbre" },
+  ],
+  mgAnimation: {
+    safeDefaultsApplied: false,
+    characterPosition: "right",
+    characterPositionDetail: "位於轉輪右側，不遮擋圖騰、標題、分數與 JP 數值",
+    characterMotion: "角色先做克制的預備動作；停輪時視線追隨轉輪結果，重心自然轉移；中獎後做一次清楚的開心反應，衣袖與飾品延遲跟隨，最後穩定收勢。",
+    reelMotionModel: "continuous",
+    reelDirection: "top_down",
+    reelStopOrder: "left_right",
+    reelStopStagger: 0.18,
+    reelMotion: "轉輪先平滑加速，再保持穩定速度；各軸依序減速，停輪時有短促機械回彈，但每格尺寸、中心與遮罩保持一致。",
+    symbolPostStopMotion: "所有軸完全停穩後，中獎圖騰才做一次 1.00～1.05 倍的呼吸放大與乾淨高光掃過，隨後回到原本格位中心；其他圖騰保持穩定。",
+    backgroundMotionLevel: "subtle",
+    backgroundMotion: "遠景只做低對比、低幅度的環境光流動與少量粒子漂移，不與轉輪、角色搶焦，也不改變底板版面。",
+    cameraMotion: "static",
+    cameraMotionDetail: "固定鏡頭，不推拉、不平移、不晃動，完整保留轉輪窗與角色安全區。",
+  },
   storyboards: [],
   replacement: {
     alias: "新角色",
@@ -53,7 +74,7 @@ let connectionSettings = null;
 let installerPreflightData = null;
 let lastInstallerStatus = "idle";
 
-const modeLabels = { t2v: "文生影片", fl2va: "首尾圖片", r2v: "多模態參考", replace: "角色替換", symbol_loop: "圖騰循環", extend: "續接影片", popup_panel: "彈窗面板動畫" };
+const modeLabels = { t2v: "文生影片", fl2va: "首尾圖片", r2v: "多模態參考", replace: "角色替換", symbol_loop: "圖騰循環", extend: "續接影片", popup_panel: "彈窗面板動畫", mg_animation: "MG 動畫" };
 const promptGuideModeAdvice = {
   t2v: ["文生影片 · T2VA", "不使用參考圖片，直接描述完整的畫面、動作、鏡頭、對白與聲音時間線。"],
   r2v: ["多模態參考 · Ref2VA", "在敘述中直接使用素材名稱；工具會自動建立 Subject、Picture、Video 與 Audio 對應。"],
@@ -61,6 +82,7 @@ const promptGuideModeAdvice = {
   symbol_loop: ["圖騰循環 · FL2VA", "同一張擴邊圖片作為首尾錨點；只完成一個動作週期並平順回到起始狀態。"],
   extend: ["續接影片 · I2VA／Ref2VA", "只用尾幀時延續姿勢與動量；保留原影片作參考時則同時描述 video continuation 關係。"],
   popup_panel: ["彈窗面板 · Ref2VA", "背景全程固定，只讓面板、分數、按鈕、壓暗層、裝飾與特效依時間表演。"],
+  mg_animation: ["MG 動畫 · Ref2VA", "角色、可見轉輪窗與背景分層描述；先定義空間位置，再安排旋轉、停輪、停輪後圖騰表演與最後收勢。"],
 };
 const keyframeFitHints = {
   contain: ["完整擴邊", "保留原圖比例，以邊緣顏色補足輸出畫布。"],
@@ -90,6 +112,10 @@ function loadState() {
       images: [], audio: null, video: null, videoUseAudio: false, voiceMode: "timbre", description: "", ...item,
     }));
     restored.popupPanel = { ...structuredClone(defaultState.popupPanel), ...(restored.popupPanel || {}) };
+    restored.mgReferences = (restored.mgReferences || structuredClone(defaultState.mgReferences)).map(item => ({
+      images: [], audio: null, video: null, videoUseAudio: false, voiceMode: "timbre", description: "", ...item,
+    }));
+    restored.mgAnimation = { ...structuredClone(defaultState.mgAnimation), ...(restored.mgAnimation || {}) };
     restored.storyboards = (restored.storyboards || []).map(shot => ({ motionBeats: "", effects: "", ...shot }));
     restored.replacement = { ...structuredClone(defaultState.replacement), ...(restored.replacement || {}) };
     restored.symbolLoop = { ...structuredClone(defaultState.symbolLoop), ...(restored.symbolLoop || {}) };
@@ -301,7 +327,7 @@ async function addReferenceFiles(item, kind, files) {
   const accepted = [...files].filter(file => acceptsReferenceFile(file, kind));
   if (!accepted.length) throw new Error(kind === "images" ? "請拖入圖片檔案。" : kind === "video" ? "請拖入影片檔案。" : "請拖入聲音或含聲音的影片檔案。");
   if (kind === "images") {
-    if (state.mode === "popup_panel" && item.id === "popup-background") {
+    if ((state.mode === "popup_panel" && item.id === "popup-background") || (state.mode === "mg_animation" && item.id === "mg-background")) {
       item.images = [await uploadFile(accepted[0], "popup-panel-image")];
       return;
     }
@@ -391,7 +417,15 @@ function actualDuration() {
 }
 
 function activeReferences() {
-  return state.mode === "popup_panel" ? state.popupReferences : state.references;
+  if (state.mode === "popup_panel") return state.popupReferences;
+  if (state.mode === "mg_animation") return state.mgReferences;
+  return state.references;
+}
+
+function lockedReferenceIds() {
+  if (state.mode === "popup_panel") return new Set(["popup-background", "popup-panel"]);
+  if (state.mode === "mg_animation") return new Set(["mg-background", "mg-reels", "mg-character"]);
+  return new Set();
 }
 
 function assetCount() {
@@ -435,24 +469,26 @@ function setMode(mode) {
   if (previousMode !== mode) {
     state.modePrompts[previousMode] = $("#prompt").value;
     const savedPrompt = state.modePrompts[mode];
-    const defaultPrompt = mode === "replace" ? replacementPrompt() : mode === "symbol_loop" ? symbolLoopPrompt() : mode === "popup_panel" ? popupPanelPrompt() : $("#prompt").value;
+    const defaultPrompt = mode === "replace" ? replacementPrompt() : mode === "symbol_loop" ? symbolLoopPrompt() : mode === "popup_panel" ? popupPanelPrompt() : mode === "mg_animation" ? mgAnimationPrompt() : $("#prompt").value;
     $("#prompt").value = savedPrompt !== undefined ? savedPrompt : defaultPrompt;
   }
   state.mode = mode;
   if (["extend", "r2v"].includes(mode)) $("#referencePanel").before($("#continuationPanel"));
   $$(".mode-card").forEach(card => card.classList.toggle("active", card.dataset.mode === mode));
   $("#keyframePanel").classList.toggle("hidden", mode !== "fl2va");
-  $("#referencePanel").classList.toggle("hidden", !["r2v", "popup_panel"].includes(mode));
+  $("#referencePanel").classList.toggle("hidden", !["r2v", "popup_panel", "mg_animation"].includes(mode));
+  $("#mgDirectorPanel").classList.toggle("hidden", mode !== "mg_animation");
   $("#replacementPanel").classList.toggle("hidden", mode !== "replace");
   $("#symbolLoopPanel").classList.toggle("hidden", mode !== "symbol_loop");
   $("#continuationPanel").classList.toggle("hidden", !["extend", "r2v"].includes(mode));
-  $("#refSizeWrap").classList.toggle("hidden", !["r2v", "replace", "popup_panel"].includes(mode));
-  $("#promptStep").textContent = mode === "t2v" ? "03" : "04";
-  $("#storyboardHint").textContent = mode === "r2v"
+  $("#refSizeWrap").classList.toggle("hidden", !["r2v", "replace", "popup_panel", "mg_animation"].includes(mode));
+  $("#promptStep").textContent = mode === "t2v" ? "03" : mode === "mg_animation" ? "05" : "04";
+  $("#storyboardStep").textContent = mode === "mg_animation" ? "06" : "05";
+  $("#storyboardHint").textContent = ["r2v", "mg_animation"].includes(mode)
     ? "分鏡圖片會作為構圖參考；出現時間為近似控制"
     : "可加入文字分鏡；中間參考圖片需切換到多模態模式";
-  if (["r2v", "replace", "popup_panel"].includes(mode) && $("#scheduler").value === "simple") $("#scheduler").value = "beta";
-  if (!["r2v", "replace", "popup_panel"].includes(mode) && $("#scheduler").value === "beta") $("#scheduler").value = "simple";
+  if (["r2v", "replace", "popup_panel", "mg_animation"].includes(mode) && $("#scheduler").value === "simple") $("#scheduler").value = "beta";
+  if (!["r2v", "replace", "popup_panel", "mg_animation"].includes(mode) && $("#scheduler").value === "beta") $("#scheduler").value = "simple";
   if (mode === "replace" && !state.replacement.safeDefaultsApplied) {
     $("#megapixels").value = "0.4";
     $("#duration").value = "5";
@@ -467,19 +503,29 @@ function setMode(mode) {
     $("#cameraResponse").value = "stable";
     state.popupPanel.safeDefaultsApplied = true;
   }
+  if (mode === "mg_animation" && !state.mgAnimation.safeDefaultsApplied) {
+    $("#duration").value = "5";
+    $("#motionProfile").value = "none";
+    $("#motionIntensity").value = "2";
+    $("#cameraResponse").value = "stable";
+    state.mgAnimation.safeDefaultsApplied = true;
+  }
   if (mode === "replace" && !$("#prompt").value.trim()) $("#prompt").value = replacementPrompt();
   if (mode === "symbol_loop" && !$("#prompt").value.trim()) $("#prompt").value = symbolLoopPrompt();
   if (mode === "popup_panel" && !$("#prompt").value.trim()) $("#prompt").value = popupPanelPrompt();
+  if (mode === "mg_animation" && !$("#prompt").value.trim()) $("#prompt").value = mgAnimationPrompt();
   const popupMode = mode === "popup_panel";
-  $("#referencePanelTitle").textContent = popupMode ? "彈窗面板素材" : "角色與參考素材";
-  $("#referencePanelDescription").textContent = popupMode ? "背景圖固定；面板與其他表演素材可自由擴充" : "在敘述詞中直接使用名稱代號";
-  $("#referenceInfoTitle").textContent = popupMode ? "背景鎖定" : "自動映射";
-  $("#referenceInfoText").textContent = popupMode ? "背景圖全程固定不動；面板、分數、按鈕、特效與新增素材都可以獨立表演。" : "圖片、動作影片與聲音會自動轉成模型參考標籤，不需要手動編號。";
+  const mgMode = mode === "mg_animation";
+  $("#referencePanelTitle").textContent = popupMode ? "彈窗面板素材" : mgMode ? "MG 分層素材" : "角色與參考素材";
+  $("#referencePanelDescription").textContent = popupMode ? "背景圖固定；面板與其他表演素材可自由擴充" : mgMode ? "背景圖、轉輪帶與角色各自保留身份；仍可新增其他素材" : "在敘述詞中直接使用名稱代號";
+  $("#referenceInfoTitle").textContent = popupMode ? "背景鎖定" : mgMode ? "三層分工" : "自動映射";
+  $("#referenceInfoText").textContent = popupMode ? "背景圖全程固定不動；面板、分數、按鈕、特效與新增素材都可以獨立表演。" : mgMode ? "背景圖負責環境，轉輪帶只控制可見轉輪窗，角色依指定方位表演；不要改動數學轉輪表與圖騰機率。" : "圖片、動作影片與聲音會自動轉成模型參考標籤，不需要手動編號。";
   $("#addReference").classList.remove("hidden");
   state.replacement.defaultPrompt ||= mode === "replace" ? replacementPrompt() : "";
   renderReplacement();
   renderSymbolLoop();
   renderContinuation();
+  renderMgAnimation();
   renderReferences();
   renderStoryboards();
   updateSummary();
@@ -571,29 +617,31 @@ function renderReferences() {
   const list = $("#referenceList");
   const references = activeReferences();
   const popupMode = state.mode === "popup_panel";
+  const mgMode = state.mode === "mg_animation";
+  const lockedIds = lockedReferenceIds();
   $("#referenceEmpty").classList.toggle("hidden", references.length > 0);
   list.innerHTML = references.map((item, index) => `
     <article class="reference-card" data-reference-id="${item.id}">
       <div class="reference-head">
-        <label>名稱代號<input data-ref-field="alias" value="${escapeHtml(item.alias)}" placeholder="例如：小明" ${popupMode && ["popup-background", "popup-panel"].includes(item.id) ? "disabled" : ""}></label>
-        <label>素材類型<select data-ref-field="type" ${popupMode && ["popup-background", "popup-panel"].includes(item.id) ? "disabled" : ""}>${Object.entries(typeLabels).map(([value, label]) => `<option value="${value}" ${item.type === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
-        <button class="delete-button ${popupMode && ["popup-background", "popup-panel"].includes(item.id) ? "hidden" : ""}" data-ref-action="delete" title="刪除素材" type="button">×</button>
+        <label>名稱代號<input data-ref-field="alias" value="${escapeHtml(item.alias)}" placeholder="例如：小明" ${lockedIds.has(item.id) ? "disabled" : ""}></label>
+        <label>素材類型<select data-ref-field="type" ${lockedIds.has(item.id) ? "disabled" : ""}>${Object.entries(typeLabels).map(([value, label]) => `<option value="${value}" ${item.type === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+        <button class="delete-button ${lockedIds.has(item.id) ? "hidden" : ""}" data-ref-action="delete" title="刪除素材" type="button">×</button>
       </div>
-      <div class="reference-body ${popupMode && item.id === "popup-background" ? "single" : ""}">
+      <div class="reference-body ${(popupMode && item.id === "popup-background") || (mgMode && item.id === "mg-background") ? "single" : ""}">
         <div class="asset-zone" data-drop-kind="images">
-          <div class="asset-zone-title"><span>形象圖片 · ${item.images.length}/${popupMode && item.id === "popup-background" ? 1 : 9}</span><button data-ref-action="add-images" type="button">${item.images.length && popupMode && item.id === "popup-background" ? "更換圖片" : "＋加入圖片"}</button></div>
+          <div class="asset-zone-title"><span>形象圖片 · ${item.images.length}/${((popupMode && item.id === "popup-background") || (mgMode && item.id === "mg-background")) ? 1 : 9}</span><button data-ref-action="add-images" type="button">${item.images.length && ((popupMode && item.id === "popup-background") || (mgMode && item.id === "mg-background")) ? "更換圖片" : "＋加入圖片"}</button></div>
           <div class="thumb-grid">
             ${item.images.length ? item.images.map((asset, assetIndex) => `<div class="asset-thumb" style="background-image:url('${asset.url}')" title="${escapeHtml(asset.name)}"><button data-ref-action="remove-image" data-asset-index="${assetIndex}" type="button">×</button></div>`).join("") : `<span class="asset-placeholder">拖入圖片，或加入正面、側面與全身圖</span>`}
           </div>
         </div>
-        <div class="asset-zone ${popupMode && item.id === "popup-background" ? "hidden" : ""}" data-drop-kind="video">
+        <div class="asset-zone ${(popupMode && item.id === "popup-background") || (mgMode && item.id === "mg-background") ? "hidden" : ""}" data-drop-kind="video">
           <div class="asset-zone-title"><span>動作參考影片 · 選填</span><button data-ref-action="add-video" type="button">${item.video ? "更換" : "＋加入影片"}</button></div>
           <div class="thumb-grid">
             ${item.video ? `<div class="asset-thumb video"><span>▶</span><span>${escapeHtml(item.video.name)}</span><button data-ref-action="remove-video" type="button">×</button></div>` : `<span class="asset-placeholder">拖入 MP4、MOV 或 WebM；建議 2–15 秒</span>`}
           </div>
           <label class="check-row"><input data-ref-field="videoUseAudio" type="checkbox" ${item.videoUseAudio ? "checked" : ""}><span>同時參考影片原聲</span></label>
         </div>
-        <div class="asset-zone ${popupMode && item.id === "popup-background" ? "hidden" : ""}" data-drop-kind="audio">
+        <div class="asset-zone ${(popupMode && item.id === "popup-background") || (mgMode && item.id === "mg-background") ? "hidden" : ""}" data-drop-kind="audio">
           <div class="asset-zone-title"><span>對應聲音 · 選填</span><button data-ref-action="add-audio" type="button">${item.audio ? "更換" : "＋加入聲音"}</button></div>
           <div class="thumb-grid">
             ${item.audio ? `<div class="asset-thumb audio"><span>◉</span><span>${escapeHtml(item.audio.name)}</span><button data-ref-action="remove-audio" type="button">×</button></div>` : `<span class="asset-placeholder">拖入 WAV、MP3、FLAC 或影片音訊</span>`}
@@ -604,6 +652,29 @@ function renderReferences() {
       <label class="description-row">固定特徵與素材用途<input data-ref-field="description" value="${escapeHtml(item.description)}" placeholder="例如：固定黑色短髮、藍色外套；背景只參考建築與燈光"></label>
     </article>
   `).join("");
+}
+
+function renderMgAnimation() {
+  const settings = state.mgAnimation;
+  const fields = {
+    mgCharacterPosition: settings.characterPosition,
+    mgCharacterPositionDetail: settings.characterPositionDetail,
+    mgCharacterMotion: settings.characterMotion,
+    mgReelMotionModel: settings.reelMotionModel,
+    mgReelDirection: settings.reelDirection,
+    mgReelStopOrder: settings.reelStopOrder,
+    mgReelStopStagger: settings.reelStopStagger,
+    mgReelMotion: settings.reelMotion,
+    mgSymbolPostStopMotion: settings.symbolPostStopMotion,
+    mgBackgroundMotionLevel: settings.backgroundMotionLevel,
+    mgBackgroundMotion: settings.backgroundMotion,
+    mgCameraMotion: settings.cameraMotion,
+    mgCameraMotionDetail: settings.cameraMotionDetail,
+  };
+  for (const [id, value] of Object.entries(fields)) {
+    const element = $(`#${id}`);
+    if (element && document.activeElement !== element) element.value = value ?? "";
+  }
 }
 
 function renderStoryboards() {
@@ -626,7 +697,7 @@ function renderStoryboards() {
           <label class="wide-field">聲音與音樂<input data-shot-field="sound" value="${escapeHtml(shot.sound)}" placeholder="腳步聲、風聲、低沉配樂"></label>
         </div>
         <div>
-          <div class="shot-image ${shot.image ? "has-image" : ""}" data-shot-action="image" style="${shot.image ? `background-image:url('${shot.image.url}')` : ""}">${state.mode === "r2v" ? (shot.image ? "已加入" : "＋ 分鏡圖") : "文字分鏡"}</div>
+          <div class="shot-image ${shot.image ? "has-image" : ""}" data-shot-action="image" style="${shot.image ? `background-image:url('${shot.image.url}')` : ""}">${["r2v", "mg_animation"].includes(state.mode) ? (shot.image ? "已加入" : "＋ 分鏡圖") : "文字分鏡"}</div>
           <button class="delete-button" data-shot-action="delete" title="刪除鏡頭" type="button">×</button>
         </div>
       </article>
@@ -670,6 +741,21 @@ function collectPayload() {
     continuation_source_asset_id: state.mode === "extend" ? state.continuation.sourceAsset?.id || null : null,
     continuation_merge: state.mode === "extend" && state.continuation.merge,
     continuation_audio: state.continuation.audio,
+    mg_animation: {
+      character_position: state.mgAnimation.characterPosition,
+      character_position_detail: state.mgAnimation.characterPositionDetail.trim(),
+      character_motion: state.mgAnimation.characterMotion.trim(),
+      reel_motion_model: state.mgAnimation.reelMotionModel,
+      reel_direction: state.mgAnimation.reelDirection,
+      reel_stop_order: state.mgAnimation.reelStopOrder,
+      reel_stop_stagger: Number(state.mgAnimation.reelStopStagger),
+      reel_motion: state.mgAnimation.reelMotion.trim(),
+      symbol_post_stop_motion: state.mgAnimation.symbolPostStopMotion.trim(),
+      background_motion_level: state.mgAnimation.backgroundMotionLevel,
+      background_motion: state.mgAnimation.backgroundMotion.trim(),
+      camera_motion: state.mgAnimation.cameraMotion,
+      camera_motion_detail: state.mgAnimation.cameraMotionDetail.trim(),
+    },
     references,
     storyboards: state.storyboards.map(shot => ({
       duration: Number(shot.duration),
@@ -679,7 +765,7 @@ function collectPayload() {
       sound: shot.sound.trim(),
       motion_beats: shot.motionBeats.trim(),
       effects: shot.effects.trim(),
-      image_asset_id: state.mode === "r2v" ? shot.image?.id || null : null,
+      image_asset_id: ["r2v", "mg_animation"].includes(state.mode) ? shot.image?.id || null : null,
     })),
   };
 }
@@ -926,15 +1012,20 @@ async function checkStatus() {
 function addReference() {
   const references = activeReferences();
   const popupMode = state.mode === "popup_panel";
+  const mgMode = state.mode === "mg_animation";
   let alias;
   if (popupMode) {
     const usedAliases = new Set(references.map(item => item.alias.trim().toLocaleLowerCase()));
     let index = 1;
     do alias = `面板素材${index++}`; while (usedAliases.has(alias.toLocaleLowerCase()));
+  } else if (mgMode) {
+    const usedAliases = new Set(references.map(item => item.alias.trim().toLocaleLowerCase()));
+    let index = 1;
+    do alias = `MG素材${index++}`; while (usedAliases.has(alias.toLocaleLowerCase()));
   } else {
     alias = `角色${references.length + 1}`;
   }
-  references.push({ id: uid(), alias, type: popupMode ? "object" : "character", description: "", images: [], video: null, videoUseAudio: false, audio: null, voiceMode: "timbre" });
+  references.push({ id: uid(), alias, type: popupMode || mgMode ? "object" : "character", description: "", images: [], video: null, videoUseAudio: false, audio: null, voiceMode: "timbre" });
   renderReferences();
   updateSummary();
   saveState();
@@ -968,8 +1059,19 @@ function popupPanelPrompt() {
 全程規則：固定鏡頭、固定背景圖、禁止背景運動、禁止鏡頭推拉與晃動；只允許面板、面板內容與壓暗圖層產生動畫。`;
 }
 
+function mgAnimationPrompt() {
+  return `The target video is a polished slot-game main-game animation in one continuous shot.
+
+[Shot 1] Use the uploaded 背景圖, 轉輪帶, and 角色 as three independent visual layers. Keep the full reel window readable, preserve every reel cell's size and center anchor, and keep all titles, payout values, and JP meters unchanged.
+
+The camera remains completely static. The 角色 stays in the selected screen position without covering the reel symbols or dynamic information. The 轉輪帶 performs a clear acceleration, continuous spin, ordered deceleration, mechanical settle, and post-stop symbol reaction. The 背景圖 remains subordinate to the reels and character, using only the selected low-amplitude environmental motion.
+
+Animate only the visible reel-window presentation. Do not change mathematical reel-strip order, symbol frequency, payout values, interface text, or product-owned top and bottom UI. End on a clean, stable, readable final state.`;
+}
+
 function promptTemplate() {
   if (state.mode === "popup_panel") return popupPanelPrompt();
+  if (state.mode === "mg_animation") return mgAnimationPrompt();
   if (state.mode === "r2v") {
     return "場景概述：角色名稱出現在背景名稱所代表的場景中。\n\n[Shot 1, 0s-5s]\n描述角色動作、表情與其他角色的互動。攝影機以中景緩慢推進。\n\nDialogue：角色名稱說：「台詞內容。」\nAudio：描述環境聲、動作聲與背景音樂。\n\n保持所有已命名角色的臉部、服裝與聲音一致，不要混合不同參考素材的特徵。";
   }
@@ -995,6 +1097,18 @@ function bindEvents() {
   });
   ["aspectRatio", "megapixels", "keyframeFit"].forEach(id => {
     $(`#${id}`).addEventListener("change", refreshKeyframes);
+  });
+  $("#mgDirectorPanel").addEventListener("input", event => {
+    const field = event.target.dataset.mgField;
+    if (!field) return;
+    state.mgAnimation[field] = event.target.type === "number" ? Number(event.target.value) : event.target.value;
+    saveState();
+  });
+  $("#mgDirectorPanel").addEventListener("change", event => {
+    const field = event.target.dataset.mgField;
+    if (!field) return;
+    state.mgAnimation[field] = event.target.type === "number" ? Number(event.target.value) : event.target.value;
+    saveState();
   });
   $("#randomSeed").addEventListener("click", () => {
     $("#seed").value = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
@@ -1281,8 +1395,9 @@ function bindEvents() {
     const item = references.find(value => value.id === card.dataset.referenceId);
     const action = actionElement.dataset.refAction;
     try {
-      if (action === "delete" && !(state.mode === "popup_panel" && ["popup-background", "popup-panel"].includes(item.id))) {
+      if (action === "delete" && !lockedReferenceIds().has(item.id)) {
         if (state.mode === "popup_panel") state.popupReferences = references.filter(value => value.id !== item.id);
+        else if (state.mode === "mg_animation") state.mgReferences = references.filter(value => value.id !== item.id);
         else state.references = references.filter(value => value.id !== item.id);
       }
       if (action === "add-images") {
@@ -1323,7 +1438,7 @@ function bindEvents() {
     const shot = state.storyboards.find(value => value.id === card.dataset.shotId);
     if (actionElement.dataset.shotAction === "delete") state.storyboards = state.storyboards.filter(value => value.id !== shot.id);
     if (actionElement.dataset.shotAction === "image") {
-      if (state.mode !== "r2v") return toast("中間分鏡圖片需要使用多模態參考模式。", true);
+      if (!["r2v", "mg_animation"].includes(state.mode)) return toast("中間分鏡圖片需要使用多模態參考模式。", true);
       const files = await chooseFiles("image/*");
       if (files[0]) shot.image = await uploadFile(files[0], "storyboard-image");
     }

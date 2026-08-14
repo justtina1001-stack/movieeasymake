@@ -185,9 +185,88 @@ def _storyboard_text(storyboards: list[dict[str, Any]], aliases: dict[str, str])
     return lines, image_assets
 
 
+def _mg_animation_description(payload: dict[str, Any], aliases: dict[str, str], duration: float) -> str:
+    settings = payload.get("mg_animation") or {}
+    position_labels = {
+        "top": "upper area",
+        "upper_left": "upper-left area",
+        "upper_right": "upper-right area",
+        "left": "left side",
+        "center": "center",
+        "right": "right side",
+        "lower_left": "lower-left area",
+        "lower_right": "lower-right area",
+        "bottom": "lower area",
+        "custom": "custom position",
+    }
+    reel_model_labels = {
+        "continuous": "continuous full-strip reels",
+        "independent": "independent single-cell reels",
+        "cascade": "cascading or hybrid reel field",
+    }
+    direction_labels = {
+        "top_down": "from top to bottom",
+        "bottom_up": "from bottom to top",
+        "custom": "in the custom direction described below",
+    }
+    stop_order_labels = {
+        "left_right": "left to right",
+        "right_left": "right to left",
+        "simultaneous": "all reels at the same time",
+        "custom": "in the custom order described below",
+    }
+    background_labels = {
+        "locked": "remains completely static",
+        "subtle": "uses only subtle low-amplitude environmental motion",
+        "active": "performs the requested environmental animation without disturbing the reel geometry",
+    }
+    camera_labels = {
+        "static": "The camera remains completely static.",
+        "push_in": "The camera slowly pushes in with small amplitude.",
+        "pull_out": "The camera slowly pulls out with small amplitude.",
+        "pan": "The camera makes one gentle, low-amplitude pan while keeping the reel window readable.",
+        "custom": "Follow the custom camera direction below.",
+    }
+
+    character = aliases.get("角色", "角色")
+    reels = aliases.get("轉輪帶", "轉輪帶")
+    background = aliases.get("背景圖", "背景圖")
+    position_key = _clean_text(settings.get("character_position")) or "right"
+    position = position_labels.get(position_key, position_labels["right"])
+    position_detail = _clean_text(settings.get("character_position_detail"))
+    character_motion = _rewrite_aliases(_clean_text(settings.get("character_motion")), aliases)
+    reel_model = reel_model_labels.get(_clean_text(settings.get("reel_motion_model")) or "continuous", reel_model_labels["continuous"])
+    reel_direction = direction_labels.get(_clean_text(settings.get("reel_direction")) or "top_down", direction_labels["top_down"])
+    stop_order = stop_order_labels.get(_clean_text(settings.get("reel_stop_order")) or "left_right", stop_order_labels["left_right"])
+    stagger = min(1.5, max(0.0, _safe_float(settings.get("reel_stop_stagger"), 0.18)))
+    reel_motion = _rewrite_aliases(_clean_text(settings.get("reel_motion")), aliases)
+    symbol_motion = _rewrite_aliases(_clean_text(settings.get("symbol_post_stop_motion")), aliases)
+    background_level = background_labels.get(_clean_text(settings.get("background_motion_level")) or "subtle", background_labels["subtle"])
+    background_motion = _rewrite_aliases(_clean_text(settings.get("background_motion")), aliases)
+    camera_key = _clean_text(settings.get("camera_motion")) or "static"
+    camera_motion = camera_labels.get(camera_key, camera_labels["static"])
+    camera_detail = _clean_text(settings.get("camera_motion_detail"))
+
+    opening_end = min(0.5, duration * 0.1)
+    spin_end = duration * 0.7
+    performance_end = duration * 0.9
+    character_position = f"{position}; {position_detail}" if position_detail else position
+    lines = [
+        "[Shot 1] The target video is a polished slot-game main-game animation in one continuous shot.",
+        f"{camera_motion}{(' ' + camera_detail) if camera_detail else ''}",
+        f"From 0.00s to {opening_end:.2f}s, establish {background}, {reels}, and {character} as three visually separate layers. Keep the reel window fully readable and keep the character clear of reel symbols, titles, meters, and dynamic values.",
+        f"Character layer — Place {character} in the {character_position}. {character_motion or 'The character performs one restrained anticipation, then reacts naturally to the reel result with clear weight transfer, readable expression, and a stable final pose.'}",
+        f"Visible reel-window layer — Treat {reels} as {reel_model}. From {opening_end:.2f}s to {spin_end:.2f}s, the visible symbols travel {reel_direction}, accelerate smoothly, maintain equal cell size and center anchors, then decelerate and stop {stop_order} with about {stagger:.2f}s between stops. {reel_motion or 'Use readable motion blur during travel, a short mechanical settle on each stop, and no symbol identity changes while the reels are moving.'}",
+        f"Post-stop symbol performance — From {spin_end:.2f}s to {performance_end:.2f}s, begin only after the relevant reel has fully settled. {symbol_motion or 'The winning symbols perform one clear primary action with one supporting glow response, then return to their exact cell centers without changing reel geometry.'}",
+        f"Background layer — {background} {background_level}. {background_motion or 'Keep distant motion soft, low contrast, and subordinate to the reels and character.'}",
+        f"From {performance_end:.2f}s to {duration:.2f}s, all layers settle into a clean readable final state; preserve the original layout, subject identities, text legibility, and exact reel-stop geometry.",
+    ]
+    return "\n".join(lines)
+
+
 def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     mode = _clean_text(payload.get("mode")) or "t2v"
-    if mode not in {"t2v", "fl2va", "r2v", "replace", "extend", "symbol_loop", "popup_panel"}:
+    if mode not in {"t2v", "fl2va", "r2v", "replace", "extend", "symbol_loop", "popup_panel", "mg_animation"}:
         raise RequestError("不支援的生成模式。")
 
     aspect_ratio = _clean_text(payload.get("aspect_ratio")) or "16:9"
@@ -199,7 +278,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     if seed < 0:
         seed = 1
     steps = min(40, max(4, _safe_int(payload.get("steps"), 20)))
-    reference_mode = mode in {"r2v", "replace", "popup_panel"}
+    reference_mode = mode in {"r2v", "replace", "popup_panel", "mg_animation"}
     scheduler = _clean_text(payload.get("scheduler")) or ("beta" if reference_mode else "simple")
     if scheduler not in {"simple", "beta", "normal", "sgm_uniform", "karras"}:
         scheduler = "beta" if reference_mode else "simple"
@@ -244,6 +323,26 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             raise RequestError("彈窗面板動畫的『面板』需要至少一張圖片；同一欄位可以加入多張面板素材。")
         extra_references = [item for item in references if item is not background and item is not panel]
         references = [background, panel, *extra_references]
+    if mode == "mg_animation":
+        backgrounds = [item for item in references if _clean_text(item.get("alias")) == "背景圖"]
+        reels = [item for item in references if _clean_text(item.get("alias")) == "轉輪帶"]
+        characters = [item for item in references if _clean_text(item.get("alias")) == "角色"]
+        if len(backgrounds) != 1 or len(reels) != 1 or len(characters) != 1:
+            raise RequestError("MG 動畫需要保留唯一的『背景圖』、『轉輪帶』與『角色』素材欄位；其他素材可以自由新增。")
+        background, reel, character = backgrounds[0], reels[0], characters[0]
+        if background.get("type") != "background" or reel.get("type") != "object" or character.get("type") != "character":
+            raise RequestError("MG 動畫的『背景圖』必須是背景類型、『轉輪帶』必須是物件類型、『角色』必須是角色類型。")
+        if len(background.get("image_asset_ids") or []) != 1:
+            raise RequestError("MG 動畫的『背景圖』需要剛好一張圖片，以便維持底板構圖。")
+        if not (reel.get("image_asset_ids") or []):
+            raise RequestError("MG 動畫的『轉輪帶』需要至少一張可見轉輪窗或轉輪帶參考圖片。")
+        if not (character.get("image_asset_ids") or []):
+            raise RequestError("MG 動畫的『角色』需要至少一張形象參考圖片。")
+        extra_references = [
+            item for item in references
+            if item is not background and item is not reel and item is not character
+        ]
+        references = [background, reel, character, *extra_references]
     if mode == "replace":
         if len(references) != 1:
             raise RequestError("角色替換模式只需要一個新角色，請勿另外加入原角色。")
@@ -403,33 +502,56 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             raise RequestError("多模態模式至少需要圖片、影片或聲音其中一種。")
 
         rewritten_prompt = _rewrite_aliases(base_prompt, aliases)
-        sections = []
-        if definitions:
-            sections.append("subject_definitions:\n" + "\n".join(definitions))
-        if assignments:
-            sections.append("reference_assignments:\n" + "\n".join(assignments))
-        if motion_direction:
-            sections.append("motion_direction:\n" + motion_direction)
-        sections.append("detailed_description:\n" + rewritten_prompt)
-        if shot_lines:
-            sections.append("storyboard_timeline:\n" + "\n".join(shot_lines))
-        if mode == "replace":
-            sections.append(
-                "replacement_rules:\n只生成 <Subject 1> 作為指定位置的新角色；原角色的身份與外觀必須完全消失，"
-                "不得同時出現原角色與新角色，也不得把兩者的臉、頭髮、服裝或身體特徵混合。"
-                "除指定角色外，盡量維持原影片的場景、構圖、鏡頭、道具與其他人物。"
-            )
-        elif mode == "popup_panel":
-            sections.append(
-                "popup_panel_rules:\n"
-                "<Picture 1> 是背景圖，必須從第一幀到最後一幀逐像素保持固定；禁止平移、縮放、變形、閃爍、亮度漂移、景深變化、視差或新增物件。"
-                "除 <Picture 1> 外，其餘已命名參考素材都屬於前景表演素材，可包含一個或多個面板、文字、分數、按鈕、標題、裝飾與特效；"
-                "這些素材只能在前景或面板範圍內依照敘述產生動畫，不得改變、遮換或重新生成背景圖。"
-                "鏡頭必須完全鎖定。彈窗面板消失後，最後畫面必須只剩與 <Picture 1> 完全一致的背景圖。"
-            )
+        if mode == "mg_animation":
+            timeline = _mg_animation_description(payload, aliases, length / FPS)
+            retention = assignments + [
+                "Keep the background, visible reel window, and character as independent visual layers; do not merge, duplicate, or deform their identities.",
+                "Preserve every reel cell's width, height, pitch, center anchor, mask, and symbol identity. Animate only the visible reel-window presentation; never infer or alter mathematical reel-strip order or symbol frequency.",
+                "Keep titles, payout values, JP meters, and product-owned top or bottom UI readable and unchanged. Any glow or overflow effect must remain a separate restrained overlay.",
+            ]
+            detail_parts = [timeline]
+            if motion_direction:
+                detail_parts.append("Motion direction: " + motion_direction)
+            detail_parts.append("Additional user direction:\n" + rewritten_prompt)
+            if shot_lines:
+                detail_parts.append("Storyboard timeline:\n" + "\n".join(shot_lines))
+            sections = [
+                "subject_definitions:\n" + ("\n".join(definitions) if definitions else "N/A"),
+                "summary:\nA polished slot-game main-game performance in which the character, visible reel window, and background follow separate, readable animation responsibilities.",
+                "retention_analysis:\n" + "\n".join(retention),
+                "detailed_description:\n" + "\n\n".join(detail_parts),
+                "overall_soundscape:\nSynchronized reel-spin whirr, controlled deceleration, distinct stop clicks, and a restrained win chime after the symbols settle. No spoken dialogue unless explicitly requested.",
+                "non_diegetic_music:\nN/A unless explicitly requested in the user direction.",
+            ]
+            final_prompt = "\n\n".join(sections)
         else:
-            sections.append("retention_rules:\n嚴格保持每個已命名角色的身份、臉部、服裝與聲音歸屬；不要把背景、風格或其他角色的特徵互相混合；動作參考只控制動態與時序，不得覆蓋角色身份；保持肢體結構、重心轉移、接觸和反作用力連續。")
-        final_prompt = "\n\n".join(sections)
+            sections = []
+            if definitions:
+                sections.append("subject_definitions:\n" + "\n".join(definitions))
+            if assignments:
+                sections.append("reference_assignments:\n" + "\n".join(assignments))
+            if motion_direction:
+                sections.append("motion_direction:\n" + motion_direction)
+            sections.append("detailed_description:\n" + rewritten_prompt)
+            if shot_lines:
+                sections.append("storyboard_timeline:\n" + "\n".join(shot_lines))
+            if mode == "replace":
+                sections.append(
+                    "replacement_rules:\n只生成 <Subject 1> 作為指定位置的新角色；原角色的身份與外觀必須完全消失，"
+                    "不得同時出現原角色與新角色，也不得把兩者的臉、頭髮、服裝或身體特徵混合。"
+                    "除指定角色外，盡量維持原影片的場景、構圖、鏡頭、道具與其他人物。"
+                )
+            elif mode == "popup_panel":
+                sections.append(
+                    "popup_panel_rules:\n"
+                    "<Picture 1> 是背景圖，必須從第一幀到最後一幀逐像素保持固定；禁止平移、縮放、變形、閃爍、亮度漂移、景深變化、視差或新增物件。"
+                    "除 <Picture 1> 外，其餘已命名參考素材都屬於前景表演素材，可包含一個或多個面板、文字、分數、按鈕、標題、裝飾與特效；"
+                    "這些素材只能在前景或面板範圍內依照敘述產生動畫，不得改變、遮換或重新生成背景圖。"
+                    "鏡頭必須完全鎖定。彈窗面板消失後，最後畫面必須只剩與 <Picture 1> 完全一致的背景圖。"
+                )
+            else:
+                sections.append("retention_rules:\n嚴格保持每個已命名角色的身份、臉部、服裝與聲音歸屬；不要把背景、風格或其他角色的特徵互相混合；動作參考只控制動態與時序，不得覆蓋角色身份；保持肢體結構、重心轉移、接觸和反作用力連續。")
+            final_prompt = "\n\n".join(sections)
     else:
         shot_lines, storyboard_images = _storyboard_text(storyboards, {})
         if storyboard_images:
@@ -493,7 +615,7 @@ def build_workflow(compiled: CompiledRequest, uploaded_assets: dict[str, str], o
 
     diffusion_model = (
         "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-        if compiled.mode in {"r2v", "replace", "popup_panel"}
+        if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"}
         else "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     )
     model = add("UNETLoader", {"unet_name": diffusion_model, "weight_dtype": "default"}, "MiniMax H3 Model")
@@ -533,7 +655,7 @@ def build_workflow(compiled: CompiledRequest, uploaded_assets: dict[str, str], o
         "height": compiled.height,
         "length": compiled.length,
     }
-    if compiled.mode in {"r2v", "replace", "popup_panel"}:
+    if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"}:
         condition_inputs["audio_vae"] = [audio_vae, 0]
         condition_inputs["ref_image_size"] = compiled.ref_image_size
         for index, asset_id in enumerate(compiled.reference_images):

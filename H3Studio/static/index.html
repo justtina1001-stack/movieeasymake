@@ -32,7 +32,7 @@
       </div>
       <div class="hero-meter">
         <div><span>GPU</span><strong id="deviceName">RTX 5060 Ti</strong></div>
-        <div><span>工作流</span><strong>7 種</strong></div>
+        <div><span>工作流</span><strong>8 種</strong></div>
         <div><span>執行方式</span><strong id="executionMode">本機 GPU</strong></div>
       </div>
     </section>
@@ -78,13 +78,18 @@
           <span><strong>彈窗面板動畫</strong><small>固定底板，製作面板進場、表演與退場</small></span>
           <i></i>
         </button>
+        <button class="mode-card" data-mode="mg_animation" type="button">
+          <span class="mode-icon mg-icon">MG</span>
+          <span><strong>MG 動畫</strong><small>角色、轉輪帶與背景分層表演</small></span>
+          <i></i>
+        </button>
       </div>
     </section>
 
     <div class="studio-grid">
       <div class="editor-column">
         <section class="panel settings-panel">
-          <div class="panel-title"><span class="step-number">02</span><div><h2>影片設定</h2><p>七種模式共用的輸出規格</p></div></div>
+          <div class="panel-title"><span class="step-number">02</span><div><h2>影片設定</h2><p>八種模式共用的輸出規格</p></div></div>
           <div class="job-identity">
             <label class="job-name-field"><span>本次任務名稱</span><input id="jobName" maxlength="80" placeholder="例如：金色圖騰循環 01"></label>
             <div class="filename-rule"><span>預計儲存檔名</span><strong id="filenamePreview">未命名時：年-月-日_時-分-秒_微秒</strong><small>有任務名稱就優先使用名稱；空白時才使用實際開始生成時間</small></div>
@@ -174,6 +179,45 @@
           <div id="referenceEmpty" class="empty-state"><span>◎</span><strong>尚未加入參考素材</strong><p>先新增一位角色或一個背景。</p></div>
         </section>
 
+        <section id="mgDirectorPanel" class="panel mg-director-panel hidden">
+          <div class="panel-title"><span class="step-number">04</span><div><h2>MG 分層動態導演</h2><p>分開設定角色、可見轉輪窗與背景；工具會編譯成官方 Ref2VA 六段式提示詞</p></div></div>
+          <div class="mg-layer-grid">
+            <article class="mg-layer-card character-layer">
+              <div class="mg-layer-heading"><span>01</span><div><strong>角色動態</strong><small>先決定角色在畫面中的位置，再描述完整動作鏈</small></div></div>
+              <div class="form-grid two">
+                <label>角色方位<select id="mgCharacterPosition" data-mg-field="characterPosition"><option value="top">上方</option><option value="upper_left">左上方</option><option value="upper_right">右上方</option><option value="left">左方</option><option value="center">中央</option><option value="right">右方</option><option value="lower_left">左下方</option><option value="lower_right">右下方</option><option value="bottom">下方</option><option value="custom">自訂</option></select></label>
+                <label>位置補充<input id="mgCharacterPositionDetail" data-mg-field="characterPositionDetail" placeholder="例如：轉輪右側，不遮擋圖騰與分數"></label>
+              </div>
+              <label>角色表演<textarea id="mgCharacterMotion" data-mg-field="characterMotion" rows="4" placeholder="預備動作 → 重心轉移 → 主要動作 → 反作用 → 表情與收勢"></textarea></label>
+            </article>
+
+            <article class="mg-layer-card reel-layer">
+              <div class="mg-layer-heading"><span>02</span><div><strong>轉輪帶與圖騰</strong><small>只控制可見轉輪窗；不改變數學轉輪表、圖騰機率或停輪格幾何</small></div></div>
+              <div class="form-grid four mg-reel-controls">
+                <label>轉輪運動模型<select id="mgReelMotionModel" data-mg-field="reelMotionModel"><option value="continuous">連續整帶轉輪</option><option value="independent">獨立單格轉輪</option><option value="cascade">消除／級聯／混合</option></select></label>
+                <label>圖騰移動方向<select id="mgReelDirection" data-mg-field="reelDirection"><option value="top_down">由上往下</option><option value="bottom_up">由下往上</option><option value="custom">依文字自訂</option></select></label>
+                <label>停輪順序<select id="mgReelStopOrder" data-mg-field="reelStopOrder"><option value="left_right">由左至右依序停輪</option><option value="right_left">由右至左依序停輪</option><option value="simultaneous">同時停輪</option><option value="custom">依文字自訂</option></select></label>
+                <label>停輪間隔<div class="field-unit"><input id="mgReelStopStagger" data-mg-field="reelStopStagger" type="number" min="0" max="1.5" step="0.01"><span>秒</span></div></label>
+              </div>
+              <div class="form-grid two mg-text-grid">
+                <label>旋轉、減速與停輪<textarea id="mgReelMotion" data-mg-field="reelMotion" rows="4" placeholder="加速 → 穩定旋轉 → 依序減速 → 機械回彈 → 停穩"></textarea></label>
+                <label>停輪後圖騰表演<textarea id="mgSymbolPostStopMotion" data-mg-field="symbolPostStopMotion" rows="4" placeholder="所有軸停穩後，中獎圖騰才開始放大、發光或做一次主動作"></textarea></label>
+              </div>
+            </article>
+
+            <article class="mg-layer-card background-layer">
+              <div class="mg-layer-heading"><span>03</span><div><strong>背景與鏡頭</strong><small>環境動態保持低對比，鏡頭預設固定，避免影響轉輪可讀性</small></div></div>
+              <div class="form-grid three">
+                <label>背景動態強度<select id="mgBackgroundMotionLevel" data-mg-field="backgroundMotionLevel"><option value="locked">完全固定</option><option value="subtle">輕微環境動態</option><option value="active">明顯環境表演</option></select></label>
+                <label>鏡頭方式<select id="mgCameraMotion" data-mg-field="cameraMotion"><option value="static">固定鏡頭</option><option value="push_in">小幅緩慢推進</option><option value="pull_out">小幅緩慢拉遠</option><option value="pan">小幅平移</option><option value="custom">依文字自訂</option></select></label>
+                <label>鏡頭補充<input id="mgCameraMotionDetail" data-mg-field="cameraMotionDetail" placeholder="例如：保持完整轉輪窗在安全區內"></label>
+              </div>
+              <label>背景表演<textarea id="mgBackgroundMotion" data-mg-field="backgroundMotion" rows="4" placeholder="例如：遠景環境光緩慢流動，少量粒子漂移，背景不與轉輪和角色搶焦"></textarea></label>
+            </article>
+          </div>
+          <div class="replacement-safety"><strong>MG 製作規則</strong><span>角色不得遮擋圖騰、標題、分數與 JP 數值；各停輪格尺寸和中心保持一致；文字與動態數值維持可讀並建議在後製中獨立合成。</span></div>
+        </section>
+
         <section id="replacementPanel" class="panel hidden">
           <div class="panel-title"><span class="step-number">03</span><div><h2>角色替換素材</h2><p>只設定新角色與原始表演影片，不要再加入舊角色</p></div></div>
           <div class="form-grid two replacement-fields">
@@ -229,7 +273,7 @@
 
         <section class="panel storyboard-panel">
           <div class="panel-title action-title">
-            <div><span class="step-number">05</span><div><h2>分鏡時間軸</h2><p id="storyboardHint">可加入文字分鏡；多模態模式還能上傳構圖參考圖</p></div></div>
+            <div><span id="storyboardStep" class="step-number">05</span><div><h2>分鏡時間軸</h2><p id="storyboardHint">可加入文字分鏡；多模態模式還能上傳構圖參考圖</p></div></div>
             <button id="addStoryboard" class="button secondary" type="button">＋ 新增鏡頭</button>
           </div>
           <div id="storyboardList" class="storyboard-list"></div>
@@ -354,7 +398,7 @@
               <article><strong>I2VA</strong><span>首尾圖片 · 只有首圖</span><p>首圖是 0.00 秒的精確第一幀，再向後發展動作。</p></article>
               <article><strong>FL2VA</strong><span>首尾圖片 · 兩張圖</span><p>描述由第一幀逐步收斂到最後一幀的連續路徑。</p></article>
               <article><strong>L2VA</strong><span>首尾圖片 · 只有尾圖</span><p>推導合理的開場，並在結尾準確落到指定圖片。</p></article>
-              <article><strong>Ref2VA</strong><span>多模態／替換／續接</span><p>圖片、影片、聲音用來定義角色、場景、動作或編輯關係。</p></article>
+              <article><strong>Ref2VA</strong><span>多模態／替換／續接／MG 動畫</span><p>圖片、影片、聲音用來定義角色、場景、可見轉輪窗、動作或編輯關係。</p></article>
             </div>
             <div class="guide-code-block"><div><strong>官方 Base 核心欄位</strong><button type="button" data-copy-guide="base-schema">複製</button></div><pre id="guideCodeBase">integrated_multimodal_description: [Shot 1] ...
 
@@ -404,6 +448,7 @@ non_diegetic_music: ...</pre></div>
               <article><strong>彈窗面板</strong><p>背景全程鎖定，只讓面板、分數、按鈕、裝飾、壓暗層與粒子表演，結尾只留下原背景。</p></article>
               <article><strong>轉場進場</strong><p>寫清楚起始位置、移動或縮放路徑、撞擊／回彈、次級動態，以及最後穩定停留狀態。</p></article>
               <article><strong>角色表演</strong><p>依序描述預備動作、重心轉移、主要動作、接觸反作用、跟隨動作、表情與收勢。</p></article>
+              <article><strong>MG 動畫</strong><p>角色先定義方位；可見轉輪窗寫清楚運動模型、方向、停輪順序與停輪後表演；背景維持低對比且不改變數學轉輪表。</p></article>
             </div>
             <div class="guide-warning"><strong>製作提醒</strong><span>模型生成具有隨機性。像素級背景鎖定、精確文字、透明通道與無縫循環都應在產出後再次檢查，必要時進行穩定、去背或合成。</span></div>
           </section>
