@@ -516,6 +516,15 @@ function setMode(mode) {
   if (mode === "mg_animation" && !$("#prompt").value.trim()) $("#prompt").value = mgAnimationPrompt();
   const popupMode = mode === "popup_panel";
   const mgMode = mode === "mg_animation";
+  $("#promptPanelTitle").textContent = mgMode ? "整體情境補充（選填）" : "影片敘述";
+  $("#promptPanelDescription").textContent = mgMode
+    ? "上方三層動態會自動整合；這裡只補充跨圖層事件、故事與聲音"
+    : "描述事件、動作、鏡頭、台詞和聲音";
+  $("#mgPromptInfo").classList.toggle("hidden", !mgMode);
+  $("#prompt").placeholder = mgMode
+    ? "例如：第三軸停輪後出現中獎結果，角色立刻看向中獎圖騰並歡呼；背景光線同步亮起，播放停輪聲與短促中獎音效。若沒有額外需求，可保留預設內容。"
+    : "例如：小明走進神殿，看見金色佛像後停下腳步。攝影機從背後緩慢推進，小明轉頭說：「有人在這裡嗎？」背景只有微弱風聲與遠處鐘聲。";
+  $("#insertPromptTemplate").textContent = mgMode ? "插入整體補充範本" : "插入提示詞範本";
   $("#referencePanelTitle").textContent = popupMode ? "彈窗面板素材" : mgMode ? "MG 分層素材" : "角色與參考素材";
   $("#referencePanelDescription").textContent = popupMode ? "背景圖固定；面板與其他表演素材可自由擴充" : mgMode ? "背景圖、轉輪帶與角色各自保留身份；仍可新增其他素材" : "在敘述詞中直接使用名稱代號";
   $("#referenceInfoTitle").textContent = popupMode ? "背景鎖定" : mgMode ? "三層分工" : "自動映射";

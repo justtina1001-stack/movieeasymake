@@ -266,7 +266,8 @@
         </section>
 
         <section class="panel prompt-panel">
-          <div class="panel-title"><span class="step-number" id="promptStep">03</span><div><h2>影片敘述</h2><p>描述事件、動作、鏡頭、台詞和聲音</p></div></div>
+          <div class="panel-title"><span class="step-number" id="promptStep">03</span><div><h2 id="promptPanelTitle">影片敘述</h2><p id="promptPanelDescription">描述事件、動作、鏡頭、台詞和聲音</p></div></div>
+          <div id="mgPromptInfo" class="info-strip mg-prompt-info hidden"><strong>會自動整合</strong><span>角色、轉輪帶、背景與鏡頭的設定會由工具自動整理成一份官方 Ref2VA 提示詞，再一次送給 AI 生成。這裡不用重複填寫，只需補充跨圖層互動、整體故事、聲音或特殊時間安排。</span></div>
           <textarea id="prompt" rows="10" placeholder="例如：小明走進神殿，看見金色佛像後停下腳步。攝影機從背後緩慢推進，小明轉頭說：「有人在這裡嗎？」背景只有微弱風聲與遠處鐘聲。"></textarea>
           <div class="prompt-footer"><span id="promptCount">0 字</span><button id="insertPromptTemplate" class="text-button" type="button">插入提示詞範本</button></div>
         </section>
