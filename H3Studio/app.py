@@ -97,6 +97,53 @@ def paginate_job_records(records: list[dict[str, Any]], page: int, page_size: in
     }
 
 
+def sort_job_records(records: Any) -> list[dict[str, Any]]:
+    return sorted(
+        records,
+        key=lambda job: (bool(job.get("favorite")), str(job.get("created_at") or "")),
+        reverse=True,
+    )
+
+
+def history_execution_timing(history: dict[str, Any]) -> dict[str, Any]:
+    messages = (history.get("status") or {}).get("messages") or []
+    started_ms: float | None = None
+    finished_ms: float | None = None
+    for message in messages:
+        if not isinstance(message, list) or len(message) < 2 or not isinstance(message[1], dict):
+            continue
+        event, data = message[0], message[1]
+        timestamp = data.get("timestamp")
+        if not isinstance(timestamp, (int, float)):
+            continue
+        if event == "execution_start":
+            started_ms = float(timestamp)
+        elif event in {"execution_success", "execution_error", "execution_interrupted"}:
+            finished_ms = float(timestamp)
+    if started_ms is None or finished_ms is None or finished_ms < started_ms:
+        return {}
+    return {
+        "generation_started_at": datetime.fromtimestamp(started_ms / 1000, timezone.utc).isoformat(),
+        "finished_at": datetime.fromtimestamp(finished_ms / 1000, timezone.utc).isoformat(),
+        "execution_seconds": round((finished_ms - started_ms) / 1000, 3),
+    }
+
+
+def request_asset_ids(value: Any, key: str = "") -> set[str]:
+    found: set[str] = set()
+    if key.endswith("_asset_id") and isinstance(value, str) and SAFE_ID.fullmatch(value):
+        found.add(value)
+    elif key.endswith("_asset_ids") and isinstance(value, list):
+        found.update(item for item in value if isinstance(item, str) and SAFE_ID.fullmatch(item))
+    elif isinstance(value, dict):
+        for child_key, child in value.items():
+            found.update(request_asset_ids(child, str(child_key)))
+    elif isinstance(value, list):
+        for child in value:
+            found.update(request_asset_ids(child, key))
+    return found
+
+
 def flatten_transparent_image(path: Path) -> bool:
     if path.suffix.lower() not in TRANSPARENCY_EXTENSIONS:
         return False
@@ -524,6 +571,7 @@ class JobManager:
                 job["status"] = "interrupted"
                 job["error"] = "工具上次關閉時工作尚未完成。"
             job.setdefault("name", "")
+            job.setdefault("favorite", False)
             self.jobs[job["id"]] = job
 
     def _persist(self, job: dict[str, Any]) -> None:
@@ -540,6 +588,7 @@ class JobManager:
         job = {
             "id": job_id,
             "name": clean_job_name(raw_request.get("job_name")),
+            "favorite": False,
             "mode": compiled.mode,
             "status": "queued",
             "progress": 0,
@@ -586,6 +635,7 @@ class JobManager:
         compiled: CompiledRequest,
         prompt_id: str,
         output: dict[str, str],
+        history: dict[str, Any] | None = None,
     ) -> None:
         continuation_path = await self.cache_output(job_id, output)
         job = self.jobs[job_id]
@@ -597,6 +647,7 @@ class JobManager:
             "error": None,
             "prompt_id": prompt_id,
             "output": output,
+            **(history_execution_timing(history or {}) or self.finish_timing(job_id)),
         }
         if compiled.mode == "extend" and compiled.continuation_merge:
             self.update(job_id, progress=99, current_node="串接上一段影片")
@@ -621,6 +672,37 @@ class JobManager:
                 updates["merge_error"] = f"續集片段已完成，但自動串接失敗：{merge_error}"
         self.update(job_id, **updates)
 
+    def finish_timing(self, job_id: str) -> dict[str, Any]:
+        finished = datetime.now(timezone.utc)
+        updates: dict[str, Any] = {"finished_at": finished.isoformat()}
+        started_value = self.jobs[job_id].get("generation_started_at")
+        if not started_value:
+            return updates
+        try:
+            started = datetime.fromisoformat(str(started_value))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            updates["execution_seconds"] = round(max(0.0, (finished - started).total_seconds()), 3)
+        except ValueError:
+            pass
+        return updates
+
+    async def backfill_completed_timings(self) -> None:
+        candidates = [
+            job for job in self.jobs.values()
+            if job.get("status") == "completed" and job.get("prompt_id") and job.get("execution_seconds") is None
+        ]
+        semaphore = asyncio.Semaphore(8)
+
+        async def backfill(job: dict[str, Any]) -> None:
+            async with semaphore:
+                history = await self.comfy.get_history(str(job["prompt_id"]))
+            timing = history_execution_timing(history)
+            if timing:
+                self.update(str(job["id"]), **timing)
+
+        await asyncio.gather(*(backfill(job) for job in candidates), return_exceptions=True)
+
     async def reconcile_job(self, job_id: str, wait: bool = False) -> bool:
         job = self.jobs.get(job_id)
         if not job or not job.get("prompt_id") or job.get("status") in {"completed", "cancelled"}:
@@ -638,13 +720,14 @@ class JobManager:
                 try:
                     raw_request = json.loads((JOB_DIR / f"{job_id}.request.json").read_text(encoding="utf-8"))
                     compiled = compile_request(raw_request)
-                    await self.complete_job(job_id, compiled, prompt_id, output)
+                    await self.complete_job(job_id, compiled, prompt_id, output, history)
                     return True
                 except Exception as error:
                     self.update(job_id, status="failed", current_node=None, error=f"影片已生成，但匯入操作面板失敗：{error}")
                     return False
             if state == "error":
-                self.update(job_id, status="failed", current_node=None, error=self.comfy.history_error(history))
+                timing = history_execution_timing(history) or self.finish_timing(job_id)
+                self.update(job_id, status="failed", current_node=None, error=self.comfy.history_error(history), **timing)
                 return False
             if not wait:
                 return False
@@ -734,11 +817,11 @@ class JobManager:
                 output = find_video_output(history)
                 if not output:
                     raise RuntimeError("ComfyUI 已完成，但沒有回傳影片檔案。")
-                await self.complete_job(job_id, compiled, prompt_id, output)
+                await self.complete_job(job_id, compiled, prompt_id, output, history)
         except asyncio.CancelledError:
-            self.update(job_id, status="cancelled", current_node=None, error="工作已取消。")
+            self.update(job_id, status="cancelled", current_node=None, error="工作已取消。", **self.finish_timing(job_id))
         except Exception as error:
-            self.update(job_id, status="failed", current_node=None, error=str(error))
+            self.update(job_id, status="failed", current_node=None, error=str(error), **self.finish_timing(job_id))
 
     async def cancel(self, job_id: str) -> None:
         if job_id not in self.jobs:
@@ -747,7 +830,7 @@ class JobManager:
         if self.jobs[job_id].get("status") == "running":
             await self.comfy.interrupt()
         if self.jobs[job_id].get("status") == "queued":
-            self.update(job_id, status="cancelled", error="工作已取消。")
+            self.update(job_id, status="cancelled", error="工作已取消。", finished_at=utc_now())
 
 
 def find_video_output(value: Any) -> dict[str, str] | None:
@@ -1009,7 +1092,7 @@ def create_app() -> web.Application:
             return json_response_error(error)
 
     async def list_jobs(request: web.Request) -> web.Response:
-        ordered = sorted(jobs.jobs.values(), key=lambda job: job["created_at"], reverse=True)
+        ordered = sort_job_records(jobs.jobs.values())
         if not any(key in request.query for key in ("page", "page_size", "q")):
             return web.json_response(ordered[:50])
         try:
@@ -1020,7 +1103,7 @@ def create_app() -> web.Application:
         return web.json_response(paginate_job_records(ordered, page, page_size, request.query.get("q", "")))
 
     async def job_options(_: web.Request) -> web.Response:
-        ordered = sorted(jobs.jobs.values(), key=lambda job: job["created_at"], reverse=True)
+        ordered = sort_job_records(jobs.jobs.values())
         return web.json_response([
             job for job in ordered if job.get("status") == "completed" and job.get("output")
         ])
@@ -1047,6 +1130,59 @@ def create_app() -> web.Application:
             jobs.update(job_id, name=clean_job_name(payload.get("name")))
             return web.json_response(jobs.jobs[job_id])
         except (RequestError, json.JSONDecodeError) as error:
+            return json_response_error(error)
+
+    async def favorite_job(request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        if job_id not in jobs.jobs:
+            return json_response_error(RequestError("找不到工作。"), 404)
+        try:
+            payload = await request.json()
+            if not isinstance(payload.get("favorite"), bool):
+                raise RequestError("我的最愛狀態格式錯誤。")
+            jobs.update(job_id, favorite=payload["favorite"])
+            return web.json_response(jobs.jobs[job_id])
+        except (RequestError, json.JSONDecodeError) as error:
+            return json_response_error(error)
+
+    async def job_recipe(request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        job = jobs.jobs.get(job_id)
+        if not job:
+            return json_response_error(RequestError("找不到工作。"), 404)
+        request_path = JOB_DIR / f"{job_id}.request.json"
+        if not request_path.exists():
+            return json_response_error(RequestError("這筆舊工作沒有保存可套用的生成設定。"), 404)
+        try:
+            raw_request = json.loads(request_path.read_text(encoding="utf-8"))
+            prompt_path = JOB_DIR / f"{job_id}.prompt.txt"
+            if prompt_path.exists():
+                compiled_prompt = prompt_path.read_text(encoding="utf-8")
+            else:
+                compiled_prompt = compile_request(raw_request).prompt
+            recipe_assets: dict[str, Any] = {}
+            missing_assets: list[str] = []
+            for asset_id in sorted(request_asset_ids(raw_request)):
+                try:
+                    metadata = assets.metadata(asset_id)
+                    asset_path = assets.path_for(asset_id)
+                    if asset_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                        with Image.open(asset_path) as image:
+                            metadata["width"], metadata["height"] = image.size
+                    if asset_id in {raw_request.get("first_image_asset_id"), raw_request.get("last_image_asset_id")}:
+                        metadata["fit_mode"] = str(raw_request.get("keyframe_fit") or "contain")
+                        metadata["background_mode"] = "chroma_green"
+                    recipe_assets[asset_id] = {**metadata, "url": f"/api/assets/{asset_id}"}
+                except (RequestError, OSError, json.JSONDecodeError):
+                    missing_assets.append(asset_id)
+            return web.json_response({
+                "job": job,
+                "request": raw_request,
+                "compiled_prompt": compiled_prompt,
+                "assets": recipe_assets,
+                "missing_assets": missing_assets,
+            })
+        except (RequestError, OSError, json.JSONDecodeError) as error:
             return json_response_error(error)
 
     async def job_video(request: web.Request) -> web.Response:
@@ -1094,6 +1230,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/jobs/{job_id}", get_job)
     app.router.add_post("/api/jobs/{job_id}/cancel", cancel_job)
     app.router.add_post("/api/jobs/{job_id}/rename", rename_job)
+    app.router.add_post("/api/jobs/{job_id}/favorite", favorite_job)
+    app.router.add_get("/api/jobs/{job_id}/recipe", job_recipe)
     app.router.add_get("/api/jobs/{job_id}/video", job_video)
     app.router.add_static("/static", STATIC_DIR)
 
@@ -1103,6 +1241,7 @@ def create_app() -> web.Application:
                 if comfy.can_start:
                     await comfy.ensure_running()
                 jobs.resume_recoverable_jobs()
+                await jobs.backfill_completed_timings()
             except Exception as error:
                 print(f"ComfyUI 自動啟動失敗：{error}", flush=True)
 

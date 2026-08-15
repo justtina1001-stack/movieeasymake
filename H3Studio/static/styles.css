@@ -419,6 +419,7 @@ input:focus, select:focus, textarea:focus { border-color: rgba(255,101,66,.66); 
 .job-toolbar input { width: min(320px, 38vw); height: 36px; margin: 0; }
 .job-list { display: grid; gap: 12px; }
 .job-card { border: 1px solid var(--line); background: var(--panel); border-radius: 17px; overflow: hidden; }
+.job-card.favorite { border-color: rgba(255,190,76,.34); box-shadow: inset 3px 0 rgba(255,190,76,.75); }
 .job-card[open] { border-color: rgba(255,255,255,.13); }
 .job-card summary { list-style: none; }
 .job-card summary::-webkit-details-marker { display: none; }
@@ -431,6 +432,9 @@ input:focus, select:focus, textarea:focus { border-color: rgba(255,101,66,.66); 
 .job-chevron { color: var(--muted); font-size: 17px; transition: transform .2s; }
 .job-card[open] .job-chevron { transform: rotate(180deg); }
 .job-title { display: flex; align-items: center; gap: 12px; }
+.job-favorite { flex: 0 0 auto; width: 29px; height: 29px; padding: 0; border: 1px solid var(--line); border-radius: 9px; background: #171c24; color: #687180; cursor: pointer; font-size: 15px; line-height: 1; }
+.job-favorite:hover { color: #ffd07d; border-color: rgba(255,190,76,.45); }
+.job-favorite.active { color: #ffc35c; border-color: rgba(255,190,76,.5); background: rgba(255,190,76,.11); box-shadow: 0 0 16px rgba(255,174,63,.12); }
 .job-badge { padding: 6px 9px; border-radius: 8px; background: #212630; color: #aeb5c1; font-size: 10px; }
 .job-badge.completed { background: rgba(85,215,146,.12); color: #55d792; }
 .job-badge.failed, .job-badge.cancelled { background: rgba(255,93,113,.1); color: var(--danger); }
@@ -439,7 +443,11 @@ input:focus, select:focus, textarea:focus { border-color: rgba(255,101,66,.66); 
 .progress-track { height: 6px; border-radius: 99px; background: #252a33; overflow: hidden; }
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .35s; }
 .job-progress small { display: flex; justify-content: space-between; margin-top: 7px; color: var(--muted); font-size: 9px; }
-.job-actions { display: flex; gap: 7px; }
+.job-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.job-recipe { grid-column: 1 / -1; border: 1px solid rgba(105,183,255,.18); border-radius: 12px; background: #0d1117; overflow: hidden; }
+.job-recipe-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.job-recipe-heading strong { color: #dfe7f2; font-size: 11px; }
+.job-recipe pre { max-height: 300px; margin: 0; padding: 15px; overflow: auto; color: #bfc9d8; font: 10px/1.75 Consolas, "Microsoft JhengHei", monospace; white-space: pre-wrap; word-break: break-word; }
 .job-video { grid-column: 1 / -1; border-radius: 12px; max-height: 520px; width: 100%; background: black; }
 .job-error { grid-column: 1 / -1; color: #ff96a5; background: rgba(255,93,113,.07); border-radius: 10px; padding: 10px 12px; font-size: 11px; }
 .job-pagination { display: flex; justify-content: center; align-items: center; gap: 14px; margin-top: 18px; }

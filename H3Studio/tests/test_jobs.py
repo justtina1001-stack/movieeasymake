@@ -5,7 +5,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from app import JobManager, RequestError, clean_job_name, output_filename_stem, output_timestamp, paginate_job_records
+from app import (
+    JobManager,
+    RequestError,
+    clean_job_name,
+    history_execution_timing,
+    output_filename_stem,
+    output_timestamp,
+    paginate_job_records,
+    request_asset_ids,
+    sort_job_records,
+)
 
 
 class JobListingTests(unittest.TestCase):
@@ -39,6 +49,30 @@ class JobListingTests(unittest.TestCase):
         ]
         self.assertEqual(paginate_job_records(records, 1, 20, "妲己")["items"][0]["id"], "abc123")
         self.assertEqual(paginate_job_records(records, 1, 20, "def456")["items"][0]["name"], "神殿動畫")
+
+    def test_favorite_jobs_are_sorted_before_newer_regular_jobs(self):
+        records = [
+            {"id": "new", "created_at": "2026-08-15T10:00:00+00:00", "favorite": False},
+            {"id": "favorite", "created_at": "2026-08-14T10:00:00+00:00", "favorite": True},
+            {"id": "old", "created_at": "2026-08-13T10:00:00+00:00", "favorite": False},
+        ]
+        self.assertEqual([job["id"] for job in sort_job_records(records)], ["favorite", "new", "old"])
+
+    def test_history_execution_time_uses_comfy_timestamps(self):
+        timing = history_execution_timing({"status": {"messages": [
+            ["execution_start", {"timestamp": 1_000}],
+            ["execution_success", {"timestamp": 72_250}],
+        ]}})
+        self.assertEqual(timing["execution_seconds"], 71.25)
+        self.assertTrue(timing["generation_started_at"].endswith("+00:00"))
+
+    def test_request_asset_ids_finds_reusable_nested_assets(self):
+        payload = {
+            "first_image_asset_id": "a" * 32,
+            "references": [{"image_asset_ids": ["b" * 32], "video_asset_id": "c" * 32}],
+            "continuation_source_job_id": "d" * 32,
+        }
+        self.assertEqual(request_asset_ids(payload), {"a" * 32, "b" * 32, "c" * 32})
 
 
 class FakeRecoveryComfy:

@@ -829,6 +829,190 @@ function statusLabel(status) {
   return ({ queued: "等待中", preparing: "準備素材", running: "生成中", completed: "已完成", failed: "失敗", cancelled: "已取消", interrupted: "已中斷" })[status] || status;
 }
 
+function formatExecutionTime(seconds) {
+  if (!Number.isFinite(Number(seconds))) return "尚未記錄";
+  const total = Math.max(0, Math.round(Number(seconds)));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainder = total % 60;
+  if (hours) return `${hours} 小時 ${minutes} 分 ${remainder} 秒`;
+  if (minutes) return `${minutes} 分 ${remainder} 秒`;
+  return `${remainder} 秒`;
+}
+
+function jobExecutionSeconds(job) {
+  if (job.execution_seconds !== null && job.execution_seconds !== undefined && Number.isFinite(Number(job.execution_seconds))) return Number(job.execution_seconds);
+  if (["preparing", "running"].includes(job.status) && job.generation_started_at) {
+    return Math.max(0, (Date.now() - new Date(job.generation_started_at).getTime()) / 1000);
+  }
+  return null;
+}
+
+function recipeAsset(assetId, assets) {
+  return assetId && assets[assetId] ? { ...assets[assetId] } : null;
+}
+
+function recipeReference(reference, assets, id = uid()) {
+  return {
+    id,
+    alias: reference.alias || "未命名素材",
+    type: reference.type || "object",
+    description: reference.description || "",
+    images: (reference.image_asset_ids || []).map(assetId => recipeAsset(assetId, assets)).filter(Boolean),
+    video: recipeAsset(reference.video_asset_id, assets),
+    videoUseAudio: Boolean(reference.video_use_audio),
+    audio: recipeAsset(reference.audio_asset_id, assets),
+    voiceMode: reference.voice_mode || "timbre",
+  };
+}
+
+function restoreLockedReferences(defaults, references, assets) {
+  const restored = references.map(reference => recipeReference(reference, assets));
+  const locked = defaults.map(preset => {
+    const match = restored.find(item => item.alias.trim() === preset.alias);
+    return match ? { ...match, id: preset.id, alias: preset.alias, type: preset.type } : structuredClone(preset);
+  });
+  const lockedAliases = new Set(defaults.map(item => item.alias));
+  return [...locked, ...restored.filter(item => !lockedAliases.has(item.alias.trim()))];
+}
+
+async function loadJobRecipe(jobId) {
+  return api(`/api/jobs/${jobId}/recipe`);
+}
+
+async function showJobPrompt(jobId) {
+  const panel = $(`[data-job-recipe-panel="${jobId}"]`);
+  if (!panel) return;
+  if (!panel.classList.contains("hidden")) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  const promptElement = $("[data-job-compiled-prompt]", panel);
+  if (panel.dataset.loaded === "true") return;
+  promptElement.textContent = "正在載入提示詞…";
+  try {
+    const recipe = await loadJobRecipe(jobId);
+    promptElement.textContent = recipe.compiled_prompt || recipe.request?.prompt || "這筆工作沒有提示詞。";
+    panel.dataset.loaded = "true";
+  } catch (error) {
+    promptElement.textContent = error.message;
+    toast(error.message, true);
+  }
+}
+
+async function applyJobRecipe(jobId) {
+  const recipe = await loadJobRecipe(jobId);
+  const raw = recipe.request || {};
+  const assets = recipe.assets || {};
+  const mode = raw.mode || "t2v";
+  keyframePrepareVersion++;
+  state.firstImage = null;
+  state.lastImage = null;
+  setMode(mode);
+
+  const formFields = {
+    aspectRatio: "aspect_ratio", megapixels: "megapixels", duration: "duration", seed: "seed",
+    steps: "steps", scheduler: "scheduler", refImageSize: "ref_image_size", keyframeFit: "keyframe_fit",
+    motionProfile: "motion_profile", motionIntensity: "motion_intensity", physicsStyle: "physics_style",
+    cameraResponse: "camera_response", prompt: "prompt",
+  };
+  for (const [elementId, requestKey] of Object.entries(formFields)) {
+    if (raw[requestKey] !== undefined && $(`#${elementId}`)) $(`#${elementId}`).value = raw[requestKey];
+  }
+  $("#jobName").value = recipe.job?.name || raw.job_name || "";
+  state.modePrompts ||= {};
+  state.modePrompts[mode] = raw.prompt || "";
+
+  if (mode === "fl2va") {
+    state.firstImage = recipeAsset(raw.first_image_asset_id, assets);
+    state.lastImage = recipeAsset(raw.last_image_asset_id, assets);
+  }
+  if (mode === "symbol_loop") {
+    const prepared = recipeAsset(raw.first_image_asset_id, assets);
+    state.symbolLoop = {
+      ...structuredClone(defaultState.symbolLoop),
+      sourceAsset: prepared,
+      preparedAsset: prepared,
+      sourceName: prepared?.name || "已套用的圖騰素材",
+    };
+  }
+  if (["extend", "r2v"].includes(mode)) {
+    const frame = recipeAsset(raw.first_image_asset_id, assets);
+    const sourceAsset = recipeAsset(raw.continuation_source_asset_id, assets);
+    state.continuation = {
+      ...structuredClone(defaultState.continuation),
+      sourceJobId: raw.continuation_source_job_id || null,
+      sourceAsset,
+      lastFrame: frame,
+      sourceName: sourceAsset?.name || frame?.name || recipe.job?.name || "已套用的續接來源",
+      merge: Boolean(raw.continuation_merge),
+      audio: raw.continuation_audio || "both",
+    };
+  }
+
+  const references = raw.references || [];
+  if (mode === "replace") {
+    const reference = references[0] || {};
+    state.replacement = {
+      ...structuredClone(defaultState.replacement),
+      alias: reference.alias || "新角色",
+      target: raw.replacement_target || "動態參考影片中的主要角色",
+      description: reference.description || "",
+      images: (reference.image_asset_ids || []).map(id => recipeAsset(id, assets)).filter(Boolean),
+      video: recipeAsset(reference.video_asset_id, assets),
+      videoUseAudio: Boolean(reference.video_use_audio),
+      defaultPrompt: raw.prompt || "",
+      safeDefaultsApplied: true,
+    };
+  } else if (mode === "popup_panel") {
+    state.popupReferences = restoreLockedReferences(defaultState.popupReferences, references, assets);
+    state.popupPanel = { safeDefaultsApplied: true };
+  } else if (mode === "mg_animation") {
+    state.mgReferences = restoreLockedReferences(defaultState.mgReferences, references, assets);
+    const mg = raw.mg_animation || {};
+    state.mgAnimation = {
+      ...structuredClone(defaultState.mgAnimation), safeDefaultsApplied: true,
+      characterPosition: mg.character_position ?? defaultState.mgAnimation.characterPosition,
+      characterPositionDetail: mg.character_position_detail ?? defaultState.mgAnimation.characterPositionDetail,
+      characterMotion: mg.character_motion ?? defaultState.mgAnimation.characterMotion,
+      reelMotionModel: mg.reel_motion_model ?? defaultState.mgAnimation.reelMotionModel,
+      reelDirection: mg.reel_direction ?? defaultState.mgAnimation.reelDirection,
+      reelStopOrder: mg.reel_stop_order ?? defaultState.mgAnimation.reelStopOrder,
+      reelStopStagger: mg.reel_stop_stagger ?? defaultState.mgAnimation.reelStopStagger,
+      reelMotion: mg.reel_motion ?? defaultState.mgAnimation.reelMotion,
+      symbolPostStopMotion: mg.symbol_post_stop_motion ?? defaultState.mgAnimation.symbolPostStopMotion,
+      backgroundMotionLevel: mg.background_motion_level ?? defaultState.mgAnimation.backgroundMotionLevel,
+      backgroundMotion: mg.background_motion ?? defaultState.mgAnimation.backgroundMotion,
+      cameraMotion: mg.camera_motion ?? defaultState.mgAnimation.cameraMotion,
+      cameraMotionDetail: mg.camera_motion_detail ?? defaultState.mgAnimation.cameraMotionDetail,
+    };
+  } else {
+    state.references = references.map(reference => recipeReference(reference, assets));
+  }
+
+  state.storyboards = (raw.storyboards || []).map(shot => ({
+    id: uid(), duration: shot.duration ?? 2, description: shot.description || "", camera: shot.camera || "",
+    dialogue: shot.dialogue || "", sound: shot.sound || "", motionBeats: shot.motion_beats || "",
+    effects: shot.effects || "", image: recipeAsset(shot.image_asset_id, assets),
+  }));
+
+  renderKeyframePreview("first", state.firstImage, "起始圖片", false);
+  renderKeyframePreview("last", state.lastImage, "結束圖片", true);
+  renderReplacement();
+  renderSymbolLoop();
+  renderContinuation();
+  renderMgAnimation();
+  renderReferences();
+  renderStoryboards();
+  updateSummary();
+  saveState();
+  $("#modeGrid").scrollIntoView({ behavior: "smooth", block: "start" });
+  toast(recipe.missing_assets?.length
+    ? `設定已套用；有 ${recipe.missing_assets.length} 個舊素材已不存在，請重新加入。`
+    : "已套用完整生成設定，可以直接微調後再次生成。", Boolean(recipe.missing_assets?.length));
+}
+
 function renderContinuation() {
   const continuation = state.continuation;
   const multimodal = state.mode === "r2v";
@@ -931,7 +1115,8 @@ async function loadJobs(force = false) {
     $("#jobPageLabel").textContent = `第 ${jobPage} / ${jobTotalPages} 頁 · 共 ${meta.total || 0} 筆`;
     $("#previousJobPage").disabled = jobPage <= 1;
     $("#nextJobPage").disabled = jobPage >= jobTotalPages;
-    const signature = JSON.stringify({ jobs, meta });
+    const hasActiveJob = jobs.some(job => ["queued", "preparing", "running"].includes(job.status));
+    const signature = JSON.stringify({ jobs, meta, activeSecond: hasActiveJob ? Math.floor(Date.now() / 1000) : 0 });
     if (!force && signature === lastJobsSignature) return;
     if (!force && $$(".job-video").some(video => !video.paused)) return;
     lastJobsSignature = signature;
@@ -941,22 +1126,27 @@ async function loadJobs(force = false) {
       const date = new Date(job.created_at).toLocaleString("zh-TW", { hour12: false });
       const fallbackName = `${modeLabels[job.mode] || job.mode} · ${job.width}×${job.height}`;
       const title = job.name || fallbackName;
-      const subtitle = job.name ? `${fallbackName} · ${date} · ${Number(job.duration).toFixed(2)} 秒 · ${job.id.slice(0, 8)}` : `${date} · ${Number(job.duration).toFixed(2)} 秒 · ${job.id.slice(0, 8)}`;
+      const executionSeconds = jobExecutionSeconds(job);
+      const executionLabel = executionSeconds === null ? "生成耗時尚未記錄" : `${active ? "已執行" : "生成耗時"} ${formatExecutionTime(executionSeconds)}`;
+      const subtitle = job.name ? `${fallbackName} · ${date} · 影片 ${Number(job.duration).toFixed(2)} 秒 · ${executionLabel} · ${job.id.slice(0, 8)}` : `${date} · 影片 ${Number(job.duration).toFixed(2)} 秒 · ${executionLabel} · ${job.id.slice(0, 8)}`;
       const open = active || expandedJobIds.has(job.id);
       return `
-        <details class="job-card" data-job-id="${job.id}" ${open ? "open" : ""}>
+        <details class="job-card ${job.favorite ? "favorite" : ""}" data-job-id="${job.id}" ${open ? "open" : ""}>
           <summary class="job-summary">
-            <div class="job-title"><span class="job-badge ${job.status}">${statusLabel(job.status)}</span><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div></div>
+            <div class="job-title"><button class="job-favorite ${job.favorite ? "active" : ""}" data-job-favorite="${job.id}" data-favorite="${job.favorite ? "true" : "false"}" type="button" title="${job.favorite ? "取消我的最愛" : "加入我的最愛"}">★</button><span class="job-badge ${job.status}">${statusLabel(job.status)}</span><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div></div>
             <div class="job-progress"><div class="progress-track"><span style="width:${job.progress || 0}%"></span></div><small><span>${escapeHtml(job.current_node || statusLabel(job.status))}</span><span>${job.progress || 0}%</span></small></div>
             <span class="job-chevron">⌄</span>
           </summary>
           <div class="job-detail">
-            <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small>${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
+            <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small><small>生成執行時間：${escapeHtml(executionLabel)}</small>${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
             <div class="job-actions">
+              <button class="button ghost" data-job-show-prompt="${job.id}" type="button">查看生成提示詞</button>
+              <button class="button secondary" data-job-apply="${job.id}" type="button">快速套用</button>
               <button class="button ghost" data-job-rename="${job.id}" data-job-name="${escapeHtml(job.name || "")}" type="button">重新命名</button>
               ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>下載</a>` : ""}
               ${active ? `<button class="button ghost" data-job-cancel="${job.id}" type="button">取消</button>` : ""}
             </div>
+            <div class="job-recipe hidden" data-job-recipe-panel="${job.id}"><div class="job-recipe-heading"><strong>實際送給 AI 的生成提示詞</strong><button class="text-button" data-job-copy-prompt="${job.id}" type="button">複製提示詞</button></div><pre data-job-compiled-prompt></pre></div>
             ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
             ${job.merge_error ? `<div class="job-error">${escapeHtml(job.merge_error)}</div>` : ""}
             ${job.status === "completed" ? `<video class="job-video" controls preload="none" data-src="/api/jobs/${job.id}/video"></video>` : ""}
@@ -1501,8 +1691,52 @@ function bindEvents() {
     }
   }, true);
   $("#jobList").addEventListener("click", async event => {
+    const favoriteButton = event.target.closest("[data-job-favorite]");
+    const showPromptButton = event.target.closest("[data-job-show-prompt]");
+    const copyPromptButton = event.target.closest("[data-job-copy-prompt]");
+    const applyButton = event.target.closest("[data-job-apply]");
     const cancelButton = event.target.closest("[data-job-cancel]");
     const renameButton = event.target.closest("[data-job-rename]");
+    if (favoriteButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        const favorite = favoriteButton.dataset.favorite !== "true";
+        await api(`/api/jobs/${favoriteButton.dataset.jobFavorite}/favorite`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ favorite }),
+        });
+        jobPage = 1;
+        toast(favorite ? "已加入我的最愛並置頂。" : "已從我的最愛移除。");
+        loadJobs(true);
+      } catch (error) { toast(error.message, true); }
+      return;
+    }
+    if (showPromptButton) {
+      try { await showJobPrompt(showPromptButton.dataset.jobShowPrompt); }
+      catch (error) { toast(error.message, true); }
+      return;
+    }
+    if (copyPromptButton) {
+      try {
+        const jobId = copyPromptButton.dataset.jobCopyPrompt;
+        const panel = $(`[data-job-recipe-panel="${jobId}"]`);
+        if (panel?.dataset.loaded !== "true") await showJobPrompt(jobId);
+        const promptText = $("[data-job-compiled-prompt]", panel)?.textContent || "";
+        await navigator.clipboard.writeText(promptText);
+        toast("已複製這次的生成提示詞。");
+      } catch (error) { toast(error.message, true); }
+      return;
+    }
+    if (applyButton) {
+      if (!confirm("要用這筆工作的模式、提示詞、素材、解析度與全部生成設定取代目前編輯內容嗎？")) return;
+      applyButton.disabled = true;
+      try { await applyJobRecipe(applyButton.dataset.jobApply); }
+      catch (error) { toast(error.message, true); }
+      finally { applyButton.disabled = false; }
+      return;
+    }
     if (cancelButton) {
       try { await api(`/api/jobs/${cancelButton.dataset.jobCancel}/cancel`, { method: "POST" }); toast("已送出取消要求"); loadJobs(true); }
       catch (error) { toast(error.message, true); }
