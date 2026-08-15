@@ -580,6 +580,101 @@ class JobManager:
         self.update(job_id, local_output=path.name)
         return path
 
+    async def complete_job(
+        self,
+        job_id: str,
+        compiled: CompiledRequest,
+        prompt_id: str,
+        output: dict[str, str],
+    ) -> None:
+        continuation_path = await self.cache_output(job_id, output)
+        job = self.jobs[job_id]
+        output_stem = str(job.get("output_stem") or output_filename_stem(job.get("name")))
+        updates: dict[str, Any] = {
+            "status": "completed",
+            "progress": 100,
+            "current_node": None,
+            "error": None,
+            "prompt_id": prompt_id,
+            "output": output,
+        }
+        if compiled.mode == "extend" and compiled.continuation_merge:
+            self.update(job_id, progress=99, current_node="串接上一段影片")
+            try:
+                source_path = await self.continuation_source_path(compiled)
+                merged_name = f"{output_stem}_extended.mp4"
+                merged_path = OUTPUT_DIR / f"{job_id}_extended.mp4"
+                merged_duration = await asyncio.to_thread(
+                    merge_continuation,
+                    source_path,
+                    continuation_path,
+                    merged_path,
+                    compiled.width,
+                    compiled.height,
+                    compiled.continuation_audio,
+                )
+                updates["segment_output"] = output
+                updates["local_output"] = merged_path.name
+                updates["download_name"] = merged_name
+                updates["duration"] = merged_duration
+            except Exception as merge_error:
+                updates["merge_error"] = f"續集片段已完成，但自動串接失敗：{merge_error}"
+        self.update(job_id, **updates)
+
+    async def reconcile_job(self, job_id: str, wait: bool = False) -> bool:
+        job = self.jobs.get(job_id)
+        if not job or not job.get("prompt_id") or job.get("status") in {"completed", "cancelled"}:
+            return False
+        prompt_id = str(job["prompt_id"])
+        self.cancel_events.setdefault(job_id, asyncio.Event())
+        while not self.cancel_events[job_id].is_set():
+            history = await self.comfy.get_history(prompt_id)
+            state = self.comfy.history_state(history)
+            if state == "success":
+                output = find_video_output(history)
+                if not output:
+                    self.update(job_id, status="failed", current_node=None, error="ComfyUI 已完成，但沒有回傳影片檔案。")
+                    return False
+                try:
+                    raw_request = json.loads((JOB_DIR / f"{job_id}.request.json").read_text(encoding="utf-8"))
+                    compiled = compile_request(raw_request)
+                    await self.complete_job(job_id, compiled, prompt_id, output)
+                    return True
+                except Exception as error:
+                    self.update(job_id, status="failed", current_node=None, error=f"影片已生成，但匯入操作面板失敗：{error}")
+                    return False
+            if state == "error":
+                self.update(job_id, status="failed", current_node=None, error=self.comfy.history_error(history))
+                return False
+            if not wait:
+                return False
+            self.update(job_id, status="running", current_node="已恢復監控，等待 ComfyUI 完成", error=None)
+            await asyncio.sleep(10)
+        return False
+
+    def resume_recoverable_jobs(self) -> None:
+        for job_id, job in self.jobs.items():
+            error = str(job.get("error") or "")
+            recoverable = job.get("status") == "interrupted" or "進度連線中斷" in error
+            if not recoverable or not job.get("prompt_id"):
+                continue
+            task = self.tasks.get(job_id)
+            if task and not task.done():
+                continue
+            self.cancel_events.setdefault(job_id, asyncio.Event())
+            self.tasks[job_id] = asyncio.create_task(self._recover(job_id))
+
+    async def _recover(self, job_id: str) -> None:
+        try:
+            # Recovery only watches an already-submitted ComfyUI prompt and
+            # imports its output. Holding the submission lock here lets one
+            # stale prompt block every newer job from being reconciled.
+            await self.reconcile_job(job_id, wait=True)
+        except asyncio.CancelledError:
+            self.update(job_id, status="cancelled", current_node=None, error="工作已取消。")
+        except Exception as error:
+            self.update(job_id, status="failed", current_node=None, error=f"恢復工作監控失敗：{error}")
+
     async def continuation_source_path(self, compiled: CompiledRequest) -> Path:
         if compiled.continuation_source_asset:
             return self.assets.path_for(compiled.continuation_source_asset)
@@ -639,36 +734,7 @@ class JobManager:
                 output = find_video_output(history)
                 if not output:
                     raise RuntimeError("ComfyUI 已完成，但沒有回傳影片檔案。")
-                continuation_path = await self.cache_output(job_id, output)
-                updates: dict[str, Any] = {
-                    "status": "completed",
-                    "progress": 100,
-                    "current_node": None,
-                    "prompt_id": prompt_id,
-                    "output": output,
-                }
-                if compiled.mode == "extend" and compiled.continuation_merge:
-                    self.update(job_id, progress=99, current_node="串接上一段影片")
-                    try:
-                        source_path = await self.continuation_source_path(compiled)
-                        merged_name = f"{output_stem}_extended.mp4"
-                        merged_path = OUTPUT_DIR / f"{job_id}_extended.mp4"
-                        merged_duration = await asyncio.to_thread(
-                            merge_continuation,
-                            source_path,
-                            continuation_path,
-                            merged_path,
-                            compiled.width,
-                            compiled.height,
-                            compiled.continuation_audio,
-                        )
-                        updates["segment_output"] = output
-                        updates["local_output"] = merged_path.name
-                        updates["download_name"] = merged_name
-                        updates["duration"] = merged_duration
-                    except Exception as merge_error:
-                        updates["merge_error"] = f"續集片段已完成，但自動串接失敗：{merge_error}"
-                self.update(job_id, **updates)
+                await self.complete_job(job_id, compiled, prompt_id, output)
         except asyncio.CancelledError:
             self.update(job_id, status="cancelled", current_node=None, error="工作已取消。")
         except Exception as error:
@@ -1032,12 +1098,11 @@ def create_app() -> web.Application:
     app.router.add_static("/static", STATIC_DIR)
 
     async def auto_start_engine(_: web.Application) -> None:
-        if not comfy.can_start:
-            return
-
         async def start_in_background() -> None:
             try:
-                await comfy.ensure_running()
+                if comfy.can_start:
+                    await comfy.ensure_running()
+                jobs.resume_recoverable_jobs()
             except Exception as error:
                 print(f"ComfyUI 自動啟動失敗：{error}", flush=True)
 

@@ -150,6 +150,47 @@ class ComfyClient:
                         raise RuntimeError(f"素材上傳到 ComfyUI 失敗：{payload}")
         return f"{payload.get('subfolder')}/{payload['name']}".replace("\\", "/").lstrip("/")
 
+    @staticmethod
+    def history_state(history: dict[str, Any]) -> str:
+        status = history.get("status") or {}
+        if not status.get("completed"):
+            return "running"
+        return "success" if status.get("status_str") == "success" else "error"
+
+    @staticmethod
+    def history_error(history: dict[str, Any]) -> str:
+        status = history.get("status") or {}
+        for message in reversed(status.get("messages") or []):
+            if not isinstance(message, list) or len(message) < 2 or message[0] != "execution_error":
+                continue
+            data = message[1] if isinstance(message[1], dict) else {}
+            return str(data.get("exception_message") or data.get("exception_type") or "ComfyUI 執行失敗。")
+        return "ComfyUI 執行失敗。"
+
+    async def get_history(
+        self,
+        prompt_id: str,
+        session: aiohttp.ClientSession | None = None,
+    ) -> dict[str, Any]:
+        owns_session = session is None
+        if session is None:
+            session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+        try:
+            try:
+                async with session.get(f"{self.base_url}/history/{prompt_id}") as response:
+                    if response.status != 200:
+                        return {}
+                    payload = await response.json()
+                if not isinstance(payload, dict):
+                    return {}
+                entry = payload.get(prompt_id, payload)
+                return entry if isinstance(entry, dict) else {}
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError, ValueError):
+                return {}
+        finally:
+            if owns_session:
+                await session.close()
+
     async def run_prompt(
         self,
         workflow: dict[str, Any],
@@ -160,44 +201,74 @@ class ComfyClient:
         ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.ws_connect(f"{ws_url}/ws?clientId={client_id}", heartbeat=30) as ws:
-                async with session.post(f"{self.base_url}/prompt", json={"prompt": workflow, "client_id": client_id}) as response:
-                    result = await response.json()
-                    if response.status != 200:
-                        raise RuntimeError(result.get("error", {}).get("message") or str(result))
-                    prompt_id = result["prompt_id"]
-                await callback({"prompt_id": prompt_id, "status": "running", "progress": 0})
+            async with session.post(f"{self.base_url}/prompt", json={"prompt": workflow, "client_id": client_id}) as response:
+                result = await response.json()
+                if response.status != 200:
+                    raise RuntimeError(result.get("error", {}).get("message") or str(result))
+                prompt_id = result["prompt_id"]
+            await callback({"prompt_id": prompt_id, "status": "running", "progress": 0})
 
-                while True:
-                    if cancel_event.is_set():
-                        await session.post(f"{self.base_url}/interrupt")
-                        raise asyncio.CancelledError
-                    try:
-                        message = await asyncio.wait_for(ws.receive(), timeout=1)
-                    except asyncio.TimeoutError:
-                        continue
-                    if message.type == aiohttp.WSMsgType.TEXT:
-                        event = json.loads(message.data)
-                        data = event.get("data") or {}
-                        if data.get("prompt_id") not in {None, prompt_id}:
-                            continue
-                        if event.get("type") == "progress":
-                            maximum = max(1, int(data.get("max") or 1))
-                            value = int(data.get("value") or 0)
-                            await callback({"status": "running", "progress": round(value / maximum * 100, 1)})
-                        elif event.get("type") == "executing":
-                            node = data.get("node")
-                            await callback({"status": "running", "current_node": node})
-                            if node is None:
+            reconnect_delay = 1.0
+            while True:
+                if cancel_event.is_set():
+                    await session.post(f"{self.base_url}/interrupt")
+                    raise asyncio.CancelledError
+
+                history = await self.get_history(prompt_id, session)
+                state = self.history_state(history)
+                if state == "success":
+                    return prompt_id, history
+                if state == "error":
+                    raise RuntimeError(self.history_error(history))
+
+                try:
+                    async with session.ws_connect(f"{ws_url}/ws?clientId={client_id}", heartbeat=30) as ws:
+                        reconnect_delay = 1.0
+                        last_history_check = time.monotonic()
+                        while True:
+                            if cancel_event.is_set():
+                                await session.post(f"{self.base_url}/interrupt")
+                                raise asyncio.CancelledError
+                            try:
+                                message = await asyncio.wait_for(ws.receive(), timeout=2)
+                            except asyncio.TimeoutError:
+                                if time.monotonic() - last_history_check < 5:
+                                    continue
+                                last_history_check = time.monotonic()
+                                history = await self.get_history(prompt_id, session)
+                                state = self.history_state(history)
+                                if state == "success":
+                                    return prompt_id, history
+                                if state == "error":
+                                    raise RuntimeError(self.history_error(history))
+                                continue
+                            if message.type == aiohttp.WSMsgType.TEXT:
+                                event = json.loads(message.data)
+                                data = event.get("data") or {}
+                                if data.get("prompt_id") not in {None, prompt_id}:
+                                    continue
+                                if event.get("type") == "progress":
+                                    maximum = max(1, int(data.get("max") or 1))
+                                    value = int(data.get("value") or 0)
+                                    await callback({"status": "running", "progress": round(value / maximum * 100, 1)})
+                                elif event.get("type") == "executing":
+                                    await callback({"status": "running", "current_node": data.get("node")})
+                                elif event.get("type") == "execution_error":
+                                    raise RuntimeError(data.get("exception_message") or "ComfyUI 執行失敗。")
+                            elif message.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR}:
                                 break
-                        elif event.get("type") == "execution_error":
-                            raise RuntimeError(data.get("exception_message") or "ComfyUI 執行失敗。")
-                    elif message.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR}:
-                        raise RuntimeError("與 ComfyUI 的進度連線中斷。")
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                    pass
 
-                async with session.get(f"{self.base_url}/history/{prompt_id}") as response:
-                    history = await response.json()
-        return prompt_id, history.get(prompt_id, history)
+                history = await self.get_history(prompt_id, session)
+                state = self.history_state(history)
+                if state == "success":
+                    return prompt_id, history
+                if state == "error":
+                    raise RuntimeError(self.history_error(history))
+                await callback({"status": "running", "current_node": "進度連線中斷，正在自動重連"})
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(10.0, reconnect_delay * 2)
 
     async def interrupt(self) -> None:
         try:
