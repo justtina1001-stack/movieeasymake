@@ -13,6 +13,8 @@ from urllib.parse import urlencode
 
 import aiohttp
 
+from domain import TURBO_LORA_CANDIDATES
+
 from settings import ConnectionSettings
 
 
@@ -26,6 +28,7 @@ class ComfyClient:
         self.data_dir = data_dir
         self.base_url = settings.base_url.rstrip("/")
         self.auto_start_local = settings.auto_start_local
+        self.remote_access_token = settings.remote_access_token
         self.process: subprocess.Popen | None = None
         self.log_handle = None
         self.start_lock = asyncio.Lock()
@@ -36,6 +39,7 @@ class ComfyClient:
         self.comfy_dir = Path(settings.comfy_dir)
         self.base_url = settings.base_url.rstrip("/")
         self.auto_start_local = settings.auto_start_local
+        self.remote_access_token = settings.remote_access_token
         self._model_cache = None
 
     @property
@@ -46,11 +50,19 @@ class ComfyClient:
     def is_starting(self) -> bool:
         return self.start_lock.locked()
 
+    def auth_headers(self, prompt_id: str | None = None) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        if self.mode == "remote" and self.remote_access_token:
+            headers["Authorization"] = f"Bearer {self.remote_access_token}"
+        if prompt_id:
+            headers["X-H3-Prompt-ID"] = prompt_id
+        return headers
+
     async def is_ready(self) -> bool:
         try:
             timeout = aiohttp.ClientTimeout(total=8)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(f"{self.base_url}/system_stats") as response:
+                async with session.get(f"{self.base_url}/system_stats", headers=self.auth_headers()) as response:
                     return response.status == 200
         except (aiohttp.ClientError, asyncio.TimeoutError):
             return False
@@ -59,7 +71,7 @@ class ComfyClient:
         try:
             timeout = aiohttp.ClientTimeout(total=5)
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(f"{self.base_url}/system_stats") as response:
+                async with session.get(f"{self.base_url}/system_stats", headers=self.auth_headers()) as response:
                     if response.status != 200:
                         return None
                     return await response.json()
@@ -123,16 +135,37 @@ class ComfyClient:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 for name, (node, field, filename) in expected.items():
-                    async with session.get(f"{self.base_url}/object_info/{node}") as response:
+                    async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
                         if response.status != 200:
                             continue
                         payload = await response.json()
                     values = payload.get(node, {}).get("input", {}).get("required", {}).get(field, [[]])[0]
                     result[name] = filename in values
+                async with session.get(f"{self.base_url}/object_info/LoraLoaderModelOnly", headers=self.auth_headers()) as response:
+                    if response.status == 200:
+                        payload = await response.json()
+                        available_loras = payload.get("LoraLoaderModelOnly", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
+                        for profile, candidates in TURBO_LORA_CANDIDATES.items():
+                            result[f"turbo_{profile}"] = any(candidate in available_loras for candidate in candidates)
         except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
             pass
         self._model_cache = (time.monotonic() + 60, dict(result))
         return result
+
+    async def resolve_turbo_lora(self, profile: str | None) -> str | None:
+        if not profile or profile not in TURBO_LORA_CANDIDATES:
+            return None
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{self.base_url}/object_info/LoraLoaderModelOnly", headers=self.auth_headers()) as response:
+                    if response.status != 200:
+                        return None
+                    payload = await response.json()
+            values = payload.get("LoraLoaderModelOnly", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
+            return next((candidate for candidate in TURBO_LORA_CANDIDATES[profile] if candidate in values), None)
+        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
+            return None
 
     async def upload_asset(self, path: Path, subfolder: str) -> str:
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -144,7 +177,7 @@ class ComfyClient:
             form.add_field("subfolder", subfolder)
             form.add_field("overwrite", "true")
             async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(f"{self.base_url}/upload/image", data=form) as response:
+                async with session.post(f"{self.base_url}/upload/image", data=form, headers=self.auth_headers()) as response:
                     payload = await response.json()
                     if response.status != 200:
                         raise RuntimeError(f"素材上傳到 ComfyUI 失敗：{payload}")
@@ -177,7 +210,7 @@ class ComfyClient:
             session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
         try:
             try:
-                async with session.get(f"{self.base_url}/history/{prompt_id}") as response:
+                async with session.get(f"{self.base_url}/history/{prompt_id}", headers=self.auth_headers()) as response:
                     if response.status != 200:
                         return {}
                     payload = await response.json()
@@ -201,7 +234,11 @@ class ComfyClient:
         ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(f"{self.base_url}/prompt", json={"prompt": workflow, "client_id": client_id}) as response:
+            async with session.post(
+                f"{self.base_url}/prompt",
+                json={"prompt": workflow, "client_id": client_id},
+                headers=self.auth_headers(),
+            ) as response:
                 result = await response.json()
                 if response.status != 200:
                     raise RuntimeError(result.get("error", {}).get("message") or str(result))
@@ -211,7 +248,7 @@ class ComfyClient:
             reconnect_delay = 1.0
             while True:
                 if cancel_event.is_set():
-                    await session.post(f"{self.base_url}/interrupt")
+                    await session.post(f"{self.base_url}/interrupt", headers=self.auth_headers(prompt_id))
                     raise asyncio.CancelledError
 
                 history = await self.get_history(prompt_id, session)
@@ -222,12 +259,14 @@ class ComfyClient:
                     raise RuntimeError(self.history_error(history))
 
                 try:
-                    async with session.ws_connect(f"{ws_url}/ws?clientId={client_id}", heartbeat=30) as ws:
+                    async with session.ws_connect(
+                        f"{ws_url}/ws?clientId={client_id}", heartbeat=30, headers=self.auth_headers()
+                    ) as ws:
                         reconnect_delay = 1.0
                         last_history_check = time.monotonic()
                         while True:
                             if cancel_event.is_set():
-                                await session.post(f"{self.base_url}/interrupt")
+                                await session.post(f"{self.base_url}/interrupt", headers=self.auth_headers(prompt_id))
                                 raise asyncio.CancelledError
                             try:
                                 message = await asyncio.wait_for(ws.receive(), timeout=2)
@@ -270,10 +309,10 @@ class ComfyClient:
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(10.0, reconnect_delay * 2)
 
-    async def interrupt(self) -> None:
+    async def interrupt(self, prompt_id: str | None = None) -> None:
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                await session.post(f"{self.base_url}/interrupt")
+                await session.post(f"{self.base_url}/interrupt", headers=self.auth_headers(prompt_id))
         except aiohttp.ClientError:
             return
 
@@ -284,7 +323,7 @@ class ComfyClient:
             "type": output.get("type", "output"),
         })
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
-            async with session.get(f"{self.base_url}/view?{query}") as response:
+            async with session.get(f"{self.base_url}/view?{query}", headers=self.auth_headers()) as response:
                 if response.status != 200:
                     raise RuntimeError("無法讀取輸出影片。")
                 return await response.read(), response.headers.get("Content-Type", "video/mp4")

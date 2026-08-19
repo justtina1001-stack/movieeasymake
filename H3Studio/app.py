@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import math
 import mimetypes
@@ -23,6 +24,14 @@ from PIL import Image, ImageOps
 from comfy_client import ComfyClient
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids
 from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
+from music3 import (
+    Music3Error,
+    Music3Installer,
+    MusicJobManager,
+    clean_name as clean_music_name,
+    filename_stem as music_filename_stem,
+)
+from shared_gateway import GatewayError, SharedComfyGateway
 from settings import ConnectionSettings, SettingsError, SettingsStore
 
 
@@ -46,6 +55,11 @@ ALLOWED_EXTENSIONS = {
     ".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".mp4", ".mov", ".webm", ".mkv", ".avi",
 }
 TRANSPARENCY_EXTENSIONS = {".png", ".webp", ".bmp"}
+VIDEO_FPS = 24
+REPLACEMENT_MAX_INPUT_FRAMES = 15 * VIDEO_FPS
+REPLACEMENT_MAX_CORE_FRAMES = 14 * VIDEO_FPS
+REPLACEMENT_MIN_CORE_FRAMES = 5 * VIDEO_FPS
+REPLACEMENT_OVERLAP_FRAMES = VIDEO_FPS // 2
 
 
 def utc_now() -> str:
@@ -129,6 +143,151 @@ def history_execution_timing(history: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def probe_video(path: Path) -> dict[str, Any]:
+    """Read stable source metadata without changing the uploaded video."""
+    try:
+        with av.open(str(path)) as container:
+            if not container.streams.video:
+                raise RequestError("選擇的檔案沒有影片軌。")
+            stream = container.streams.video[0]
+            rate = float(stream.average_rate or stream.base_rate or VIDEO_FPS)
+            duration = float(stream.duration * stream.time_base) if stream.duration else 0.0
+            if duration <= 0 and container.duration:
+                duration = float(container.duration / av.time_base)
+            if duration <= 0:
+                last_time = 0.0
+                decoded = 0
+                for frame in container.decode(video=0):
+                    last_time = float(frame.time) if frame.time is not None else decoded / rate
+                    decoded += 1
+                duration = last_time + (1 / rate if decoded else 0)
+            if duration <= 0:
+                raise RequestError("無法讀取影片時長。")
+            return {
+                "width": int(stream.width),
+                "height": int(stream.height),
+                "fps": round(rate, 3),
+                "duration": round(duration, 3),
+                "target_frames": max(1, round(duration * VIDEO_FPS)),
+                "has_audio": bool(container.streams.audio),
+            }
+    except RequestError:
+        raise
+    except (av.error.FFmpegError, OSError, ValueError) as error:
+        raise RequestError(f"無法分析影片：{error}") from error
+
+
+def analyze_video_cut_scores(path: Path, sample_frames: int = 6) -> list[tuple[int, float]]:
+    """Return inexpensive frame-difference scores at 24 fps timeline positions."""
+    scores: list[tuple[int, float]] = []
+    try:
+        with av.open(str(path)) as container:
+            if not container.streams.video:
+                return scores
+            stream = container.streams.video[0]
+            source_rate = float(stream.average_rate or stream.base_rate or VIDEO_FPS)
+            previous: np.ndarray | None = None
+            previous_sample = -sample_frames
+            decoded = 0
+            for frame in container.decode(video=0):
+                seconds = float(frame.time) if frame.time is not None else decoded / source_rate
+                decoded += 1
+                target_frame = max(0, round(seconds * VIDEO_FPS))
+                if target_frame - previous_sample < sample_frames:
+                    continue
+                gray = frame.reformat(width=64, height=36, format="gray").to_ndarray().astype(np.int16)
+                if previous is not None:
+                    scores.append((target_frame, float(np.abs(gray - previous).mean())))
+                previous = gray
+                previous_sample = target_frame
+    except (av.error.FFmpegError, OSError, ValueError):
+        return []
+    return scores
+
+
+def replacement_segment_plan(
+    duration: float,
+    cut_scores: list[tuple[int, float]] | None = None,
+    smart: bool = True,
+) -> list[dict[str, Any]]:
+    """Plan 5-15 second Ref2VA inputs with half-second continuity overlaps."""
+    total_frames = max(1, round(float(duration) * VIDEO_FPS))
+    if total_frames <= REPLACEMENT_MAX_INPUT_FRAMES:
+        return [{
+            "index": 1,
+            "core_start_frame": 0,
+            "core_end_frame": total_frames,
+            "input_start_frame": 0,
+            "input_end_frame": total_frames,
+            "core_start": 0.0,
+            "core_end": round(total_frames / VIDEO_FPS, 3),
+            "input_start": 0.0,
+            "input_end": round(total_frames / VIDEO_FPS, 3),
+            "input_duration": round(total_frames / VIDEO_FPS, 3),
+            "cut_reason": "single",
+        }]
+
+    segment_count = max(2, math.ceil(total_frames / REPLACEMENT_MAX_CORE_FRAMES))
+    scores = cut_scores or []
+    boundaries = [0]
+    reasons: list[str] = []
+    for boundary_index in range(1, segment_count):
+        previous = boundaries[-1]
+        remaining = segment_count - boundary_index
+        nominal = round(total_frames * boundary_index / segment_count)
+        allowed_min = max(
+            previous + REPLACEMENT_MIN_CORE_FRAMES,
+            total_frames - remaining * REPLACEMENT_MAX_CORE_FRAMES,
+        )
+        allowed_max = min(
+            previous + REPLACEMENT_MAX_CORE_FRAMES,
+            total_frames - remaining * REPLACEMENT_MIN_CORE_FRAMES,
+        )
+        chosen = min(max(nominal, allowed_min), allowed_max)
+        reason = "balanced"
+        if smart and scores:
+            window = [
+                (frame, score) for frame, score in scores
+                if allowed_min <= frame <= allowed_max and abs(frame - nominal) <= 36
+            ]
+            if window:
+                values = np.asarray([score for _, score in window], dtype=np.float32)
+                median = float(np.median(values))
+                high_frame, high_score = max(window, key=lambda item: item[1])
+                if high_score >= max(18.0, median * 3.5):
+                    chosen, reason = high_frame, "scene_cut"
+                else:
+                    chosen, _ = min(window, key=lambda item: (item[1], abs(item[0] - nominal)))
+                    reason = "low_motion"
+        boundaries.append(int(chosen))
+        reasons.append(reason)
+    boundaries.append(total_frames)
+
+    segments: list[dict[str, Any]] = []
+    for index, (core_start, core_end) in enumerate(zip(boundaries, boundaries[1:]), start=1):
+        input_start = max(0, core_start - REPLACEMENT_OVERLAP_FRAMES)
+        input_end = min(total_frames, core_end + REPLACEMENT_OVERLAP_FRAMES)
+        if input_end - input_start > REPLACEMENT_MAX_INPUT_FRAMES:
+            overflow = input_end - input_start - REPLACEMENT_MAX_INPUT_FRAMES
+            trim_left = min(core_start - input_start, math.ceil(overflow / 2))
+            input_start += trim_left
+            input_end -= overflow - trim_left
+        segments.append({
+            "index": index,
+            "core_start_frame": core_start,
+            "core_end_frame": core_end,
+            "input_start_frame": input_start,
+            "input_end_frame": input_end,
+            "core_start": round(core_start / VIDEO_FPS, 3),
+            "core_end": round(core_end / VIDEO_FPS, 3),
+            "input_start": round(input_start / VIDEO_FPS, 3),
+            "input_end": round(input_end / VIDEO_FPS, 3),
+            "input_duration": round((input_end - input_start) / VIDEO_FPS, 3),
+            "cut_reason": "start" if index == 1 else reasons[index - 2],
+        })
+    return segments
+
+
 def request_asset_ids(value: Any, key: str = "") -> set[str]:
     found: set[str] = set()
     if key.endswith("_asset_id") and isinstance(value, str) and SAFE_ID.fullmatch(value):
@@ -142,6 +301,20 @@ def request_asset_ids(value: Any, key: str = "") -> set[str]:
         for child in value:
             found.update(request_asset_ids(child, key))
     return found
+
+
+def replacement_source_asset_id(payload: dict[str, Any]) -> str:
+    references = payload.get("references") or []
+    if len(references) != 1:
+        raise RequestError("角色替換模式需要一支原始表演影片。")
+    reference = references[0]
+    asset_id = str(reference.get("video_asset_id") or "").strip()
+    if not asset_id:
+        values = reference.get("video_asset_ids") or []
+        asset_id = str(values[0] if values else "").strip()
+    if not SAFE_ID.fullmatch(asset_id):
+        raise RequestError("角色替換模式需要一支原始表演影片。")
+    return asset_id
 
 
 def flatten_transparent_image(path: Path) -> bool:
@@ -360,6 +533,54 @@ def _append_video(output: Any, stream: Any, path: Path, skip_frames: int = 0, st
     return written
 
 
+def _append_video_range(
+    output: Any,
+    stream: Any,
+    path: Path,
+    range_start_frame: int,
+    range_end_frame: int,
+    start_frame: int = 0,
+) -> int:
+    """Append an exact 24 fps timeline range, resampling the source when needed."""
+    range_start_frame = max(0, int(range_start_frame))
+    range_end_frame = max(range_start_frame, int(range_end_frame))
+    written = 0
+    produced = 0
+    with av.open(str(path)) as source:
+        if not source.streams.video:
+            raise RuntimeError(f"影片沒有可解碼的畫面：{path.name}")
+        video_stream = source.streams.video[0]
+        source_rate = float(video_stream.average_rate or video_stream.base_rate or VIDEO_FPS)
+        previous = None
+        previous_time = 0.0
+        decoded = 0
+
+        def emit(frame: Any) -> None:
+            nonlocal written
+            if range_start_frame <= produced < range_end_frame:
+                _encode_video_frame(output, stream, frame, start_frame + written)
+                written += 1
+
+        for frame in source.decode(video=0):
+            frame_time = float(frame.time) if frame.time is not None else decoded / source_rate
+            decoded += 1
+            if previous is not None:
+                while produced / VIDEO_FPS < frame_time and produced < range_end_frame:
+                    emit(previous)
+                    produced += 1
+            previous = frame
+            previous_time = frame_time
+            if produced >= range_end_frame:
+                break
+        if previous is None:
+            raise RuntimeError(f"影片沒有可解碼的畫面：{path.name}")
+        duration = float(video_stream.duration * video_stream.time_base) if video_stream.duration else previous_time + 1 / source_rate
+        while produced / VIDEO_FPS < duration and produced < range_end_frame:
+            emit(previous)
+            produced += 1
+    return written
+
+
 def _audio_arrays(path: Path, skip_samples: int, target_samples: int):
     remaining = target_samples
     skipped = 0
@@ -375,7 +596,9 @@ def _audio_arrays(path: Path, skip_samples: int, target_samples: int):
                     remove = min(skip_samples - skipped, values.shape[1])
                     values = values[:, remove:]
                     skipped += remove
-                if not values.shape[1] or remaining <= 0:
+                if remaining <= 0:
+                    return
+                if not values.shape[1]:
                     continue
                 values = values[:, :remaining]
                 remaining -= values.shape[1]
@@ -390,6 +613,152 @@ def _audio_arrays(path: Path, skip_samples: int, target_samples: int):
                 values = values[:, :remaining]
                 remaining -= values.shape[1]
                 yield values
+
+
+def _path_has_audio(path: Path) -> bool:
+    try:
+        with av.open(str(path)) as source:
+            return bool(source.streams.audio)
+    except (av.error.FFmpegError, OSError, ValueError):
+        return False
+
+
+def _padded_audio_arrays(path: Path, skip_samples: int, target_samples: int):
+    written = 0
+    for values in _audio_arrays(path, skip_samples, target_samples):
+        values = values[:, :target_samples - written]
+        if values.shape[1]:
+            written += values.shape[1]
+            yield values
+        if written >= target_samples:
+            return
+    while written < target_samples:
+        size = min(4096, target_samples - written)
+        written += size
+        yield np.zeros((2, size), dtype=np.float32)
+
+
+def _write_audio_values(output: Any, audio: Any, chunks: Any, target_samples: int) -> None:
+    cursor = 0
+    written = 0
+
+    def write(values: np.ndarray) -> None:
+        nonlocal cursor, written
+        frame = av.AudioFrame.from_ndarray(values.astype(np.float32, copy=False), format="fltp", layout="stereo")
+        frame.sample_rate = 48000
+        frame.pts = cursor
+        frame.time_base = Fraction(1, 48000)
+        cursor += frame.samples
+        written += frame.samples
+        for packet in audio.encode(frame):
+            output.mux(packet)
+
+    for values in chunks:
+        if written >= target_samples:
+            break
+        values = values[:, :target_samples - written]
+        if values.shape[1]:
+            write(values)
+    while written < target_samples:
+        size = min(4096, target_samples - written)
+        write(np.zeros((2, size), dtype=np.float32))
+
+
+def extract_replacement_segment(
+    source_path: Path,
+    output_path: Path,
+    start_frame: int,
+    end_frame: int,
+    include_audio: bool,
+) -> float:
+    """Create an exact 24 fps reference segment for one H3 replacement child job."""
+    info = probe_video(source_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with av.open(str(output_path), mode="w") as output:
+        video = output.add_stream("libx264", rate=VIDEO_FPS)
+        video.width = info["width"]
+        video.height = info["height"]
+        video.pix_fmt = "yuv420p"
+        video.options = {"crf": "18", "preset": "fast"}
+        audio = None
+        if include_audio and info["has_audio"]:
+            audio = output.add_stream("aac", rate=48000)
+            audio.layout = "stereo"
+            audio.bit_rate = 192000
+        written = _append_video_range(output, video, source_path, start_frame, end_frame)
+        for packet in video.encode():
+            output.mux(packet)
+        if audio is not None:
+            skip_samples = start_frame * 2000
+            target_samples = written * 2000
+            _write_audio_values(
+                output,
+                audio,
+                _audio_arrays(source_path, skip_samples, target_samples),
+                target_samples,
+            )
+            for packet in audio.encode():
+                output.mux(packet)
+    return written / VIDEO_FPS
+
+
+def merge_replacement_segments(
+    source_path: Path,
+    segment_paths: list[Path],
+    segments: list[dict[str, Any]],
+    output_path: Path,
+    width: int,
+    height: int,
+    audio_mode: str,
+) -> float:
+    """Trim overlap/padding, concatenate children, and restore the requested soundtrack."""
+    if len(segment_paths) != len(segments) or not segments:
+        raise RuntimeError("角色替換片段不完整，無法合併。")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with av.open(str(output_path), mode="w") as output:
+        video = output.add_stream("libx264", rate=VIDEO_FPS)
+        video.width = width
+        video.height = height
+        video.pix_fmt = "yuv420p"
+        video.options = {"crf": "20", "preset": "fast"}
+        has_original_audio = audio_mode == "original" and _path_has_audio(source_path)
+        has_generated_audio = audio_mode == "generated" and any(_path_has_audio(path) for path in segment_paths)
+        audio = None
+        if has_original_audio or has_generated_audio:
+            audio = output.add_stream("aac", rate=48000)
+            audio.layout = "stereo"
+            audio.bit_rate = 192000
+
+        total_frames = 0
+        for path, segment in zip(segment_paths, segments):
+            trim_start = int(segment["core_start_frame"]) - int(segment["input_start_frame"])
+            core_frames = int(segment["core_end_frame"]) - int(segment["core_start_frame"])
+            total_frames += _append_video_range(
+                output,
+                video,
+                path,
+                trim_start,
+                trim_start + core_frames,
+                total_frames,
+            )
+        for packet in video.encode():
+            output.mux(packet)
+
+        if audio is not None and has_original_audio:
+            target_samples = total_frames * 2000
+            _write_audio_values(output, audio, _audio_arrays(source_path, 0, target_samples), target_samples)
+        elif audio is not None and has_generated_audio:
+            def generated_chunks():
+                for path, segment in zip(segment_paths, segments):
+                    trim_start = int(segment["core_start_frame"]) - int(segment["input_start_frame"])
+                    core_frames = int(segment["core_end_frame"]) - int(segment["core_start_frame"])
+                    yield from _padded_audio_arrays(path, trim_start * 2000, core_frames * 2000)
+
+            _write_audio_values(output, audio, generated_chunks(), total_frames * 2000)
+        if audio is not None:
+            for packet in audio.encode():
+                output.mux(packet)
+    return total_frames / VIDEO_FPS
 
 
 def merge_continuation(source_path: Path, continuation_path: Path, output_path: Path, width: int, height: int, audio_mode: str) -> float:
@@ -462,6 +831,14 @@ class AssetStore:
             return {"id": asset_id, "name": path.name, "kind": "unknown", "size": path.stat().st_size}
         return json.loads(metadata_path.read_text(encoding="utf-8"))
 
+    def update_metadata(self, asset_id: str, **changes: Any) -> dict[str, Any]:
+        metadata = self.metadata(asset_id)
+        metadata.update(changes)
+        (self.directory / f"{asset_id}.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return metadata
+
     def save_image(self, image: Any, name: str, kind: str) -> dict[str, Any]:
         asset_id = uuid.uuid4().hex
         path = self.directory / f"{asset_id}.png"
@@ -473,6 +850,28 @@ class AssetStore:
             "extension": ".png",
             "size": path.stat().st_size,
             "created_at": utc_now(),
+        }
+        (self.directory / f"{asset_id}.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        return metadata
+
+    def register_derived_video(
+        self,
+        asset_id: str,
+        name: str,
+        kind: str,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        path = self.directory / f"{asset_id}.mp4"
+        if not SAFE_ID.fullmatch(asset_id) or not path.exists():
+            raise RequestError("衍生影片素材不存在。")
+        metadata = {
+            "id": asset_id,
+            "name": Path(name).name,
+            "kind": kind,
+            "extension": ".mp4",
+            "size": path.stat().st_size,
+            "created_at": utc_now(),
+            **(extra or {}),
         }
         (self.directory / f"{asset_id}.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         return metadata
@@ -572,6 +971,7 @@ class JobManager:
                 job["error"] = "工具上次關閉時工作尚未完成。"
             job.setdefault("name", "")
             job.setdefault("favorite", False)
+            job.setdefault("hidden", False)
             self.jobs[job["id"]] = job
 
     def _persist(self, job: dict[str, Any]) -> None:
@@ -583,12 +983,23 @@ class JobManager:
         job["updated_at"] = utc_now()
         self._persist(job)
 
-    def create(self, compiled: CompiledRequest, raw_request: dict[str, Any]) -> dict[str, Any]:
+    def create(
+        self,
+        compiled: CompiledRequest,
+        raw_request: dict[str, Any],
+        *,
+        hidden: bool = False,
+        parent_job_id: str | None = None,
+        segment_index: int | None = None,
+    ) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
         job = {
             "id": job_id,
             "name": clean_job_name(raw_request.get("job_name")),
             "favorite": False,
+            "hidden": hidden,
+            "parent_job_id": parent_job_id,
+            "segment_index": segment_index,
             "mode": compiled.mode,
             "status": "queued",
             "progress": 0,
@@ -609,6 +1020,43 @@ class JobManager:
         self._persist(job)
         (JOB_DIR / f"{job_id}.request.json").write_text(json.dumps(raw_request, ensure_ascii=False, indent=2), encoding="utf-8")
         self.tasks[job_id] = asyncio.create_task(self._run(job_id, compiled))
+        return job
+
+    def create_replacement_batch(
+        self,
+        compiled: CompiledRequest,
+        raw_request: dict[str, Any],
+        source_info: dict[str, Any],
+        segments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        job_id = uuid.uuid4().hex
+        job = {
+            "id": job_id,
+            "name": clean_job_name(raw_request.get("job_name")),
+            "favorite": False,
+            "hidden": False,
+            "mode": "replace",
+            "batch_type": "replace_long",
+            "status": "queued",
+            "progress": 0,
+            "current_node": "等待切割長影片",
+            "error": None,
+            "prompt_id": None,
+            "output": None,
+            "width": compiled.width,
+            "height": compiled.height,
+            "duration": source_info["duration"],
+            "source_info": source_info,
+            "segments": [{**segment, "status": "waiting", "child_job_id": None} for segment in segments],
+            "active_child_id": None,
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+        }
+        self.jobs[job_id] = job
+        self.cancel_events[job_id] = asyncio.Event()
+        self._persist(job)
+        (JOB_DIR / f"{job_id}.request.json").write_text(json.dumps(raw_request, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.tasks[job_id] = asyncio.create_task(self._run_replacement_batch(job_id, raw_request))
         return job
 
     def local_output_path(self, job: dict[str, Any]) -> Path | None:
@@ -746,6 +1194,23 @@ class JobManager:
                 continue
             self.cancel_events.setdefault(job_id, asyncio.Event())
             self.tasks[job_id] = asyncio.create_task(self._recover(job_id))
+        for job_id, job in self.jobs.items():
+            if job.get("batch_type") != "replace_long" or job.get("status") != "interrupted":
+                continue
+            task = self.tasks.get(job_id)
+            if task and not task.done():
+                continue
+            request_path = JOB_DIR / f"{job_id}.request.json"
+            if not request_path.exists():
+                self.update(job_id, status="failed", error="找不到長片角色替換的原始設定，無法接續。")
+                continue
+            try:
+                raw_request = json.loads(request_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                self.update(job_id, status="failed", error=f"無法讀取長片角色替換設定：{error}")
+                continue
+            self.cancel_events[job_id] = asyncio.Event()
+            self.tasks[job_id] = asyncio.create_task(self._run_replacement_batch(job_id, raw_request))
 
     async def _recover(self, job_id: str) -> None:
         try:
@@ -775,6 +1240,285 @@ class JobManager:
         except RuntimeError:
             return await self.cache_output(source_job["id"], source_job["output"])
 
+    async def _prepare_replacement_segment_asset(
+        self,
+        parent_id: str,
+        source_path: Path,
+        segment: dict[str, Any],
+        include_audio: bool,
+    ) -> str:
+        existing = str(segment.get("source_asset_id") or "")
+        if existing:
+            try:
+                self.assets.path_for(existing)
+                return existing
+            except RequestError:
+                pass
+        asset_id = uuid.uuid4().hex
+        temporary = self.assets.directory / f"{asset_id}.part.mp4"
+        final_path = self.assets.directory / f"{asset_id}.mp4"
+        temporary.unlink(missing_ok=True)
+        try:
+            await asyncio.to_thread(
+                extract_replacement_segment,
+                source_path,
+                temporary,
+                int(segment["input_start_frame"]),
+                int(segment["input_end_frame"]),
+                include_audio,
+            )
+            temporary.replace(final_path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        self.assets.register_derived_video(
+            asset_id,
+            f"replacement_part_{int(segment['index']):02}.mp4",
+            "replacement-segment",
+            {
+                "parent_job_id": parent_id,
+                "segment_index": int(segment["index"]),
+                "start": segment["input_start"],
+                "end": segment["input_end"],
+            },
+        )
+        return asset_id
+
+    def _replacement_child_payload(
+        self,
+        raw_request: dict[str, Any],
+        parent: dict[str, Any],
+        segment: dict[str, Any],
+        previous_continuity_asset: str | None,
+    ) -> dict[str, Any]:
+        payload = copy.deepcopy(raw_request)
+        payload["replacement_auto_split"] = False
+        payload["duration"] = float(segment["input_duration"])
+        payload["job_name"] = f"{parent.get('name') or '角色替換'}_片段{int(segment['index']):02}"
+        payload["replacement_batch_segment"] = {
+            "index": int(segment["index"]),
+            "total": len(parent.get("segments") or []),
+            "source_start": segment["input_start"],
+            "source_end": segment["input_end"],
+            "core_start": segment["core_start"],
+            "core_end": segment["core_end"],
+        }
+        references = payload.get("references") or []
+        if references:
+            references[0]["video_asset_id"] = segment["source_asset_id"]
+            references[0].pop("video_asset_ids", None)
+            references[0]["video_use_audio"] = bool(
+                references[0].get("video_use_audio") and (parent.get("source_info") or {}).get("has_audio")
+            )
+            image_ids = list(references[0].get("image_asset_ids") or [])
+            if (
+                previous_continuity_asset
+                and payload.get("replacement_continuity", True)
+                and len(image_ids) < 9
+                and previous_continuity_asset not in image_ids
+            ):
+                image_ids.append(previous_continuity_asset)
+            references[0]["image_asset_ids"] = image_ids
+        return payload
+
+    async def _wait_for_batch_child(
+        self,
+        parent_id: str,
+        segment_position: int,
+        child_id: str,
+    ) -> dict[str, Any]:
+        parent = self.jobs[parent_id]
+        total = len(parent.get("segments") or [])
+        while True:
+            if self.cancel_events[parent_id].is_set():
+                await self.cancel(child_id)
+                raise asyncio.CancelledError
+            child = self.jobs[child_id]
+            segment = parent["segments"][segment_position]
+            segment["status"] = child.get("status")
+            segment["progress"] = child.get("progress", 0)
+            segment["current_node"] = child.get("current_node")
+            child_progress = float(child.get("progress") or 0) / 100
+            progress = round(5 + ((segment_position + child_progress) / max(1, total)) * 88, 1)
+            self.update(
+                parent_id,
+                segments=parent["segments"],
+                progress=min(93, progress),
+                current_node=f"第 {segment_position + 1}/{total} 段 · {child.get('current_node') or child.get('status')}",
+                active_child_id=child_id,
+            )
+            if child.get("status") in {"completed", "failed", "cancelled"}:
+                return child
+            task = self.tasks.get(child_id)
+            if task and not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=1)
+                except asyncio.TimeoutError:
+                    pass
+            elif child.get("status") == "interrupted" and child.get("prompt_id"):
+                await self.reconcile_job(child_id, wait=True)
+            else:
+                await asyncio.sleep(1)
+
+    async def _run_replacement_batch(self, parent_id: str, raw_request: dict[str, Any]) -> None:
+        parent = self.jobs[parent_id]
+        cancel_event = self.cancel_events.setdefault(parent_id, asyncio.Event())
+        try:
+            source_asset_id = replacement_source_asset_id(raw_request)
+            source_path = self.assets.path_for(source_asset_id)
+            references = raw_request.get("references") or []
+            include_audio = bool(references and references[0].get("video_use_audio"))
+            if not parent.get("generation_started_at"):
+                self.update(parent_id, generation_started_at=datetime.now().astimezone().isoformat())
+            self.update(parent_id, status="preparing", error=None, progress=1, current_node="分析並切割來源影片")
+            segments = parent.get("segments") or []
+            previous_continuity_asset: str | None = None
+            segment_paths: list[Path] = []
+
+            for position, segment in enumerate(segments):
+                if cancel_event.is_set():
+                    raise asyncio.CancelledError
+                previous = segments[position - 1] if position else None
+                previous_continuity_asset = str(previous.get("continuity_asset_id") or "") if previous else None
+                child_id = str(segment.get("child_job_id") or "")
+                child = self.jobs.get(child_id) if child_id else None
+
+                if not segment.get("source_asset_id"):
+                    self.update(
+                        parent_id,
+                        current_node=f"切割第 {position + 1}/{len(segments)} 段來源影片",
+                        progress=round(1 + position / max(1, len(segments)) * 4, 1),
+                    )
+                    segment["source_asset_id"] = await self._prepare_replacement_segment_asset(
+                        parent_id, source_path, segment, include_audio
+                    )
+                    self.update(parent_id, segments=segments)
+
+                if child and child.get("status") == "completed":
+                    try:
+                        child_path = await self.job_output_path(child)
+                    except Exception:
+                        child = None
+                    else:
+                        segment["status"] = "completed"
+                        segment_paths.append(child_path)
+                if not child or child.get("status") in {"failed", "cancelled"} or (
+                    child.get("status") == "interrupted" and not child.get("prompt_id")
+                ):
+                    child_payload = self._replacement_child_payload(
+                        raw_request, parent, segment, previous_continuity_asset or None
+                    )
+                    compiled = compile_request(child_payload)
+                    child = self.create(
+                        compiled,
+                        child_payload,
+                        hidden=True,
+                        parent_job_id=parent_id,
+                        segment_index=position + 1,
+                    )
+                    child_id = child["id"]
+                    segment["child_job_id"] = child_id
+                    segment["status"] = "queued"
+                    self.update(parent_id, segments=segments, active_child_id=child_id)
+                    prompt_path = JOB_DIR / f"{parent_id}.prompt.txt"
+                    if not prompt_path.exists():
+                        prompt_path.write_text(compiled.prompt, encoding="utf-8")
+
+                if child and child.get("status") != "completed":
+                    child = await self._wait_for_batch_child(parent_id, position, child["id"])
+                    if child.get("status") != "completed":
+                        raise RuntimeError(
+                            f"第 {position + 1}/{len(segments)} 段角色替換失敗：{child.get('error') or child.get('status')}"
+                        )
+                    segment_paths.append(await self.job_output_path(child))
+
+                segment["status"] = "completed"
+                segment["progress"] = 100
+                if raw_request.get("replacement_continuity", True) and position < len(segments) - 1:
+                    if not segment.get("continuity_asset_id"):
+                        frame = await asyncio.to_thread(
+                            extract_continuation_frame,
+                            segment_paths[-1],
+                            self.assets,
+                        )
+                        segment["continuity_asset_id"] = frame["id"]
+                self.update(parent_id, segments=segments)
+
+            if cancel_event.is_set():
+                raise asyncio.CancelledError
+            self.update(parent_id, status="preparing", progress=96, current_node="合併替換片段並處理聲音")
+            output_stem = output_filename_stem(parent.get("name"))
+            final_path = OUTPUT_DIR / f"{parent_id}_replaced.mp4"
+            temporary = OUTPUT_DIR / f"{parent_id}_replaced.part.mp4"
+            temporary.unlink(missing_ok=True)
+            try:
+                duration = await asyncio.to_thread(
+                    merge_replacement_segments,
+                    source_path,
+                    segment_paths,
+                    segments,
+                    temporary,
+                    int(parent["width"]),
+                    int(parent["height"]),
+                    str(raw_request.get("replacement_audio_mode") or "original"),
+                )
+                if cancel_event.is_set():
+                    temporary.unlink(missing_ok=True)
+                    raise asyncio.CancelledError
+                temporary.replace(final_path)
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
+            self.update(
+                parent_id,
+                status="completed",
+                progress=100,
+                current_node=None,
+                error=None,
+                active_child_id=None,
+                local_output=final_path.name,
+                download_name=f"{output_stem}_角色替換完整影片.mp4",
+                output={"filename": final_path.name, "subfolder": "", "type": "local"},
+                duration=duration,
+                **self.finish_timing(parent_id),
+            )
+        except asyncio.CancelledError:
+            self.update(
+                parent_id,
+                status="cancelled",
+                current_node=None,
+                active_child_id=None,
+                error="完整角色替換工作已取消；已完成片段會保留，可稍後接續。",
+                **self.finish_timing(parent_id),
+            )
+        except Exception as error:
+            self.update(
+                parent_id,
+                status="failed",
+                current_node=None,
+                active_child_id=None,
+                error=str(error),
+                **self.finish_timing(parent_id),
+            )
+
+    async def resume_batch(self, job_id: str) -> dict[str, Any]:
+        job = self.jobs.get(job_id)
+        if not job or job.get("batch_type") != "replace_long":
+            raise RequestError("這筆工作不是可接續的長片角色替換工作。")
+        task = self.tasks.get(job_id)
+        if task and not task.done():
+            raise RequestError("這筆長片工作目前仍在執行。")
+        if job.get("status") == "completed":
+            raise RequestError("這筆長片工作已經完成。")
+        request_path = JOB_DIR / f"{job_id}.request.json"
+        if not request_path.exists():
+            raise RequestError("找不到這筆長片工作的原始設定。")
+        raw_request = json.loads(request_path.read_text(encoding="utf-8"))
+        self.cancel_events[job_id] = asyncio.Event()
+        self.update(job_id, status="queued", error=None, current_node="準備接續未完成片段")
+        self.tasks[job_id] = asyncio.create_task(self._run_replacement_batch(job_id, raw_request))
+        return self.jobs[job_id]
+
     async def _run(self, job_id: str, compiled: CompiledRequest) -> None:
         cancel_event = self.cancel_events[job_id]
         try:
@@ -783,6 +1527,14 @@ class JobManager:
                     raise asyncio.CancelledError
                 self.update(job_id, status="preparing", progress=0)
                 await self.comfy.ensure_running()
+                turbo_lora_name = None
+                if compiled.quality_mode == "turbo":
+                    turbo_lora_name = await self.comfy.resolve_turbo_lora(compiled.turbo_profile)
+                    if not turbo_lora_name:
+                        raise RuntimeError(
+                            "Turbo 快速預覽需要對應的 H3 Turbo LoRA。"
+                            "請在本機引擎安裝器補齊 Turbo 模型，或在遠端 ComfyUI 的 models/loras 安裝相容 LoRA。"
+                        )
                 uploaded: dict[str, str] = {}
                 asset_ids = required_asset_ids(compiled)
                 for index, asset_id in enumerate(asset_ids, start=1):
@@ -799,7 +1551,7 @@ class JobManager:
                     generation_started_at=generation_started_at.isoformat(),
                     output_stem=output_stem,
                 )
-                workflow = build_workflow(compiled, uploaded, output_stem)
+                workflow = build_workflow(compiled, uploaded, output_stem, turbo_lora_name)
                 (JOB_DIR / f"{job_id}.workflow.json").write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
                 (JOB_DIR / f"{job_id}.prompt.txt").write_text(compiled.prompt, encoding="utf-8")
                 node_titles = {node_id: node.get("_meta", {}).get("title", node["class_type"]) for node_id, node in workflow.items()}
@@ -827,10 +1579,19 @@ class JobManager:
         if job_id not in self.jobs:
             raise RequestError("找不到工作。")
         self.cancel_events.setdefault(job_id, asyncio.Event()).set()
+        active_child = str(self.jobs[job_id].get("active_child_id") or "")
+        if active_child and active_child in self.jobs:
+            await self.cancel(active_child)
         if self.jobs[job_id].get("status") == "running":
-            await self.comfy.interrupt()
-        if self.jobs[job_id].get("status") == "queued":
-            self.update(job_id, status="cancelled", error="工作已取消。", finished_at=utc_now())
+            await self.comfy.interrupt(str(self.jobs[job_id].get("prompt_id") or "") or None)
+        if self.jobs[job_id].get("status") in {"queued", "preparing", "running", "interrupted"}:
+            self.update(
+                job_id,
+                status="cancelled",
+                current_node=None,
+                error="工作已取消。",
+                **self.finish_timing(job_id),
+            )
 
 
 def find_video_output(value: Any) -> dict[str, str] | None:
@@ -864,6 +1625,9 @@ def create_app() -> web.Application:
     settings = SettingsStore(CONFIG_PATH, APP_DIR)
     comfy = ComfyClient(settings.current, DATA_DIR)
     jobs = JobManager(assets, comfy)
+    music_installer = Music3Installer(comfy)
+    music_jobs = MusicJobManager(comfy, DATA_DIR, jobs.gpu_lock, music_installer)
+    gateway = SharedComfyGateway(DATA_DIR)
 
     async def use_installed_engine(target: Path) -> None:
         updated = settings.update({
@@ -881,6 +1645,9 @@ def create_app() -> web.Application:
     app["jobs"] = jobs
     app["settings"] = settings
     app["installer"] = installer
+    app["music_installer"] = music_installer
+    app["music_jobs"] = music_jobs
+    app["shared_gateway"] = gateway
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
@@ -899,14 +1666,15 @@ def create_app() -> web.Application:
             "connection_mode": comfy.mode,
             "base_url": comfy.base_url,
             "can_start": comfy.can_start,
+            "studio_role": settings.current.studio_role,
         })
 
     async def connection(_: web.Request) -> web.Response:
         return web.json_response(settings.current.public_dict())
 
     async def update_connection(request: web.Request) -> web.Response:
-        if jobs.gpu_lock.locked() or comfy.is_starting:
-            return json_response_error(RequestError("目前有影片正在生成，請等工作完成後再切換引擎。"), 409)
+        if jobs.gpu_lock.locked() or comfy.is_starting or music_installer.public_status()["active"]:
+            return json_response_error(RequestError("目前有影片／音樂正在生成或 Music 3 模型正在下載，請完成後再切換引擎。"), 409)
         try:
             payload = await request.json()
             updated = settings.update(payload)
@@ -919,10 +1687,15 @@ def create_app() -> web.Application:
         try:
             payload = await request.json()
             candidate = ConnectionSettings(
+                studio_role=settings.current.studio_role,
                 mode=payload.get("mode", settings.current.mode),
                 base_url=payload.get("base_url", settings.current.base_url),
                 comfy_dir=payload.get("comfy_dir", settings.current.comfy_dir),
                 auto_start_local=payload.get("auto_start_local", settings.current.auto_start_local),
+                remote_access_token=(
+                    str(payload.get("remote_access_token") or "").strip()
+                    or settings.current.remote_access_token
+                ),
             ).normalized(APP_DIR)
             probe = ComfyClient(candidate, DATA_DIR)
             stats = await probe.system_stats()
@@ -942,8 +1715,8 @@ def create_app() -> web.Application:
         return web.json_response(installer.public_status())
 
     async def start_engine_installer(request: web.Request) -> web.Response:
-        if jobs.gpu_lock.locked():
-            return json_response_error(RequestError("目前有影片正在生成，請完成後再安裝本機引擎。"), 409)
+        if jobs.gpu_lock.locked() or music_installer.public_status()["active"]:
+            return json_response_error(RequestError("目前有影片／音樂正在生成或 Music 3 模型正在下載，請完成後再安裝本機引擎。"), 409)
         try:
             payload = await request.json()
             target = resolve_install_target(payload.get("comfy_dir"), APP_DIR)
@@ -971,6 +1744,33 @@ def create_app() -> web.Application:
             metadata["url"] = f"/api/assets/{metadata['id']}"
             return web.json_response(metadata)
         except RequestError as error:
+            return json_response_error(error)
+
+    async def replacement_preparation(asset_id: str, smart: bool) -> dict[str, Any]:
+        path = assets.path_for(asset_id)
+        metadata = assets.metadata(asset_id)
+        cache_key = "replacement_plan_smart" if smart else "replacement_plan_balanced"
+        source_info = metadata.get("video_info")
+        plan = metadata.get(cache_key)
+        if not isinstance(source_info, dict):
+            source_info = await asyncio.to_thread(probe_video, path)
+        if not isinstance(plan, list):
+            scores = []
+            if smart and float(source_info["duration"]) > 15:
+                scores = await asyncio.to_thread(analyze_video_cut_scores, path)
+            plan = replacement_segment_plan(float(source_info["duration"]), scores, smart)
+            assets.update_metadata(asset_id, video_info=source_info, **{cache_key: plan})
+        return {"source": source_info, "segments": plan, "smart": smart}
+
+    async def prepare_replacement(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            asset_id = str(payload.get("asset_id") or "").strip()
+            if not asset_id:
+                raise RequestError("請先上傳原始表演影片。")
+            result = await replacement_preparation(asset_id, payload.get("strategy") != "balanced")
+            return web.json_response(result)
+        except (RequestError, json.JSONDecodeError, OSError, ValueError) as error:
             return json_response_error(error)
 
     async def prepare_continuation(request: web.Request) -> web.Response:
@@ -1086,13 +1886,26 @@ def create_app() -> web.Application:
                 assets.path_for(compiled.continuation_source_asset)
             if compiled.continuation_source_job:
                 await jobs.continuation_source_path(compiled)
+            if compiled.mode == "replace" and payload.get("replacement_auto_split", True):
+                audio_mode = str(payload.get("replacement_audio_mode") or "original")
+                if audio_mode not in {"original", "generated", "mute"}:
+                    raise RequestError("角色替換的聲音處理選項錯誤。")
+                source_id = replacement_source_asset_id(payload)
+                prepared = await replacement_preparation(
+                    source_id, payload.get("replacement_split_strategy") != "balanced"
+                )
+                if float(prepared["source"]["duration"]) > 15:
+                    job = jobs.create_replacement_batch(
+                        compiled, payload, prepared["source"], prepared["segments"]
+                    )
+                    return web.json_response(job, status=202)
             job = jobs.create(compiled, payload)
             return web.json_response(job, status=202)
         except (RequestError, json.JSONDecodeError) as error:
             return json_response_error(error)
 
     async def list_jobs(request: web.Request) -> web.Response:
-        ordered = sort_job_records(jobs.jobs.values())
+        ordered = sort_job_records(job for job in jobs.jobs.values() if not job.get("hidden"))
         if not any(key in request.query for key in ("page", "page_size", "q")):
             return web.json_response(ordered[:50])
         try:
@@ -1103,7 +1916,7 @@ def create_app() -> web.Application:
         return web.json_response(paginate_job_records(ordered, page, page_size, request.query.get("q", "")))
 
     async def job_options(_: web.Request) -> web.Response:
-        ordered = sort_job_records(jobs.jobs.values())
+        ordered = sort_job_records(job for job in jobs.jobs.values() if not job.get("hidden"))
         return web.json_response([
             job for job in ordered if job.get("status") == "completed" and job.get("output")
         ])
@@ -1120,6 +1933,12 @@ def create_app() -> web.Application:
             return web.json_response(jobs.jobs[request.match_info["job_id"]])
         except RequestError as error:
             return json_response_error(error, 404)
+
+    async def resume_job(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await jobs.resume_batch(request.match_info["job_id"]), status=202)
+        except (RequestError, OSError, json.JSONDecodeError) as error:
+            return json_response_error(error, 409)
 
     async def rename_job(request: web.Request) -> web.Response:
         job_id = request.match_info["job_id"]
@@ -1187,7 +2006,7 @@ def create_app() -> web.Application:
 
     async def job_video(request: web.Request) -> web.Response:
         job = jobs.jobs.get(request.match_info["job_id"])
-        if not job or not job.get("output"):
+        if not job or (not job.get("output") and not jobs.local_output_path(job)):
             return json_response_error(RequestError("影片尚未完成。"), 404)
         try:
             cached = jobs.local_output_path(job)
@@ -1208,6 +2027,134 @@ def create_app() -> web.Application:
         except Exception as error:
             return json_response_error(error, 502)
 
+    async def music_status(_: web.Request) -> web.Response:
+        result = await music_installer.status_for_current_engine()
+        result["engine_ready"] = await comfy.is_ready()
+        result["connection_mode"] = comfy.mode
+        return web.json_response(result)
+
+    async def install_music_models(_: web.Request) -> web.Response:
+        try:
+            return web.json_response(await music_installer.start(), status=202)
+        except Music3Error as error:
+            return json_response_error(error, 409)
+
+    async def cancel_music_install(_: web.Request) -> web.Response:
+        return web.json_response(await music_installer.cancel())
+
+    async def list_music_jobs(request: web.Request) -> web.Response:
+        try:
+            page = max(1, int(request.query.get("page", "1")))
+            page_size = min(20, max(1, int(request.query.get("page_size", "20"))))
+        except ValueError:
+            return json_response_error(Music3Error("頁碼格式錯誤。"))
+        return web.json_response(music_jobs.list_page(page, page_size))
+
+    async def create_music_job(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            return web.json_response(music_jobs.create(payload), status=202)
+        except (Music3Error, json.JSONDecodeError, OSError, ValueError) as error:
+            return json_response_error(error)
+
+    async def cancel_music_job(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await music_jobs.cancel(request.match_info["job_id"]))
+        except Music3Error as error:
+            return json_response_error(error, 404)
+
+    async def resume_music_job(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(music_jobs.resume(request.match_info["job_id"]), status=202)
+        except (Music3Error, OSError, json.JSONDecodeError) as error:
+            return json_response_error(error, 409)
+
+    async def rename_music_job(request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        if job_id not in music_jobs.jobs:
+            return json_response_error(Music3Error("找不到音樂工作。"), 404)
+        try:
+            payload = await request.json()
+            music_jobs.update(job_id, name=clean_music_name(payload.get("name")))
+            return web.json_response(music_jobs.jobs[job_id])
+        except (Music3Error, json.JSONDecodeError) as error:
+            return json_response_error(error)
+
+    async def favorite_music_job(request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        if job_id not in music_jobs.jobs:
+            return json_response_error(Music3Error("找不到音樂工作。"), 404)
+        try:
+            payload = await request.json()
+            if not isinstance(payload.get("favorite"), bool):
+                raise Music3Error("我的最愛狀態格式錯誤。")
+            music_jobs.update(job_id, favorite=payload["favorite"])
+            return web.json_response(music_jobs.jobs[job_id])
+        except (Music3Error, json.JSONDecodeError) as error:
+            return json_response_error(error)
+
+    async def music_audio(request: web.Request) -> web.Response:
+        job = music_jobs.jobs.get(request.match_info["job_id"])
+        path = music_jobs.local_output_path(job or {})
+        if not job or not path:
+            return json_response_error(Music3Error("音樂尚未完成或檔案不存在。"), 404)
+        headers = {}
+        if request.query.get("download") == "1":
+            suffix = path.suffix or ".mp3"
+            download_name = f"{music_filename_stem(job.get('name'))}{suffix}"
+            headers["Content-Disposition"] = (
+                f'attachment; filename="music{suffix}"; filename*=UTF-8\'\'{quote(download_name, safe="")}'
+            )
+        return web.FileResponse(path, headers=headers)
+
+    def require_gateway_admin() -> None:
+        if settings.current.studio_role != "host":
+            raise web.HTTPForbidden(
+                text=json.dumps({"error": "此 H3 Studio 是一般使用者工作站，沒有共享引擎管理權限。"}, ensure_ascii=False),
+                content_type="application/json",
+            )
+
+    async def gateway_status(_: web.Request) -> web.Response:
+        require_gateway_admin()
+        return web.json_response(gateway.public_status())
+
+    async def update_gateway_settings(request: web.Request) -> web.Response:
+        require_gateway_admin()
+        try:
+            payload = await request.json()
+            return web.json_response(await gateway.apply_settings(payload.get("enabled") is True, payload.get("port", 8190)))
+        except (GatewayError, OSError, json.JSONDecodeError) as error:
+            return json_response_error(error, 409)
+
+    async def create_gateway_user(request: web.Request) -> web.Response:
+        require_gateway_admin()
+        try:
+            payload = await request.json()
+            user, token = gateway.store.create_user(payload.get("name"))
+            return web.json_response({"user": user, "token": token}, status=201)
+        except (GatewayError, OSError, json.JSONDecodeError) as error:
+            return json_response_error(error)
+
+    async def rotate_gateway_user(request: web.Request) -> web.Response:
+        require_gateway_admin()
+        try:
+            user, token = gateway.store.rotate_user(request.match_info["user_id"])
+            return web.json_response({"user": user, "token": token})
+        except (GatewayError, OSError) as error:
+            return json_response_error(error, 404)
+
+    async def set_gateway_user_enabled(request: web.Request) -> web.Response:
+        require_gateway_admin()
+        try:
+            payload = await request.json()
+            if not isinstance(payload.get("enabled"), bool):
+                raise GatewayError("使用者啟用狀態格式錯誤。")
+            return web.json_response(
+                gateway.store.set_user_enabled(request.match_info["user_id"], payload["enabled"])
+            )
+        except (GatewayError, OSError, json.JSONDecodeError) as error:
+            return json_response_error(error, 404)
+
     app.router.add_get("/", index)
     app.router.add_get("/api/status", status)
     app.router.add_get("/api/connection", connection)
@@ -1219,6 +2166,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/engine-installer/cancel", cancel_engine_installer)
     app.router.add_post("/api/comfy/start", start_comfy)
     app.router.add_post("/api/assets", upload)
+    app.router.add_post("/api/replacement/prepare", prepare_replacement)
     app.router.add_post("/api/keyframes/prepare", prepare_keyframe)
     app.router.add_post("/api/continuation/prepare", prepare_continuation)
     app.router.add_post("/api/symbol/prepare", prepare_symbol)
@@ -1229,10 +2177,26 @@ def create_app() -> web.Application:
     app.router.add_get("/api/jobs/options", job_options)
     app.router.add_get("/api/jobs/{job_id}", get_job)
     app.router.add_post("/api/jobs/{job_id}/cancel", cancel_job)
+    app.router.add_post("/api/jobs/{job_id}/resume", resume_job)
     app.router.add_post("/api/jobs/{job_id}/rename", rename_job)
     app.router.add_post("/api/jobs/{job_id}/favorite", favorite_job)
     app.router.add_get("/api/jobs/{job_id}/recipe", job_recipe)
     app.router.add_get("/api/jobs/{job_id}/video", job_video)
+    app.router.add_get("/api/music/status", music_status)
+    app.router.add_post("/api/music/install", install_music_models)
+    app.router.add_post("/api/music/install/cancel", cancel_music_install)
+    app.router.add_get("/api/music/jobs", list_music_jobs)
+    app.router.add_post("/api/music/jobs", create_music_job)
+    app.router.add_post("/api/music/jobs/{job_id}/cancel", cancel_music_job)
+    app.router.add_post("/api/music/jobs/{job_id}/resume", resume_music_job)
+    app.router.add_post("/api/music/jobs/{job_id}/rename", rename_music_job)
+    app.router.add_post("/api/music/jobs/{job_id}/favorite", favorite_music_job)
+    app.router.add_get("/api/music/jobs/{job_id}/audio", music_audio)
+    app.router.add_get("/api/gateway/status", gateway_status)
+    app.router.add_post("/api/gateway/settings", update_gateway_settings)
+    app.router.add_post("/api/gateway/users", create_gateway_user)
+    app.router.add_post("/api/gateway/users/{user_id}/rotate", rotate_gateway_user)
+    app.router.add_post("/api/gateway/users/{user_id}/enabled", set_gateway_user_enabled)
     app.router.add_static("/static", STATIC_DIR)
 
     async def auto_start_engine(_: web.Application) -> None:
@@ -1247,7 +2211,16 @@ def create_app() -> web.Application:
 
         app["comfy_autostart_task"] = asyncio.create_task(start_in_background())
 
+    async def auto_start_gateway(_: web.Application) -> None:
+        if settings.current.studio_role == "host":
+            await gateway.start_if_enabled()
+
+    async def cleanup_gateway(_: web.Application) -> None:
+        await gateway.stop()
+
     app.on_startup.append(auto_start_engine)
+    app.on_startup.append(auto_start_gateway)
+    app.on_cleanup.append(cleanup_gateway)
     return app
 
 

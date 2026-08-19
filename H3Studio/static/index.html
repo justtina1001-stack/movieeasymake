@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260815-jobs">
+  <link rel="stylesheet" href="/static/styles.css?v=20260819-roles">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -17,9 +17,12 @@
     <div class="engine-status">
       <span id="statusDot" class="status-dot"></span>
       <span id="statusText">檢查生成引擎...</span>
+      <span id="studioRoleBadge" class="studio-role-badge client">一般使用者</span>
+      <button id="openMusicStudio" class="button ghost small music-toolbar-button" type="button" aria-haspopup="dialog"><b>♫</b><span>Music 3</span></button>
       <button id="openPromptGuide" class="button ghost small guide-toolbar-button" type="button" aria-haspopup="dialog" aria-label="開啟提示詞指南"><b>✦</b><span class="guide-button-label">提示詞指南</span></button>
       <button id="startEngine" class="button ghost small" type="button">啟動引擎</button>
       <button id="openConnectionSettings" class="button ghost small" type="button">引擎設定</button>
+      <button id="openGatewaySettings" class="button ghost small hidden" type="button" aria-haspopup="dialog">共享引擎</button>
     </div>
   </header>
 
@@ -100,12 +103,16 @@
             <label>時長<div class="field-unit"><input id="duration" type="number" min="5" max="15" step="0.5" value="5"><span>秒</span></div></label>
             <label>Seed<div class="seed-row"><input id="seed" type="number" min="0" value="1"><button id="randomSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div></label>
           </div>
+          <div class="quality-selector">
+            <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 快速預覽 · 自動最佳化</option></select></label>
+            <div><strong id="qualityModeTitle">原生品質模式</strong><span id="qualityModeHint">保留目前採樣設定，適合正式成品。</span></div>
+          </div>
           <details class="advanced">
             <summary>進階採樣設定</summary>
             <div class="form-grid three">
               <label>採樣步數<input id="steps" type="number" min="4" max="40" value="20"></label>
               <label>Scheduler<select id="scheduler"><option value="simple">simple</option><option value="beta">beta</option><option value="normal">normal</option><option value="sgm_uniform">sgm_uniform</option><option value="karras">karras</option></select></label>
-              <label id="refSizeWrap" class="hidden">參考圖精度<select id="refImageSize"><option value="match">match · 較快</option><option value="max">max · 身份較準</option></select></label>
+              <label id="refSizeWrap" class="hidden">角色參考圖精度<select id="refImageSize"><option value="match">match · 較快／Turbo 建議</option><option value="max">max · 身份較準／較耗顯存</option></select><small class="field-help">只控制參考圖片的處理精度，不是角色強度；非 Ref2VA 模式不適用。</small></label>
             </div>
           </details>
           <div class="motion-director">
@@ -235,10 +242,19 @@
               <input id="replacementVideoInput" type="file" accept="video/mp4,video/webm,video/quicktime,.mov,.mkv,.avi" hidden>
               <div class="asset-zone-title"><span>原始表演影片</span><button id="addReplacementVideo" type="button">＋ 選擇影片</button></div>
               <div id="replacementVideoPreview" class="thumb-grid"><span class="asset-placeholder">拖入含有要被替換角色的原影片</span></div>
-              <label class="check-row"><input id="replacementUseAudio" type="checkbox"><span>保留原影片聲音</span></label>
+              <label class="check-row"><input id="replacementUseAudio" type="checkbox"><span>將原聲提供給 AI，協助嘴型與動作同步</span></label>
             </div>
           </div>
-          <div class="replacement-safety"><strong>16GB VRAM 安全起點</strong><span>建議先用 0.4MP、5 秒測試；長片請先切成短段再逐段替換。</span></div>
+          <div id="replacementVideoInfo" class="replacement-video-info empty">
+            <strong>尚未分析來源影片</strong><span>上傳後會顯示尺寸、時長、音軌與預計片段數。</span>
+          </div>
+          <div class="replacement-batch-options">
+            <label class="check-option"><input id="replacementAutoSplit" type="checkbox" checked><span><strong>處理完整來源影片</strong><small>超過 15 秒時，自動切割、逐段替換並合併成完整影片。</small></span></label>
+            <label class="check-option"><input id="replacementContinuity" type="checkbox" checked><span><strong>跨段連續性保護</strong><small>使用 0.5 秒重疊動作與上一段角色結果，降低接縫跳動。</small></span></label>
+            <label>切段策略<select id="replacementSplitStrategy"><option value="smart">智慧切點（建議）</option><option value="balanced">平均切段</option></select></label>
+            <label>完成影片聲音<select id="replacementAudioMode"><option value="original">完整保留原影片聲音（建議）</option><option value="generated">使用各段 AI 生成聲音</option><option value="mute">靜音輸出</option></select></label>
+          </div>
+          <div class="replacement-safety"><strong>長片工作方式</strong><span>顯卡一次只處理一個片段；任何片段失敗都可從該段接續，不必整支影片重做。正式成品仍建議檢查跨段接縫。</span></div>
         </section>
 
         <section id="continuationPanel" class="panel hidden">
@@ -326,19 +342,24 @@
         <div><p class="eyebrow">COMFYUI BACKEND</p><h2 id="connectionTitle">生成引擎設定</h2></div>
         <button class="icon-button modal-close" type="button" data-close-connection aria-label="關閉">×</button>
       </div>
+      <div id="studioRoleCard" class="studio-role-card client">
+        <span id="studioRoleIcon">USER</span>
+        <div><strong id="studioRoleTitle">一般使用者工作站</strong><small id="studioRoleDescription">只能使用自己的本機引擎，或以個人金鑰連線管理主機；無法建立或管理共享金鑰。</small></div>
+      </div>
       <div class="connection-modes">
         <label class="connection-option"><input type="radio" name="connectionMode" value="local"><span><strong>使用這台電腦</strong><small>連線或自動啟動本機 ComfyUI 與模型</small></span></label>
         <label class="connection-option"><input type="radio" name="connectionMode" value="remote"><span><strong>連線遠端電腦</strong><small>面板留在本機，模型與 GPU 在另一台電腦</small></span></label>
       </div>
       <div class="connection-fields">
         <label>ComfyUI 網址<input id="connectionUrl" type="url" placeholder="http://127.0.0.1:8188"></label>
+        <label id="remoteTokenField" class="hidden">個人存取金鑰<input id="connectionRemoteToken" type="password" autocomplete="off" placeholder="貼上 GPU 主機管理者提供的 h3g_... 金鑰"><small>金鑰只儲存在這台電腦，不會顯示在工作紀錄或介面回應中。</small></label>
         <label id="comfyDirField">本機 ComfyUI 資料夾<input id="connectionComfyDir" type="text" placeholder="例如 E:\ComfyUI"></label>
         <label id="autoStartField" class="check-row"><input id="connectionAutoStart" type="checkbox"><span>開啟面板時自動啟動本機 ComfyUI</span></label>
       </div>
       <details id="localInstallerSection" class="local-installer">
-        <summary><span><strong>這台電腦還沒有引擎？</strong><small>一鍵安裝 ComfyUI、CUDA PyTorch 與 MiniMax H3 模型</small></span><b>約 80 GiB</b></summary>
+        <summary><span><strong>這台電腦還沒有引擎？</strong><small>一鍵安裝 ComfyUI、CUDA PyTorch、MiniMax H3 與 Turbo LoRA</small></span><b>約 81 GiB</b></summary>
         <div class="installer-body">
-          <div class="installer-warning"><strong>安裝前注意</strong><span>完整模型約 59.1 GiB，下載與安裝可能需要很長時間。僅支援 Windows + NVIDIA GPU，建議至少 16 GB VRAM、64 GB RAM。</span></div>
+          <div class="installer-warning"><strong>安裝前注意</strong><span>基礎模型與壓縮 Turbo LoRA 約 60.2 GiB，下載與安裝可能需要很長時間。僅支援 Windows + NVIDIA GPU，建議至少 16 GB VRAM、64 GB RAM。</span></div>
           <button id="checkLocalEngine" class="button secondary small" type="button">檢查這台電腦</button>
           <div id="installerPreflight" class="installer-preflight muted">尚未檢查硬體與磁碟空間。</div>
           <label class="license-check"><input id="acceptH3License" type="checkbox"><span>我已閱讀並同意 <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noreferrer">MiniMax H3 Community License</a>。</span></label>
@@ -360,6 +381,41 @@
         <button id="testConnection" class="button secondary" type="button">測試連線</button>
         <button id="saveConnection" class="button primary" type="button">儲存設定</button>
       </div>
+    </section>
+  </div>
+
+  <div id="gatewayModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="gatewayTitle">
+    <div class="modal-backdrop" data-close-gateway></div>
+    <section class="modal-card gateway-card">
+      <div class="modal-heading">
+        <div><p class="eyebrow">SHARED GPU GATEWAY</p><h2 id="gatewayTitle">共享引擎管理</h2><p>同事各自執行 H3 Studio，只共用這台電腦的 ComfyUI 與 GPU。</p></div>
+        <button class="icon-button modal-close" type="button" data-close-gateway aria-label="關閉">×</button>
+      </div>
+      <div class="gateway-security-note">
+        <strong>隱私隔離已啟用</strong>
+        <span>每位使用者使用不同金鑰；素材、任務歷史、輸出檔與取消操作均由 Gateway 驗證所有權。請勿把原始 ComfyUI 8188 連接埠分享出去。</span>
+      </div>
+      <div class="gateway-switch-row">
+        <label class="check-row"><input id="gatewayEnabled" type="checkbox"><span><strong>允許區域網路共用 GPU</strong><small>啟用後由安全 Gateway 接收同事的 H3 Studio 工作</small></span></label>
+        <label>Gateway 連接埠<input id="gatewayPort" type="number" min="1024" max="65535" value="8190"></label>
+        <button id="saveGatewaySettings" class="button primary" type="button">套用設定</button>
+      </div>
+      <div id="gatewayRuntime" class="gateway-runtime"><span class="status-dot"></span><strong>讀取狀態中...</strong></div>
+      <div class="gateway-addresses">
+        <div><strong>同事的「ComfyUI 網址」請填</strong><small>建議選用包含你區網 IP 的網址，不要使用 127.0.0.1。</small></div>
+        <div id="gatewayUrlList" class="gateway-url-list"></div>
+      </div>
+      <div class="gateway-users-heading">
+        <div><h3>使用者與個人金鑰</h3><p>每位同事建立一個帳號；金鑰只會在新增或換發時顯示一次。</p></div>
+        <form id="gatewayCreateUser" class="gateway-create-user"><input id="gatewayUserName" maxlength="60" placeholder="同事名稱" required><button class="button secondary" type="submit">新增使用者</button></form>
+      </div>
+      <div id="gatewayTokenReveal" class="gateway-token-reveal hidden">
+        <div><strong id="gatewayTokenTitle">請立即保存此金鑰</strong><small>關閉後無法再次查看；遺失時請換發。</small></div>
+        <code id="gatewayTokenValue"></code>
+        <button id="copyGatewayToken" class="button secondary small" type="button">複製金鑰</button>
+      </div>
+      <div id="gatewayUserList" class="gateway-user-list"></div>
+      <div class="gateway-footer-note"><strong>同事端設定：</strong><span>引擎設定 → 連線遠端電腦 → 填入上方 Gateway 網址與自己的個人金鑰。</span></div>
     </section>
   </div>
 
@@ -462,7 +518,70 @@ non_diegetic_music: ...</pre></div>
     </section>
   </div>
 
-  <div id="toast" class="toast"></div>
-  <script src="/static/app.js?v=20260815-jobs"></script>
+  <div id="musicModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="musicTitle">
+    <div class="modal-backdrop" data-close-music></div>
+    <section class="modal-card music-studio-card">
+      <div class="modal-heading music-heading">
+        <div><p class="eyebrow">LOCAL OPEN-WEIGHT MUSIC</p><h2 id="musicTitle">MiniMax Music 3 音樂工作室</h2><p>沿用目前 ComfyUI，在本機產生歌曲或純音樂；不需要 API 點數。</p></div>
+        <button class="icon-button modal-close" type="button" data-close-music aria-label="關閉音樂工作室">×</button>
+      </div>
+
+      <div class="music-layout">
+        <div class="music-editor">
+          <section class="music-model-card">
+            <div><span class="music-status-dot" id="musicStatusDot"></span><strong id="musicModelTitle">檢查 Music 3 模型...</strong><small id="musicModelDetail">INT8 低顯存版，約 11.9 GB</small></div>
+            <div class="music-model-actions"><button id="installMusicModels" class="button secondary" type="button">安裝 Music 3 模型</button><button id="cancelMusicInstall" class="button ghost hidden" type="button">暫停下載</button></div>
+            <div id="musicInstallProgress" class="music-progress hidden"><i id="musicInstallBar"></i></div>
+          </section>
+
+          <div class="music-mode-switch" role="group" aria-label="音樂模式">
+            <button class="active" type="button" data-music-mode="instrumental"><strong>純音樂</strong><small>配樂、遊戲 BGM、表演概念</small></button>
+            <button type="button" data-music-mode="song"><strong>歌曲</strong><small>自行填入結構標籤與歌詞</small></button>
+          </div>
+
+          <div class="form-grid two music-core-fields">
+            <label>任務名稱<input id="musicJobName" maxlength="80" placeholder="例如：福神主遊戲歡樂配樂"></label>
+            <label>使用情境<input id="musicUseCase" value="slot game main-game soundtrack" placeholder="例如：老虎機主遊戲、Free Game"></label>
+            <label>曲風<input id="musicGenre" value="cinematic Asian electronic game music" placeholder="例如：東方電音、爵士、史詩管弦"></label>
+            <label>情緒<input id="musicMood" value="joyful, lucky, energetic, polished" placeholder="例如：歡樂、神秘、緊張、勝利感"></label>
+          </div>
+
+          <div class="form-grid three">
+            <label>BPM<input id="musicBpm" type="number" min="40" max="220" value="126"></label>
+            <label>調性<input id="musicKey" value="D major" placeholder="例如：D major"></label>
+            <label>時長（秒）<input id="musicDuration" type="number" min="10" max="300" value="60"></label>
+          </div>
+
+          <label class="music-wide-field">主要樂器與音色<textarea id="musicInstruments" rows="3">punchy drums, warm bass, bright plucked synths, Chinese percussion, sparkling bells, cinematic brass accents</textarea></label>
+          <label class="music-wide-field">段落與編曲<textarea id="musicStructure" rows="3">short recognizable intro, clear main theme, a lighter contrasting middle, rising final section, clean loop-friendly ending</textarea></label>
+          <label id="musicVocalsField" class="music-wide-field hidden">主唱設定<textarea id="musicVocals" rows="3" placeholder="例如：女聲、明亮、中文咬字清楚、固定音色與和聲方式"></textarea></label>
+          <label id="musicLyricsField" class="music-wide-field hidden">歌詞<textarea id="musicLyrics" class="music-lyrics" placeholder="[Intro]&#10;&#10;[Verse]&#10;...&#10;&#10;[Chorus]&#10;...&#10;&#10;[Outro]"></textarea><small class="field-help">結構標籤會控制段落；歌詞文字主要傳達內容與情緒。</small></label>
+
+          <details class="advanced music-advanced">
+            <summary>進階設定</summary>
+            <div class="form-grid two">
+              <label>製作品質<input id="musicProduction" value="clean modern production, clear melody, controlled dynamics, wide stereo image"></label>
+              <label>避免內容<input id="musicAvoid" value="muddy mix, abrupt cuts, unstable tempo, excessive distortion"></label>
+              <label>額外說明<input id="musicDetails" value="Keep the musical form coherent, transitions intentional, and the main theme easy to remember."></label>
+              <label>Seed<div class="seed-row"><input id="musicSeed" inputmode="numeric"><button id="randomMusicSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div></label>
+              <label>輸出格式<select id="musicFormat"><option value="mp3">MP3 V0</option><option value="flac">FLAC 無損</option></select></label>
+              <label class="check-row music-check"><input id="musicTiledDecode" type="checkbox" checked><span>低顯存分塊解碼（16GB 建議開啟）</span></label>
+            </div>
+          </details>
+          <button id="generateMusic" class="button primary wide music-generate" type="button">♫ 產生音樂</button>
+          <p class="music-generation-note">長曲需要較久時間；生成會和影片共用同一條 GPU 佇列，不會同時搶顯存。</p>
+        </div>
+
+        <aside class="music-history">
+          <div class="music-history-title"><div><span class="step-number">HISTORY</span><h3>音樂項目</h3></div><button id="refreshMusicJobs" class="button ghost small" type="button">重新整理</button></div>
+          <div id="musicJobList" class="music-job-list"><div class="empty-state">尚無音樂工作</div></div>
+          <div class="music-pagination"><button id="previousMusicPage" class="button ghost small" type="button">上一頁</button><span id="musicPageLabel">1 / 1</span><button id="nextMusicPage" class="button ghost small" type="button">下一頁</button></div>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=20260819-roles"></script>
 </body>
 </html>

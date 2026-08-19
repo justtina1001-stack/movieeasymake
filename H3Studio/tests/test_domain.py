@@ -32,6 +32,55 @@ class CompileRequestTests(unittest.TestCase):
         save = next(value for value in workflow.values() if value["class_type"] == "SaveVideo")
         self.assertEqual(save["inputs"]["filename_prefix"], "H3Studio/2026-08-06_09-10-11_123456")
 
+    def test_turbo_preview_uses_8_step_fl2v_profile_at_preview_resolution(self):
+        payload = self.base()
+        payload["quality_mode"] = "turbo"
+        payload["steps"] = 30
+        payload["scheduler"] = "karras"
+        compiled = compile_request(payload)
+        self.assertEqual(compiled.steps, 8)
+        self.assertEqual(compiled.scheduler, "simple")
+        self.assertEqual(compiled.sampler_name, "euler")
+        self.assertEqual((compiled.shift_video, compiled.shift_audio), (12.0, 3.0))
+        workflow = build_workflow(compiled, {}, "turbo-preview")
+        lora = next(value for value in workflow.values() if value["class_type"] == "LoraLoaderModelOnly")
+        shift = next(value for value in workflow.values() if value["class_type"] == "MiniMaxH3SigmaShift")
+        sampler = next(value for value in workflow.values() if value["class_type"] == "KSamplerSelect")
+        scheduler = next(value for value in workflow.values() if value["class_type"] == "BasicScheduler")
+        self.assertIn("8step", lora["inputs"]["lora_name"])
+        self.assertEqual(lora["inputs"]["strength_model"], 0.75)
+        self.assertEqual(shift["inputs"]["shift_video"], 12.0)
+        self.assertEqual(sampler["inputs"]["sampler_name"], "euler")
+        self.assertEqual(scheduler["inputs"]["steps"], 8)
+
+    def test_turbo_preview_uses_4_step_768p_profile_for_exact_native_landscape(self):
+        payload = self.base()
+        payload.update({"quality_mode": "turbo", "megapixels": 0.98})
+        compiled = compile_request(payload)
+        self.assertEqual((compiled.width, compiled.height), (1344, 768))
+        self.assertEqual(compiled.steps, 4)
+        self.assertEqual(compiled.shift_video, 6.0)
+        self.assertIn("768p", compiled.turbo_lora)
+
+    def test_turbo_reference_profile_forces_match_and_4_steps(self):
+        payload = self.base("r2v")
+        payload.update({
+            "quality_mode": "turbo",
+            "ref_image_size": "max",
+            "references": [{"alias": "小明", "type": "character", "image_asset_ids": [IMAGE_A]}],
+        })
+        compiled = compile_request(payload)
+        self.assertEqual(compiled.steps, 4)
+        self.assertEqual(compiled.ref_image_size, "match")
+        self.assertIn("ref2v", compiled.turbo_lora)
+        workflow = build_workflow(compiled, {IMAGE_A: "h3/a.png"}, "turbo-ref")
+        self.assertTrue(any(value["class_type"] == "MiniMaxH3SigmaShift" for value in workflow.values()))
+
+    def test_native_quality_does_not_add_turbo_nodes(self):
+        compiled = compile_request(self.base())
+        workflow = build_workflow(compiled, {}, "native")
+        self.assertFalse(any(value["class_type"] in {"LoraLoaderModelOnly", "MiniMaxH3SigmaShift"} for value in workflow.values()))
+
     def test_fl2va_requires_a_keyframe(self):
         with self.assertRaisesRegex(RequestError, "至少需要一張"):
             compile_request(self.base("fl2va"))
@@ -90,6 +139,26 @@ class CompileRequestTests(unittest.TestCase):
         payload["references"] = [{"alias": "新角色", "type": "character", "video_asset_id": VIDEO_A}]
         with self.assertRaisesRegex(RequestError, "新角色圖片"):
             compile_request(payload)
+
+    def test_replace_batch_segment_adds_identity_and_timeline_continuity_rules(self):
+        payload = self.base("replace")
+        payload["references"] = [{
+            "alias": "新角色",
+            "type": "character",
+            "image_asset_ids": [IMAGE_A],
+            "video_asset_id": VIDEO_A,
+        }]
+        payload["replacement_batch_segment"] = {
+            "index": 2,
+            "total": 4,
+            "source_start": 9.5,
+            "source_end": 20.5,
+        }
+        compiled = compile_request(payload)
+        self.assertIn("replacement segment 2 of 4", compiled.prompt)
+        self.assertIn("9.500s–20.500s", compiled.prompt)
+        self.assertIn("不得憑空加入 <Subject 1>", compiled.prompt)
+        self.assertIn("not a keyframe", compiled.prompt)
 
     def test_symbol_loop_forces_same_prepared_image_at_both_ends(self):
         payload = self.base("symbol_loop")

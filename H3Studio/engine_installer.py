@@ -15,7 +15,9 @@ from typing import Any, Awaitable, Callable
 MODEL_REPO = "Comfy-Org/MiniMax-H3"
 MODEL_REVISION = "0543966fbdce5ba05709a8f2031c94bdba629b4a"
 COMFY_REPO = "https://github.com/Comfy-Org/ComfyUI.git"
-COMFY_REVISION = "9a9fdb10ed144ce760d9682cb247526ea23cc525"
+COMFY_REVISION = "0f1fa67ad8a68b62c65ebc97a7bf485df2459c3a"
+TURBO_LORA_REPO = "Kijai/MiniMax-H3_comfy"
+TURBO_LORA_REVISION = "2dc3cedb9b58b0e448d9e950f794f25bf28dbbb5"
 LICENSE_URL = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
 EXCLUDED_TERRITORIES = "歐盟、英國、韓國與美國"
 GIB = 1024**3
@@ -26,6 +28,12 @@ MODEL_FILES: tuple[tuple[str, int], ...] = (
     ("vae/minimax_h3_audio_vae_fp32.safetensors", 605_254_808),
     ("vae/minimax_h3_video_vae_fp16.safetensors", 5_207_808_496),
 )
+TURBO_LORA_FILES: tuple[tuple[str, int], ...] = (
+    ("loras/minimax_h3_fl2v_lightx2v_turbo_8step_v1.0_resized_avg_rank_24_bf16.safetensors", 364_638_304),
+    ("loras/minimax_h3_fl2v_lightx2v_turbo_4step_v1.0_768p_resized_avg_rank_31_bf16.safetensors", 440_873_704),
+    ("loras/minimax_h3_ref2v_lightx2v_turbo_4step_v0.1_resized_avg_rank_20_bf16.safetensors", 306_731_560),
+)
+ALL_MODEL_FILES = MODEL_FILES + TURBO_LORA_FILES
 
 
 class InstallerError(ValueError):
@@ -51,7 +59,7 @@ def resolve_install_target(value: Any, app_dir: Path) -> Path:
 
 def model_state(target: Path) -> list[dict[str, Any]]:
     result = []
-    for relative, expected_size in MODEL_FILES:
+    for relative, expected_size in ALL_MODEL_FILES:
         path = target / "models" / Path(relative)
         actual_size = path.stat().st_size if path.is_file() else 0
         result.append({

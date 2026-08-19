@@ -11,7 +11,17 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 from huggingface_hub import hf_hub_download
 
-from engine_installer import COMFY_REPO, COMFY_REVISION, MODEL_FILES, MODEL_REPO, MODEL_REVISION
+from engine_installer import (
+    ALL_MODEL_FILES,
+    COMFY_REPO,
+    COMFY_REVISION,
+    MODEL_FILES,
+    MODEL_REPO,
+    MODEL_REVISION,
+    TURBO_LORA_FILES,
+    TURBO_LORA_REPO,
+    TURBO_LORA_REVISION,
+)
 
 
 OFFICIAL_REPO = "MiniMaxAI/MiniMax-H3"
@@ -38,8 +48,8 @@ def main() -> None:
     if args.dry_run:
         event(5, "乾跑：ComfyUI 程式")
         event(20, "乾跑：CUDA 13.0 PyTorch 與相依套件")
-        for index, (relative, _) in enumerate(MODEL_FILES, start=1):
-            event(20 + index * 12, f"乾跑：模型 {index}/{len(MODEL_FILES)}", current_file=Path(relative).name)
+        for index, (relative, _) in enumerate(ALL_MODEL_FILES, start=1):
+            event(20 + round(index / len(ALL_MODEL_FILES) * 70), f"乾跑：模型 {index}/{len(ALL_MODEL_FILES)}", current_file=Path(relative).name)
         event(100, "乾跑完成")
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -71,17 +81,18 @@ def main() -> None:
     model_root = target / "models"
     start_progress = 35
     progress_span = 58
-    for index, (relative, expected_size) in enumerate(MODEL_FILES):
+    for index, (relative, expected_size) in enumerate(ALL_MODEL_FILES):
         destination = model_root / Path(relative)
-        progress = start_progress + round(index / len(MODEL_FILES) * progress_span)
-        event(progress, f"下載模型 {index + 1}/{len(MODEL_FILES)}：{destination.name}", current_file=destination.name)
+        progress = start_progress + round(index / len(ALL_MODEL_FILES) * progress_span)
+        event(progress, f"下載模型 {index + 1}/{len(ALL_MODEL_FILES)}：{destination.name}", current_file=destination.name)
         if destination.is_file() and destination.stat().st_size == expected_size:
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
+        turbo_file = (relative, expected_size) in TURBO_LORA_FILES
         downloaded = Path(hf_hub_download(
-            repo_id=MODEL_REPO,
+            repo_id=TURBO_LORA_REPO if turbo_file else MODEL_REPO,
             filename=relative.replace("\\", "/"),
-            revision=MODEL_REVISION,
+            revision=TURBO_LORA_REVISION if turbo_file else MODEL_REVISION,
             local_dir=model_root,
         ))
         if downloaded.stat().st_size != expected_size:
@@ -107,7 +118,7 @@ def main() -> None:
         str(python), "-c",
         "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; print(torch.__version__, torch.cuda.get_device_name(0))",
     ], cwd=target)
-    for relative, expected_size in MODEL_FILES:
+    for relative, expected_size in ALL_MODEL_FILES:
         path = model_root / Path(relative)
         if not path.is_file() or path.stat().st_size != expected_size:
             raise RuntimeError(f"缺少模型：{path.name}")

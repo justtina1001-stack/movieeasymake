@@ -6,7 +6,14 @@ from pathlib import Path
 import av
 import numpy as np
 
-from app import AssetStore, extract_continuation_frame, merge_continuation
+from app import (
+    AssetStore,
+    extract_continuation_frame,
+    extract_replacement_segment,
+    merge_continuation,
+    merge_replacement_segments,
+    replacement_segment_plan,
+)
 
 TEST_TEMP = Path(__file__).resolve().parents[1] / "data" / "test-temp"
 TEST_TEMP.mkdir(parents=True, exist_ok=True)
@@ -68,6 +75,55 @@ class ContinuationTests(unittest.TestCase):
                 self.assertTrue(container.streams.audio)
             self.assertEqual(len(frames), 11)
             self.assertAlmostEqual(duration, 11 / 24)
+
+    def test_long_replacement_plan_covers_source_with_safe_overlapped_inputs(self):
+        segments = replacement_segment_plan(31.0, smart=False)
+        self.assertEqual(len(segments), 3)
+        self.assertEqual(segments[0]["core_start_frame"], 0)
+        self.assertEqual(segments[-1]["core_end_frame"], 31 * 24)
+        for previous, current in zip(segments, segments[1:]):
+            self.assertEqual(previous["core_end_frame"], current["core_start_frame"])
+        for segment in segments:
+            core_frames = segment["core_end_frame"] - segment["core_start_frame"]
+            input_frames = segment["input_end_frame"] - segment["input_start_frame"]
+            self.assertGreaterEqual(core_frames, 5 * 24)
+            self.assertLessEqual(input_frames, 15 * 24)
+
+    def test_smart_replacement_plan_prefers_strong_nearby_scene_cut(self):
+        scores = [(frame, 2.0) for frame in range(300, 370, 6)] + [(330, 40.0)]
+        segments = replacement_segment_plan(27.0, scores, smart=True)
+        self.assertEqual(segments[0]["core_end_frame"], 330)
+        self.assertEqual(segments[1]["cut_reason"], "scene_cut")
+
+    def test_extracts_and_merges_replacement_segments_with_original_audio(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP) as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            extracted = root / "extracted.mp4"
+            first = root / "first.mp4"
+            second = root / "second.mp4"
+            merged = root / "merged.mp4"
+            make_video(source, [(10, 20, 30)] * 48, with_audio=True)
+            extract_replacement_segment(source, extracted, 12, 36, include_audio=True)
+            with av.open(str(extracted)) as container:
+                extracted_frames = list(container.decode(video=0))
+                self.assertTrue(container.streams.audio)
+            self.assertEqual(len(extracted_frames), 24)
+
+            make_video(first, [(255, 0, 0)] * 30, with_audio=True)
+            make_video(second, [(0, 255, 0)] * 30, with_audio=True)
+            segments = [
+                {"core_start_frame": 0, "core_end_frame": 24, "input_start_frame": 0},
+                {"core_start_frame": 24, "core_end_frame": 48, "input_start_frame": 18},
+            ]
+            duration = merge_replacement_segments(
+                source, [first, second], segments, merged, 96, 64, "original"
+            )
+            with av.open(str(merged)) as container:
+                merged_frames = list(container.decode(video=0))
+                self.assertTrue(container.streams.audio)
+            self.assertEqual(len(merged_frames), 48)
+            self.assertAlmostEqual(duration, 2.0)
 
 
 if __name__ == "__main__":

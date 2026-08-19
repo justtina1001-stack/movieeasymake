@@ -42,7 +42,7 @@ def create_validation_video() -> None:
     container.close()
 
 
-def payload(mode: str):
+def payload(mode: str, quality_mode: str = "native"):
     data = {
         "mode": mode,
         "prompt": "A cinematic subject slowly turns toward the camera. Audio: quiet wind.",
@@ -51,6 +51,7 @@ def payload(mode: str):
         "duration": 5,
         "seed": 1,
         "steps": 20,
+        "quality_mode": quality_mode,
     }
     if mode == "fl2va":
         data["first_image_asset_id"] = ASSET
@@ -68,14 +69,24 @@ async def main():
     create_validation_video()
     try:
         await nodes.init_extra_nodes(init_custom_nodes=False, init_api_nodes=False)
-        for mode in ("t2v", "fl2va", "r2v"):
-            compiled = compile_request(payload(mode))
+        cases = [
+            ("t2v", "native", 0.4),
+            ("t2v", "turbo", 0.4),
+            ("t2v", "turbo", 0.98),
+            ("fl2va", "turbo", 0.4),
+            ("r2v", "turbo", 0.4),
+        ]
+        for mode, quality_mode, megapixels in cases:
+            data = payload(mode, quality_mode)
+            data["megapixels"] = megapixels
+            compiled = compile_request(data)
             uploaded = {ASSET: "example.png", VIDEO: VALIDATION_VIDEO.name}
-            workflow = build_workflow(compiled, uploaded, f"validate-{mode}")
-            valid, error, outputs, node_errors = await execution.validate_prompt(f"validate-{mode}", workflow, None)
+            label = f"{mode}-{quality_mode}-{megapixels}mp"
+            workflow = build_workflow(compiled, uploaded, f"validate-{label}")
+            valid, error, outputs, node_errors = await execution.validate_prompt(label, workflow, None)
             if not valid:
-                raise RuntimeError(f"{mode} validation failed: {error}; {node_errors}")
-            print(f"{mode}: valid ({len(workflow)} nodes, outputs={outputs})")
+                raise RuntimeError(f"{label} validation failed: {error}; {node_errors}")
+            print(f"{label}: valid ({len(workflow)} nodes, outputs={outputs})")
     finally:
         VALIDATION_VIDEO.unlink(missing_ok=True)
 

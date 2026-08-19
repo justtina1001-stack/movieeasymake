@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from engine_installer import MODEL_FILES, InstallerError, installer_preflight, model_state, resolve_install_target
+from engine_installer import ALL_MODEL_FILES, InstallerError, installer_preflight, model_state, resolve_install_target
 
 
 class EngineInstallerTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class EngineInstallerTests(unittest.TestCase):
     def test_missing_models_are_reported_without_creating_large_files(self):
         with tempfile.TemporaryDirectory() as folder:
             state = model_state(Path(folder))
-            self.assertEqual(len(state), len(MODEL_FILES))
+            self.assertEqual(len(state), len(ALL_MODEL_FILES))
             self.assertTrue(all(not item["ready"] for item in state))
 
     def test_preflight_accepts_empty_folder_with_enough_space_and_nvidia(self):

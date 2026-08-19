@@ -13,6 +13,24 @@ MAX_REFERENCE_VIDEOS = 3
 ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
 REFERENCE_SUBJECT_TYPES = {"character", "creature", "object"}
 
+TURBO_PROFILE_FL_544 = "fl2v_544"
+TURBO_PROFILE_FL_768 = "fl2v_768"
+TURBO_PROFILE_REF_544 = "ref2v_544"
+TURBO_LORA_CANDIDATES: dict[str, tuple[str, ...]] = {
+    TURBO_PROFILE_FL_544: (
+        "minimax_h3_fl2v_lightx2v_turbo_8step_v1.0_resized_avg_rank_24_bf16.safetensors",
+        "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+    ),
+    TURBO_PROFILE_FL_768: (
+        "minimax_h3_fl2v_lightx2v_turbo_4step_v1.0_768p_resized_avg_rank_31_bf16.safetensors",
+        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+    ),
+    TURBO_PROFILE_REF_544: (
+        "minimax_h3_ref2v_lightx2v_turbo_4step_v0.1_resized_avg_rank_20_bf16.safetensors",
+        "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+    ),
+}
+
 MOTION_PROFILES = {
     "natural": "以自然、連續的人體與物體力學呈現動作；重心轉移、慣性、接觸、反作用力和收勢都要清楚，避免漂浮、瞬移或肢體抽動。",
     "impact": "動作要有清楚的蓄力、加速、接觸、受力、回彈與穩定階段；打擊瞬間強調重量、速度差、身體連鎖反應與短促鏡頭回饋。",
@@ -62,6 +80,13 @@ class CompiledRequest:
     steps: int
     scheduler: str
     ref_image_size: str
+    quality_mode: str
+    sampler_name: str
+    turbo_profile: str | None
+    turbo_lora: str | None
+    turbo_lora_strength: float
+    shift_video: float | None
+    shift_audio: float | None
     first_image: str | None
     last_image: str | None
     reference_images: list[str]
@@ -283,6 +308,32 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     if scheduler not in {"simple", "beta", "normal", "sgm_uniform", "karras"}:
         scheduler = "beta" if reference_mode else "simple"
     ref_image_size = "max" if payload.get("ref_image_size") == "max" else "match"
+    quality_mode = "turbo" if payload.get("quality_mode") == "turbo" else "native"
+    sampler_name = "res_multistep"
+    turbo_profile = None
+    turbo_lora = None
+    turbo_lora_strength = 0.0
+    shift_video = None
+    shift_audio = None
+    if quality_mode == "turbo":
+        scheduler = "simple"
+        sampler_name = "euler"
+        turbo_lora_strength = 0.75
+        shift_audio = 3.0
+        if reference_mode:
+            steps = 4
+            ref_image_size = "match"
+            turbo_profile = TURBO_PROFILE_REF_544
+            shift_video = 12.0
+        elif (width, height) == (1344, 768):
+            steps = 4
+            turbo_profile = TURBO_PROFILE_FL_768
+            shift_video = 6.0
+        else:
+            steps = 8
+            turbo_profile = TURBO_PROFILE_FL_544
+            shift_video = 12.0
+        turbo_lora = TURBO_LORA_CANDIDATES[turbo_profile][0]
 
     base_prompt = _clean_text(payload.get("prompt"))
     if not base_prompt:
@@ -540,7 +591,24 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                     "replacement_rules:\n只生成 <Subject 1> 作為指定位置的新角色；原角色的身份與外觀必須完全消失，"
                     "不得同時出現原角色與新角色，也不得把兩者的臉、頭髮、服裝或身體特徵混合。"
                     "除指定角色外，盡量維持原影片的場景、構圖、鏡頭、道具與其他人物。"
+                    "如果指定原角色在某些畫面中沒有出現，保持那些畫面原樣，不得憑空加入 <Subject 1>。"
                 )
+                batch_segment = payload.get("replacement_batch_segment") or {}
+                if batch_segment:
+                    segment_index = max(1, _safe_int(batch_segment.get("index"), 1))
+                    segment_total = max(segment_index, _safe_int(batch_segment.get("total"), segment_index))
+                    source_start = max(0.0, _safe_float(batch_segment.get("source_start"), 0.0))
+                    source_end = max(source_start, _safe_float(batch_segment.get("source_end"), length / FPS))
+                    sections.append(
+                        "batch_continuity_rules:\n"
+                        f"This is replacement segment {segment_index} of {segment_total}, corresponding to source time "
+                        f"{source_start:.3f}s–{source_end:.3f}s. Preserve the source video's exact action timing, "
+                        "camera direction, spatial layout, lighting, props, and all non-target subjects. "
+                        "The opening and ending motion must continue naturally across adjacent segments without "
+                        "restarting the performance, adding a pause, changing identity, or resetting the pose. "
+                        "Any additional appearance picture attached to <Subject 1> from the preceding generated "
+                        "segment controls identity continuity only; it is not a keyframe and must not override <Video 1>."
+                    )
             elif mode == "popup_panel":
                 sections.append(
                     "popup_panel_rules:\n"
@@ -588,6 +656,13 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         steps=steps,
         scheduler=scheduler,
         ref_image_size=ref_image_size,
+        quality_mode=quality_mode,
+        sampler_name=sampler_name,
+        turbo_profile=turbo_profile,
+        turbo_lora=turbo_lora,
+        turbo_lora_strength=turbo_lora_strength,
+        shift_video=shift_video,
+        shift_audio=shift_audio,
         first_image=first_image,
         last_image=last_image,
         reference_images=reference_images,
@@ -602,7 +677,12 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     )
 
 
-def build_workflow(compiled: CompiledRequest, uploaded_assets: dict[str, str], output_stem: str) -> dict[str, Any]:
+def build_workflow(
+    compiled: CompiledRequest,
+    uploaded_assets: dict[str, str],
+    output_stem: str,
+    turbo_lora_name: str | None = None,
+) -> dict[str, Any]:
     workflow: dict[str, Any] = {}
     next_id = 1
 
@@ -619,6 +699,20 @@ def build_workflow(compiled: CompiledRequest, uploaded_assets: dict[str, str], o
         else "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     )
     model = add("UNETLoader", {"unet_name": diffusion_model, "weight_dtype": "default"}, "MiniMax H3 Model")
+    if compiled.quality_mode == "turbo":
+        lora_name = turbo_lora_name or compiled.turbo_lora
+        if not lora_name or compiled.shift_video is None or compiled.shift_audio is None:
+            raise RequestError("Turbo 工作流缺少相容的 LoRA 或 Sigma Shift 設定。")
+        model = add("LoraLoaderModelOnly", {
+            "model": [model, 0],
+            "lora_name": lora_name,
+            "strength_model": compiled.turbo_lora_strength,
+        }, "H3 Turbo LoRA")
+        model = add("MiniMaxH3SigmaShift", {
+            "model": [model, 0],
+            "shift_video": compiled.shift_video,
+            "shift_audio": compiled.shift_audio,
+        }, "H3 Turbo Sigma Shift")
     clip = add("CLIPLoader", {
         "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
         "type": "minimax",
@@ -676,7 +770,7 @@ def build_workflow(compiled: CompiledRequest, uploaded_assets: dict[str, str], o
         conditioning = add("MiniMaxH3ImageToVideo", condition_inputs, "MiniMax H3 Image to Video")
 
     noise = add("RandomNoise", {"noise_seed": compiled.seed}, "Seed")
-    sampler = add("KSamplerSelect", {"sampler_name": "res_multistep"}, "Sampler")
+    sampler = add("KSamplerSelect", {"sampler_name": compiled.sampler_name}, "Sampler")
     sigmas = add("BasicScheduler", {
         "model": [model, 0],
         "scheduler": compiled.scheduler,

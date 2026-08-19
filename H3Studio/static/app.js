@@ -39,7 +39,13 @@ const defaultState = {
     description: "",
     images: [],
     video: null,
-    videoUseAudio: false,
+    videoUseAudio: true,
+    videoInfo: null,
+    segmentPlan: [],
+    autoSplit: true,
+    continuity: true,
+    splitStrategy: "smart",
+    audioMode: "original",
     defaultPrompt: "",
     safeDefaultsApplied: false,
   },
@@ -71,8 +77,15 @@ let toastTimer;
 let engineStartingAt = 0;
 let keyframePrepareVersion = 0;
 let connectionSettings = null;
+let sharedGatewayStatus = null;
 let installerPreflightData = null;
 let lastInstallerStatus = "idle";
+let engineModelInventory = {};
+let musicMode = "instrumental";
+let musicModelsInstalled = false;
+let musicPage = 1;
+let musicTotalPages = 1;
+let lastMusicJobsSignature = "";
 
 const modeLabels = { t2v: "文生影片", fl2va: "首尾圖片", r2v: "多模態參考", replace: "角色替換", symbol_loop: "圖騰循環", extend: "續接影片", popup_panel: "彈窗面板動畫", mg_animation: "MG 動畫" };
 const promptGuideModeAdvice = {
@@ -141,9 +154,53 @@ function uid() {
 function toast(message, isError = false) {
   const element = $("#toast");
   element.textContent = message;
+  element.className = "toast";
+  void element.offsetWidth;
   element.className = `toast show${isError ? " error" : ""}`;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => element.className = "toast", 3300);
+}
+
+function replayAnimation(element, className) {
+  if (!element || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  element.classList.remove(className);
+  void element.offsetWidth;
+  element.classList.add(className);
+  element.addEventListener("animationend", () => element.classList.remove(className), { once: true });
+}
+
+function setButtonBusy(button, busy) {
+  button.disabled = busy;
+  if (busy) button.setAttribute("aria-busy", "true");
+  else button.removeAttribute("aria-busy");
+}
+
+function animateModeInterface(selectedCard) {
+  replayAnimation(selectedCard, "mode-selected");
+  $$(".editor-column > .panel:not(.hidden)").forEach((panel, index) => {
+    panel.style.setProperty("--enter-delay", `${Math.min(index * 34, 136)}ms`);
+    replayAnimation(panel, "interface-enter");
+  });
+}
+
+function installInteractionMotion() {
+  document.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const control = event.target.closest("button:not(:disabled), a.button, .mode-card");
+    if (!control) return;
+    const bounds = control.getBoundingClientRect();
+    const ripple = document.createElement("span");
+    ripple.className = "interaction-ripple";
+    ripple.style.left = `${event.clientX - bounds.left}px`;
+    ripple.style.top = `${event.clientY - bounds.top}px`;
+    control.appendChild(ripple);
+    ripple.addEventListener("animationend", () => ripple.remove(), { once: true });
+  });
+  document.addEventListener("click", event => {
+    const control = event.target.closest("button:not(:disabled), a.button");
+    if (control && !control.classList.contains("mode-card")) replayAnimation(control, "interaction-pop");
+  });
+  requestAnimationFrame(() => document.body.classList.add("ui-ready"));
 }
 
 async function api(url, options = {}) {
@@ -160,6 +217,7 @@ function connectionPayload() {
     base_url: $("#connectionUrl").value.trim(),
     comfy_dir: $("#connectionComfyDir").value.trim(),
     auto_start_local: $("#connectionAutoStart").checked,
+    remote_access_token: $("#connectionRemoteToken").value.trim(),
   };
 }
 
@@ -167,19 +225,41 @@ function refreshConnectionFields() {
   const remote = $("input[name='connectionMode']:checked")?.value === "remote";
   $("#comfyDirField").classList.toggle("hidden", remote);
   $("#autoStartField").classList.toggle("hidden", remote);
+  $("#remoteTokenField").classList.toggle("hidden", !remote);
   $("#localInstallerSection").classList.toggle("hidden", remote);
   $("#connectionHint").textContent = remote
-    ? "遠端主機需先啟動 ComfyUI，建議透過公司內網或 VPN 連線，不要直接把 8188 連接埠公開到網際網路。"
+    ? "請填 GPU 主機管理者提供的 Gateway 網址（預設 8190）與個人金鑰。不要連接或公開原始 ComfyUI 8188 連接埠。"
     : "本機模式會使用這台電腦的模型；開啟自動啟動後，面板可代為啟動指定資料夾內的 ComfyUI。";
+}
+
+function applyStudioRole(settings = connectionSettings || {}) {
+  const host = settings.studio_role === "host";
+  const badge = $("#studioRoleBadge");
+  badge.className = `studio-role-badge ${host ? "host" : "client"}`;
+  badge.textContent = host ? "管理主機" : "一般使用者";
+  $("#openGatewaySettings").classList.toggle("hidden", !host);
+  const card = $("#studioRoleCard");
+  card.className = `studio-role-card ${host ? "host" : "client"}`;
+  $("#studioRoleIcon").textContent = host ? "ADMIN" : "USER";
+  $("#studioRoleTitle").textContent = host ? "共享引擎管理主機" : "一般使用者工作站";
+  $("#studioRoleDescription").textContent = host
+    ? "可以啟用共享 GPU、建立／停用使用者及換發個人金鑰；原始 ComfyUI 仍維持本機封閉。"
+    : "只能使用自己的本機引擎，或以個人金鑰連線管理主機；無法建立或管理共享金鑰。";
+  if (!host && !$("#gatewayModal").classList.contains("hidden")) closeGatewaySettings();
 }
 
 async function loadConnectionSettings(openModal = false) {
   connectionSettings = await api("/api/connection");
+  applyStudioRole(connectionSettings);
   const radio = $(`input[name='connectionMode'][value='${connectionSettings.mode}']`);
   if (radio) radio.checked = true;
   $("#connectionUrl").value = connectionSettings.base_url || "http://127.0.0.1:8188";
   $("#connectionComfyDir").value = connectionSettings.comfy_dir || "";
   $("#connectionAutoStart").checked = Boolean(connectionSettings.auto_start_local);
+  $("#connectionRemoteToken").value = "";
+  $("#connectionRemoteToken").placeholder = connectionSettings.has_remote_access_token
+    ? "已儲存金鑰；留白可沿用"
+    : "貼上 GPU 主機管理者提供的 h3g_... 金鑰";
   refreshConnectionFields();
   if (openModal) $("#connectionModal").classList.remove("hidden");
   await loadInstallerStatus().catch(error => console.warn(error));
@@ -187,6 +267,50 @@ async function loadConnectionSettings(openModal = false) {
 
 function closeConnectionSettings() {
   $("#connectionModal").classList.add("hidden");
+}
+
+function renderGatewayStatus(status) {
+  sharedGatewayStatus = status;
+  $("#gatewayEnabled").checked = Boolean(status.enabled);
+  $("#gatewayPort").value = status.port || 8190;
+  const runtime = $("#gatewayRuntime");
+  runtime.className = `gateway-runtime${status.running ? " running" : status.last_error ? " error" : ""}`;
+  runtime.querySelector("strong").textContent = status.running
+    ? `Gateway 運作中 · 共用 ComfyUI ${status.upstream_url}`
+    : status.last_error || (status.enabled ? "Gateway 啟動失敗" : "Gateway 尚未啟用");
+  $("#gatewayUrlList").innerHTML = (status.urls || []).map(url => `
+    <div class="gateway-url-item">
+      <code>${escapeHtml(url)}</code>
+      <button class="button ghost small" type="button" data-gateway-copy-url="${escapeHtml(url)}">複製</button>
+    </div>`).join("") || '<div class="gateway-empty">目前沒有可用網址。</div>';
+  $("#gatewayUserList").innerHTML = (status.users || []).map(user => `
+    <article class="gateway-user${user.enabled ? "" : " disabled"}">
+      <div><strong>${escapeHtml(user.name)}</strong><small>ID ${escapeHtml(user.id)} · ${user.enabled ? "可使用" : "已停用"}</small></div>
+      <div class="gateway-user-actions">
+        <button class="button ghost small" type="button" data-gateway-rotate="${escapeHtml(user.id)}">換發金鑰</button>
+        <button class="button ${user.enabled ? "danger" : "secondary"} small" type="button" data-gateway-enable="${escapeHtml(user.id)}" data-enabled="${user.enabled ? "false" : "true"}">${user.enabled ? "停用" : "重新啟用"}</button>
+      </div>
+    </article>`).join("") || '<div class="gateway-empty">尚未建立使用者。請為每位同事建立獨立帳號。</div>';
+}
+
+async function loadGatewayStatus(openModal = false) {
+  renderGatewayStatus(await api("/api/gateway/status"));
+  if (openModal) {
+    $("#gatewayModal").classList.remove("hidden");
+    requestAnimationFrame(() => $("#gatewayModal .modal-close").focus());
+  }
+}
+
+function closeGatewaySettings() {
+  $("#gatewayModal").classList.add("hidden");
+  $("#gatewayTokenReveal").classList.add("hidden");
+}
+
+function revealGatewayToken(result) {
+  $("#gatewayTokenTitle").textContent = `${result.user.name} 的個人金鑰（只顯示一次）`;
+  $("#gatewayTokenValue").textContent = result.token;
+  $("#gatewayTokenReveal").classList.remove("hidden");
+  $("#gatewayTokenReveal").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function promptGuideAdvice() {
@@ -209,6 +333,149 @@ function openPromptGuide() {
 
 function closePromptGuide() {
   $("#promptGuideModal").classList.add("hidden");
+}
+
+function randomMusicSeed() {
+  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+}
+
+function setMusicMode(mode) {
+  musicMode = mode === "song" ? "song" : "instrumental";
+  $$('[data-music-mode]').forEach(button => button.classList.toggle("active", button.dataset.musicMode === musicMode));
+  $("#musicVocalsField").classList.toggle("hidden", musicMode !== "song");
+  $("#musicLyricsField").classList.toggle("hidden", musicMode !== "song");
+}
+
+function openMusicStudio() {
+  $("#musicModal").classList.remove("hidden");
+  if (!$("#musicSeed").value) $("#musicSeed").value = randomMusicSeed();
+  loadMusicStatus().catch(error => toast(error.message, true));
+  loadMusicJobs(true).catch(error => toast(error.message, true));
+  requestAnimationFrame(() => $("#musicJobName").focus());
+}
+
+function closeMusicStudio() {
+  $("#musicModal").classList.add("hidden");
+  $$("#musicJobList audio").forEach(audio => audio.pause());
+}
+
+function humanBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${Math.round(bytes / 1024)} KB`;
+}
+
+function renderMusicStatus(data) {
+  musicModelsInstalled = Boolean(data.installed);
+  const dot = $("#musicStatusDot");
+  dot.className = `music-status-dot${data.installed ? " ready" : data.active ? " active" : data.error ? " error" : ""}`;
+  $("#musicModelTitle").textContent = data.installed
+    ? "Music 3 INT8 模型已就緒"
+    : data.active ? (data.current || "正在下載 Music 3 模型")
+    : data.error ? "Music 3 模型安裝失敗"
+    : "尚未安裝 Music 3 模型";
+  const speed = data.active && data.speed_bps ? ` · ${humanBytes(data.speed_bps)}/s` : "";
+  $("#musicModelDetail").textContent = data.error || `${humanBytes(data.downloaded)} / ${humanBytes(data.total)} · ${Number(data.progress || 0).toFixed(1)}%${speed}`;
+  $("#musicInstallProgress").classList.toggle("hidden", !data.active && !data.downloaded);
+  $("#musicInstallBar").style.width = `${Math.max(0, Math.min(100, Number(data.progress) || 0))}%`;
+  $("#installMusicModels").classList.toggle("hidden", data.installed || data.active);
+  $("#installMusicModels").disabled = !data.can_install;
+  $("#installMusicModels").textContent = data.can_install ? "安裝 Music 3 模型" : "遠端主機需自行安裝";
+  $("#cancelMusicInstall").classList.toggle("hidden", !data.active);
+  $("#generateMusic").disabled = !data.installed;
+}
+
+async function loadMusicStatus() {
+  const data = await api("/api/music/status");
+  renderMusicStatus(data);
+  return data;
+}
+
+function collectMusicPayload() {
+  return {
+    job_name: $("#musicJobName").value.trim(),
+    mode: musicMode,
+    use_case: $("#musicUseCase").value.trim(),
+    genre: $("#musicGenre").value.trim(),
+    mood: $("#musicMood").value.trim(),
+    bpm: $("#musicBpm").value,
+    key: $("#musicKey").value.trim(),
+    duration: Number($("#musicDuration").value),
+    instruments: $("#musicInstruments").value.trim(),
+    structure: $("#musicStructure").value.trim(),
+    vocals: $("#musicVocals").value.trim(),
+    lyrics: $("#musicLyrics").value.trim(),
+    production: $("#musicProduction").value.trim(),
+    avoid: $("#musicAvoid").value.trim(),
+    details: $("#musicDetails").value.trim(),
+    seed: $("#musicSeed").value.trim(),
+    format: $("#musicFormat").value,
+    tiled_decode: $("#musicTiledDecode").checked,
+  };
+}
+
+async function generateMusic() {
+  const button = $("#generateMusic");
+  setButtonBusy(button, true);
+  button.textContent = "正在加入 GPU 佇列...";
+  try {
+    const job = await api("/api/music/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectMusicPayload()),
+    });
+    toast(`音樂工作 ${job.id.slice(0, 8)} 已加入佇列`);
+    $("#musicSeed").value = randomMusicSeed();
+    musicPage = 1;
+    await loadMusicJobs(true);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setButtonBusy(button, false);
+    button.textContent = "♫ 產生音樂";
+    button.disabled = !musicModelsInstalled;
+  }
+}
+
+function musicJobElapsed(job) {
+  if (Number.isFinite(Number(job.execution_seconds))) return formatExecutionTime(job.execution_seconds);
+  if (["preparing", "running"].includes(job.status) && job.generation_started_at) {
+    return formatExecutionTime((Date.now() - new Date(job.generation_started_at).getTime()) / 1000);
+  }
+  return `${Number(job.duration || 0)} 秒`;
+}
+
+async function loadMusicJobs(force = false) {
+  if ($("#musicModal").classList.contains("hidden") && !force) return;
+  const data = await api(`/api/music/jobs?page=${musicPage}&page_size=20`);
+  musicPage = data.page;
+  musicTotalPages = data.total_pages;
+  const signature = JSON.stringify(data.items.map(job => [job.id, job.status, job.progress, job.updated_at, job.name, job.favorite]));
+  if (!force && signature === lastMusicJobsSignature) return;
+  lastMusicJobsSignature = signature;
+  $("#musicPageLabel").textContent = `${musicPage} / ${musicTotalPages}`;
+  $("#previousMusicPage").disabled = musicPage <= 1;
+  $("#nextMusicPage").disabled = musicPage >= musicTotalPages;
+  $("#musicJobList").innerHTML = data.items.length ? data.items.map(job => {
+    const active = ["queued", "preparing", "running"].includes(job.status);
+    const created = job.created_at ? new Date(job.created_at).toLocaleString("zh-TW", { hour12: false }) : "";
+    return `<article class="music-job${job.favorite ? " favorite" : ""}" data-music-job="${job.id}">
+      <div class="music-job-head"><div class="music-job-title"><strong>${escapeHtml(job.name || (job.mode === "song" ? "未命名歌曲" : "未命名純音樂"))}</strong><small>${created} · ${escapeHtml(job.format || "mp3").toUpperCase()} · Seed ${escapeHtml(job.seed)}</small></div>
+      <div class="music-job-controls"><button type="button" data-music-favorite="${job.id}" data-favorite="${Boolean(job.favorite)}" class="${job.favorite ? "active" : ""}" title="我的最愛">★</button><button type="button" data-music-rename="${job.id}" data-name="${escapeHtml(job.name || "")}" title="重新命名">✎</button></div></div>
+      <div class="music-job-status"><b class="${escapeHtml(job.status)}">${escapeHtml(statusLabel(job.status))}</b><span>${escapeHtml(job.current_node || musicJobElapsed(job))}${active ? ` · ${Math.round(Number(job.progress) || 0)}%` : ""}</span></div>
+      ${active ? `<div class="progress-track"><span style="width:${Math.max(2, Number(job.progress) || 2)}%"></span></div>` : ""}
+      ${job.status === "completed" ? `<audio controls preload="none" src="/api/music/jobs/${job.id}/audio"></audio>` : ""}
+      ${job.error ? `<div class="music-job-error">${escapeHtml(job.error)}</div>` : ""}
+      <div class="music-job-actions">
+        ${job.status === "completed" ? `<a class="button secondary" href="/api/music/jobs/${job.id}/audio?download=1" download>下載</a>` : ""}
+        ${active ? `<button class="button ghost" type="button" data-music-cancel="${job.id}">取消</button>` : ""}
+        ${["failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button secondary" type="button" data-music-resume="${job.id}">重新送出</button>` : ""}
+        <button class="button ghost" type="button" data-music-caption="${job.id}">查看提示詞</button>
+      </div>
+      <pre class="job-recipe hidden" data-music-caption-panel="${job.id}">${escapeHtml(job.caption || "")}${job.mode === "song" ? `\n\nLyrics:\n${escapeHtml(job.lyrics || "")}` : ""}</pre>
+    </article>`;
+  }).join("") : '<div class="empty-state">尚無音樂工作</div>';
 }
 
 async function copyGuideCode(key) {
@@ -351,6 +618,7 @@ function currentSettings() {
     steps: Number($("#steps").value),
     scheduler: $("#scheduler").value,
     ref_image_size: $("#refImageSize").value,
+    quality_mode: $("#qualityMode").value,
     keyframe_fit: $("#keyframeFit").value,
     motion_profile: $("#motionProfile").value,
     motion_intensity: Number($("#motionIntensity").value),
@@ -376,6 +644,7 @@ function restoreForm() {
     steps: form.steps,
     scheduler: form.scheduler,
     refImageSize: form.ref_image_size,
+    qualityMode: form.quality_mode || "native",
     keyframeFit: form.keyframe_fit || "contain",
     motionProfile: form.motion_profile,
     motionIntensity: form.motion_intensity,
@@ -416,6 +685,68 @@ function actualDuration() {
   return frames / 24;
 }
 
+function isReferenceMode(mode = state.mode) {
+  return ["r2v", "replace", "popup_panel", "mg_animation"].includes(mode);
+}
+
+function turboProfile(width, height) {
+  if (isReferenceMode()) return {
+    key: "ref2v_544",
+    steps: 4,
+    title: "Ref2VA Turbo · 4 steps",
+    hint: "多模態參考加速；鎖定 Euler、simple、Shift 12/3 與 match。建議先用 0.4～0.7MP 預覽角色一致性。",
+  };
+  if (width === 1344 && height === 768) return {
+    key: "fl2v_768",
+    steps: 4,
+    title: "FL2VA Turbo 768p · 4 steps",
+    hint: "針對 1344 × 768 訓練；鎖定 Euler、simple 與 Shift 6/3。",
+  };
+  return {
+    key: "fl2v_544",
+    steps: 8,
+    title: "FL2VA Turbo · 8 steps",
+    hint: "適用文生、首尾、循環與續接預覽；鎖定 Euler、simple 與 Shift 12/3。",
+  };
+}
+
+function syncQualityMode(width, height) {
+  const turbo = $("#qualityMode").value === "turbo";
+  const profile = turboProfile(width, height);
+  $("#steps").disabled = turbo;
+  $("#scheduler").disabled = turbo;
+  $("#refImageSize").disabled = turbo && isReferenceMode();
+  if (turbo) {
+    $("#steps").value = profile.steps;
+    $("#scheduler").value = "simple";
+    if (isReferenceMode()) $("#refImageSize").value = "match";
+    const availability = engineModelInventory[`turbo_${profile.key}`];
+    const modelNote = availability === true ? " Turbo LoRA 已就緒。" : availability === false ? " 目前引擎尚未偵測到這個 Turbo LoRA。" : "";
+    $("#qualityModeTitle").textContent = profile.title;
+    $("#qualityModeHint").textContent = profile.hint + modelNote;
+  } else {
+    $("#qualityModeTitle").textContent = "原生品質模式";
+    $("#qualityModeHint").textContent = "保留目前採樣設定，適合正式成品；不載入 Turbo LoRA。";
+  }
+}
+
+function changeQualityMode() {
+  const turbo = $("#qualityMode").value === "turbo";
+  if (turbo) {
+    state.nativeSampling = {
+      steps: Number($("#steps").value) || 20,
+      scheduler: $("#scheduler").value,
+      refImageSize: $("#refImageSize").value,
+    };
+  } else {
+    const saved = state.nativeSampling || {};
+    $("#steps").value = saved.steps || 20;
+    $("#scheduler").value = saved.scheduler || (isReferenceMode() ? "beta" : "simple");
+    $("#refImageSize").value = saved.refImageSize || "match";
+  }
+  updateSummary();
+}
+
 function activeReferences() {
   if (state.mode === "popup_panel") return state.popupReferences;
   if (state.mode === "mg_animation") return state.mgReferences;
@@ -448,11 +779,15 @@ function filenameStemPreview(value) {
 
 function updateSummary() {
   const [width, height] = dimensions();
+  syncQualityMode(width, height);
   updateKeyframeLayout();
-  $("#dimensionPreview").textContent = `預計輸出 ${width} × ${height} · 24 FPS · 實際約 ${actualDuration().toFixed(2)} 秒`;
+  const longReplacement = state.mode === "replace" && state.replacement.autoSplit && Number(state.replacement.videoInfo?.duration) > 15;
+  const displayDuration = longReplacement ? Number(state.replacement.videoInfo.duration) : actualDuration();
+  const segmentSuffix = longReplacement ? ` · 自動 ${state.replacement.segmentPlan.length} 段` : "";
+  $("#dimensionPreview").textContent = `預計輸出 ${width} × ${height} · 24 FPS · 約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}`;
   $("#summaryMode").textContent = modeLabels[state.mode];
   $("#summarySize").textContent = `${width} × ${height}`;
-  $("#summaryDuration").textContent = `約 ${actualDuration().toFixed(2)} 秒`;
+  $("#summaryDuration").textContent = `約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}`;
   const motionProfile = $("#motionProfile").value;
   $("#summaryMotion").textContent = `${motionLabels[motionProfile]} · ${$("#motionIntensity").value}`;
   $("#motionPresetHint").textContent = motionHints[motionProfile];
@@ -487,8 +822,8 @@ function setMode(mode) {
   $("#storyboardHint").textContent = ["r2v", "mg_animation"].includes(mode)
     ? "分鏡圖片會作為構圖參考；出現時間為近似控制"
     : "可加入文字分鏡；中間參考圖片需切換到多模態模式";
-  if (["r2v", "replace", "popup_panel", "mg_animation"].includes(mode) && $("#scheduler").value === "simple") $("#scheduler").value = "beta";
-  if (!["r2v", "replace", "popup_panel", "mg_animation"].includes(mode) && $("#scheduler").value === "beta") $("#scheduler").value = "simple";
+  if (isReferenceMode(mode) && $("#qualityMode").value !== "turbo" && $("#scheduler").value === "simple") $("#scheduler").value = "beta";
+  if (!isReferenceMode(mode) && $("#qualityMode").value !== "turbo" && $("#scheduler").value === "beta") $("#scheduler").value = "simple";
   if (mode === "replace" && !state.replacement.safeDefaultsApplied) {
     $("#megapixels").value = "0.4";
     $("#duration").value = "5";
@@ -540,6 +875,7 @@ function setMode(mode) {
   updateSummary();
   saveState();
   if (mode === "fl2va") refreshKeyframes();
+  if (previousMode !== mode) requestAnimationFrame(() => animateModeInterface($(`.mode-card[data-mode='${mode}']`)));
 }
 
 function renderKeyframePreview(target, asset, label, optional) {
@@ -566,6 +902,40 @@ function renderReplacement() {
     ? `<div class="asset-thumb video"><span>▶</span><span>${escapeHtml(replacement.video.name)}</span><button id="removeReplacementVideo" type="button">×</button></div>`
     : `<span class="asset-placeholder">拖入含有要被替換角色的原影片</span>`;
   $("#replacementUseAudio").checked = replacement.videoUseAudio;
+  $("#replacementAutoSplit").checked = replacement.autoSplit !== false;
+  $("#replacementContinuity").checked = replacement.continuity !== false;
+  $("#replacementSplitStrategy").value = replacement.splitStrategy || "smart";
+  $("#replacementAudioMode").value = replacement.audioMode || "original";
+  const infoPanel = $("#replacementVideoInfo");
+  if (replacement.video && replacement.videoInfo) {
+    const info = replacement.videoInfo;
+    const count = replacement.segmentPlan?.length || 1;
+    const audio = info.has_audio ? "含原始音軌" : "沒有音軌";
+    const long = Number(info.duration) > 15;
+    infoPanel.classList.remove("empty");
+    infoPanel.innerHTML = `<strong>${long ? `長片 · 預計 ${count} 段` : "單段影片"}</strong><span>${info.width} × ${info.height} · ${Number(info.fps).toFixed(2)} FPS · ${Number(info.duration).toFixed(2)} 秒 · ${audio}${long ? " · 每段含 0.5 秒連續性重疊" : ""}</span>`;
+  } else {
+    infoPanel.classList.add("empty");
+    infoPanel.innerHTML = `<strong>尚未分析來源影片</strong><span>上傳後會顯示尺寸、時長、音軌與預計片段數。</span>`;
+  }
+  $("#duration").disabled = state.mode === "replace" && replacement.autoSplit !== false && Number(replacement.videoInfo?.duration) > 15;
+}
+
+async function prepareReplacementVideo() {
+  if (!state.replacement.video) return;
+  const result = await api("/api/replacement/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      asset_id: state.replacement.video.id,
+      strategy: state.replacement.splitStrategy || "smart",
+    }),
+  });
+  state.replacement.videoInfo = result.source;
+  state.replacement.segmentPlan = result.segments || [];
+  if (Number(result.source.duration) <= 15) {
+    $("#duration").value = Math.max(5, Math.min(15, Number(result.source.duration))).toFixed(1);
+  }
 }
 
 async function addReplacementFiles(kind, files) {
@@ -577,6 +947,11 @@ async function addReplacementFiles(kind, files) {
     for (const file of accepted.slice(0, remaining)) state.replacement.images.push(await uploadFile(file, "replacement-character"));
   } else {
     state.replacement.video = await uploadFile(accepted[0], "replacement-performance-video");
+    state.replacement.videoInfo = null;
+    state.replacement.segmentPlan = [];
+    renderReplacement();
+    toast("正在分析影片與智慧切點...");
+    await prepareReplacementVideo();
   }
   renderReplacement();
   updateSummary();
@@ -750,6 +1125,11 @@ function collectPayload() {
     continuation_source_asset_id: state.mode === "extend" ? state.continuation.sourceAsset?.id || null : null,
     continuation_merge: state.mode === "extend" && state.continuation.merge,
     continuation_audio: state.continuation.audio,
+    replacement_auto_split: state.mode === "replace" && state.replacement.autoSplit !== false,
+    replacement_continuity: state.mode === "replace" && state.replacement.continuity !== false,
+    replacement_split_strategy: state.replacement.splitStrategy || "smart",
+    replacement_audio_mode: state.replacement.audioMode || "original",
+    replacement_target: state.mode === "replace" ? state.replacement.target.trim() : "",
     mg_animation: {
       character_position: state.mgAnimation.characterPosition,
       character_position_detail: state.mgAnimation.characterPositionDetail.trim(),
@@ -781,7 +1161,7 @@ function collectPayload() {
 
 async function compilePreview() {
   const button = $("#compileButton");
-  button.disabled = true;
+  setButtonBusy(button, true);
   try {
     const result = await api("/api/compile", {
       method: "POST",
@@ -796,17 +1176,20 @@ async function compilePreview() {
     toast(error.message, true);
     throw error;
   } finally {
-    button.disabled = false;
+    setButtonBusy(button, false);
   }
 }
 
 async function renderVideo() {
   if (state.mode === "replace") {
-    const highRisk = Number($("#duration").value) > 10 || (Number($("#megapixels").value) >= 0.9 && Number($("#duration").value) > 5);
+    const batchDuration = state.replacement.autoSplit && Number(state.replacement.videoInfo?.duration) > 15
+      ? Math.max(...(state.replacement.segmentPlan || []).map(segment => Number(segment.input_duration) || 0), 5)
+      : Number($("#duration").value);
+    const highRisk = batchDuration > 10 || (Number($("#megapixels").value) >= 0.9 && batchDuration > 5);
     if (highRisk && !confirm("目前的解析度／時長對 16GB VRAM 有較高爆顯存風險。建議先改成 0.4MP、5 秒。仍要送出嗎？")) return;
   }
   const button = $("#renderButton");
-  button.disabled = true;
+  setButtonBusy(button, true);
   button.querySelector("span").textContent = "送入工作佇列...";
   try {
     const job = await api("/api/render", {
@@ -820,13 +1203,13 @@ async function renderVideo() {
   } catch (error) {
     toast(error.message, true);
   } finally {
-    button.disabled = false;
+    setButtonBusy(button, false);
     button.querySelector("span").textContent = "開始生成影片";
   }
 }
 
 function statusLabel(status) {
-  return ({ queued: "等待中", preparing: "準備素材", running: "生成中", completed: "已完成", failed: "失敗", cancelled: "已取消", interrupted: "已中斷" })[status] || status;
+  return ({ waiting: "等待中", queued: "等待中", preparing: "準備素材", running: "生成中", completed: "已完成", failed: "失敗", cancelled: "已取消", interrupted: "已中斷" })[status] || status;
 }
 
 function formatExecutionTime(seconds) {
@@ -838,6 +1221,19 @@ function formatExecutionTime(seconds) {
   if (hours) return `${hours} 小時 ${minutes} 分 ${remainder} 秒`;
   if (minutes) return `${minutes} 分 ${remainder} 秒`;
   return `${remainder} 秒`;
+}
+
+function batchSegmentsHtml(job) {
+  if (job.batch_type !== "replace_long" || !Array.isArray(job.segments)) return "";
+  const completed = job.segments.filter(segment => segment.status === "completed").length;
+  return `<div class="batch-segments">
+    <div class="batch-segments-heading"><strong>完整長片替換進度</strong><span>${completed} / ${job.segments.length} 段完成</span></div>
+    ${job.segments.map(segment => {
+      const progress = Number(segment.progress) || (segment.status === "completed" ? 100 : 0);
+      const range = `${Number(segment.core_start).toFixed(2)}–${Number(segment.core_end).toFixed(2)} 秒`;
+      return `<div class="batch-segment"><strong>第 ${segment.index} 段</strong><div><div class="progress-track"><span style="width:${progress}%"></span></div><small>${range}</small></div><span class="batch-segment-status">${escapeHtml(statusLabel(segment.status || "waiting"))}${progress ? ` · ${Math.round(progress)}%` : ""}</span></div>`;
+    }).join("")}
+  </div>`;
 }
 
 function jobExecutionSeconds(job) {
@@ -910,10 +1306,11 @@ async function applyJobRecipe(jobId) {
   state.firstImage = null;
   state.lastImage = null;
   setMode(mode);
+  $("#qualityMode").value = raw.quality_mode || "native";
 
   const formFields = {
     aspectRatio: "aspect_ratio", megapixels: "megapixels", duration: "duration", seed: "seed",
-    steps: "steps", scheduler: "scheduler", refImageSize: "ref_image_size", keyframeFit: "keyframe_fit",
+    steps: "steps", scheduler: "scheduler", refImageSize: "ref_image_size", qualityMode: "quality_mode", keyframeFit: "keyframe_fit",
     motionProfile: "motion_profile", motionIntensity: "motion_intensity", physicsStyle: "physics_style",
     cameraResponse: "camera_response", prompt: "prompt",
   };
@@ -954,14 +1351,21 @@ async function applyJobRecipe(jobId) {
   const references = raw.references || [];
   if (mode === "replace") {
     const reference = references[0] || {};
+    const video = recipeAsset(reference.video_asset_id, assets);
     state.replacement = {
       ...structuredClone(defaultState.replacement),
       alias: reference.alias || "新角色",
       target: raw.replacement_target || "動態參考影片中的主要角色",
       description: reference.description || "",
       images: (reference.image_asset_ids || []).map(id => recipeAsset(id, assets)).filter(Boolean),
-      video: recipeAsset(reference.video_asset_id, assets),
+      video,
       videoUseAudio: Boolean(reference.video_use_audio),
+      videoInfo: video?.video_info || null,
+      segmentPlan: video?.replacement_plan_smart || video?.replacement_plan_balanced || [],
+      autoSplit: raw.replacement_auto_split !== false,
+      continuity: raw.replacement_continuity !== false,
+      splitStrategy: raw.replacement_split_strategy || "smart",
+      audioMode: raw.replacement_audio_mode || "original",
       defaultPrompt: raw.prompt || "",
       safeDefaultsApplied: true,
     };
@@ -996,6 +1400,11 @@ async function applyJobRecipe(jobId) {
     dialogue: shot.dialogue || "", sound: shot.sound || "", motionBeats: shot.motion_beats || "",
     effects: shot.effects || "", image: recipeAsset(shot.image_asset_id, assets),
   }));
+
+  if (mode === "replace" && state.replacement.video && !state.replacement.videoInfo) {
+    try { await prepareReplacementVideo(); }
+    catch (error) { toast(`影片設定已套用，但重新分析失敗：${error.message}`, true); }
+  }
 
   renderKeyframePreview("first", state.firstImage, "起始圖片", false);
   renderKeyframePreview("last", state.lastImage, "結束圖片", true);
@@ -1128,7 +1537,8 @@ async function loadJobs(force = false) {
       const title = job.name || fallbackName;
       const executionSeconds = jobExecutionSeconds(job);
       const executionLabel = executionSeconds === null ? "生成耗時尚未記錄" : `${active ? "已執行" : "生成耗時"} ${formatExecutionTime(executionSeconds)}`;
-      const subtitle = job.name ? `${fallbackName} · ${date} · 影片 ${Number(job.duration).toFixed(2)} 秒 · ${executionLabel} · ${job.id.slice(0, 8)}` : `${date} · 影片 ${Number(job.duration).toFixed(2)} 秒 · ${executionLabel} · ${job.id.slice(0, 8)}`;
+      const batchLabel = job.batch_type === "replace_long" ? ` · 完整長片 ${job.segments?.length || 0} 段` : "";
+      const subtitle = job.name ? `${fallbackName}${batchLabel} · ${date} · 影片 ${Number(job.duration).toFixed(2)} 秒 · ${executionLabel} · ${job.id.slice(0, 8)}` : `${date}${batchLabel} · 影片 ${Number(job.duration).toFixed(2)} 秒 · ${executionLabel} · ${job.id.slice(0, 8)}`;
       const open = active || expandedJobIds.has(job.id);
       return `
         <details class="job-card ${job.favorite ? "favorite" : ""}" data-job-id="${job.id}" ${open ? "open" : ""}>
@@ -1145,7 +1555,9 @@ async function loadJobs(force = false) {
               <button class="button ghost" data-job-rename="${job.id}" data-job-name="${escapeHtml(job.name || "")}" type="button">重新命名</button>
               ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>下載</a>` : ""}
               ${active ? `<button class="button ghost" data-job-cancel="${job.id}" type="button">取消</button>` : ""}
+              ${job.batch_type === "replace_long" && ["failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button secondary" data-job-resume="${job.id}" type="button">從未完成片段接續</button>` : ""}
             </div>
+            ${batchSegmentsHtml(job)}
             <div class="job-recipe hidden" data-job-recipe-panel="${job.id}"><div class="job-recipe-heading"><strong>實際送給 AI 的生成提示詞</strong><button class="text-button" data-job-copy-prompt="${job.id}" type="button">複製提示詞</button></div><pre data-job-compiled-prompt></pre></div>
             ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
             ${job.merge_error ? `<div class="job-error">${escapeHtml(job.merge_error)}</div>` : ""}
@@ -1176,6 +1588,9 @@ function showEngineStarting() {
 async function checkStatus() {
   try {
     const data = await api("/api/status");
+    if (data.studio_role) applyStudioRole({ studio_role: data.studio_role });
+    engineModelInventory = data.models || {};
+    syncQualityMode(...dimensions());
     const remote = data.connection_mode === "remote";
     $("#executionMode").textContent = remote ? "遠端 GPU" : "本機 GPU";
     $("#renderNote").textContent = remote
@@ -1239,7 +1654,7 @@ function addStoryboard() {
 function replacementPrompt() {
   const alias = state.replacement?.alias?.trim() || "新角色";
   const target = state.replacement?.target?.trim() || "動態參考影片中的主要角色";
-  return `${alias}完整取代${target}。\n\n${alias}必須始終保持參考圖片中的臉部、髮型、服裝與身材特徵。\n完全沿用原角色的動作、姿勢、表演節奏、畫面位置和鏡頭運動，\n但不要保留或生成原角色的臉部、髮型、服裝與身份特徵。\n全程只出現${alias}，不要同時出現${alias}與原角色，也不要混合兩者外觀。\n除指定角色外，盡量維持原影片的場景、構圖、光線、道具與其他人物。`;
+  return `${alias}完整取代${target}。\n\n${alias}必須始終保持參考圖片中的臉部、髮型、服裝與身材特徵。\n完全沿用原角色的動作、姿勢、表演節奏、畫面位置和鏡頭運動，\n但不要保留或生成原角色的臉部、髮型、服裝與身份特徵。\n全程只出現${alias}，不要同時出現${alias}與原角色，也不要混合兩者外觀。\n除指定角色外，盡量維持原影片的場景、構圖、光線、道具與其他人物。\n指定原角色未出現的畫面保持原樣，不要憑空加入${alias}。\n若影片被自動分段，開頭與結尾必須沿用相鄰片段的動作慣性、角色身份、鏡頭方向與空間位置，不得重新起步、停頓或重設姿勢。`;
 }
 
 function symbolLoopPrompt() {
@@ -1294,6 +1709,7 @@ function bindEvents() {
     $(`#${id}`).addEventListener("input", updateSummary);
     $(`#${id}`).addEventListener("change", updateSummary);
   });
+  $("#qualityMode").addEventListener("change", changeQualityMode);
   ["aspectRatio", "megapixels", "keyframeFit"].forEach(id => {
     $(`#${id}`).addEventListener("change", refreshKeyframes);
   });
@@ -1322,7 +1738,59 @@ function bindEvents() {
   $("#openConnectionSettings").addEventListener("click", async () => {
     try { await loadConnectionSettings(true); } catch (error) { toast(error.message, true); }
   });
+  $("#openGatewaySettings").addEventListener("click", async () => {
+    try { await loadGatewayStatus(true); } catch (error) { toast(error.message, true); }
+  });
   $("#openPromptGuide").addEventListener("click", openPromptGuide);
+  $("#openMusicStudio").addEventListener("click", openMusicStudio);
+  $$('[data-close-music]').forEach(element => element.addEventListener("click", closeMusicStudio));
+  $$('[data-music-mode]').forEach(button => button.addEventListener("click", () => setMusicMode(button.dataset.musicMode)));
+  $("#randomMusicSeed").addEventListener("click", () => { $("#musicSeed").value = randomMusicSeed(); });
+  $("#generateMusic").addEventListener("click", generateMusic);
+  $("#installMusicModels").addEventListener("click", async () => {
+    try {
+      renderMusicStatus(await api("/api/music/install", { method: "POST" }));
+      toast("Music 3 模型開始下載；關閉面板不會中斷。")
+    } catch (error) { toast(error.message, true); }
+  });
+  $("#cancelMusicInstall").addEventListener("click", async () => {
+    try { renderMusicStatus(await api("/api/music/install/cancel", { method: "POST" })); toast("正在暫停下載，進度會保留。"); }
+    catch (error) { toast(error.message, true); }
+  });
+  $("#refreshMusicJobs").addEventListener("click", () => loadMusicJobs(true).catch(error => toast(error.message, true)));
+  $("#previousMusicPage").addEventListener("click", () => { if (musicPage > 1) { musicPage--; loadMusicJobs(true); } });
+  $("#nextMusicPage").addEventListener("click", () => { if (musicPage < musicTotalPages) { musicPage++; loadMusicJobs(true); } });
+  $("#musicJobList").addEventListener("click", async event => {
+    const favorite = event.target.closest("[data-music-favorite]");
+    const rename = event.target.closest("[data-music-rename]");
+    const cancel = event.target.closest("[data-music-cancel]");
+    const resume = event.target.closest("[data-music-resume]");
+    const caption = event.target.closest("[data-music-caption]");
+    try {
+      if (favorite) {
+        await api(`/api/music/jobs/${favorite.dataset.musicFavorite}/favorite`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ favorite: favorite.dataset.favorite !== "true" }),
+        });
+        musicPage = 1;
+      } else if (rename) {
+        const name = prompt("輸入音樂任務名稱（最多 80 個字）", rename.dataset.name || "");
+        if (name === null) return;
+        await api(`/api/music/jobs/${rename.dataset.musicRename}/rename`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+        });
+      } else if (cancel) {
+        await api(`/api/music/jobs/${cancel.dataset.musicCancel}/cancel`, { method: "POST" });
+      } else if (resume) {
+        await api(`/api/music/jobs/${resume.dataset.musicResume}/resume`, { method: "POST" });
+      } else if (caption) {
+        const panel = $(`[data-music-caption-panel="${caption.dataset.musicCaption}"]`);
+        panel.classList.toggle("hidden");
+        return;
+      } else return;
+      await loadMusicJobs(true);
+    } catch (error) { toast(error.message, true); }
+  });
   $$('[data-close-prompt-guide]').forEach(element => element.addEventListener("click", closePromptGuide));
   $$(".prompt-guide-nav button").forEach(button => button.addEventListener("click", () => {
     $$(".prompt-guide-nav button").forEach(item => item.classList.toggle("active", item === button));
@@ -1338,10 +1806,75 @@ function bindEvents() {
   });
   document.addEventListener("keydown", event => {
     if (event.key !== "Escape") return;
-    if (!$("#promptGuideModal").classList.contains("hidden")) closePromptGuide();
+    if (!$("#musicModal").classList.contains("hidden")) closeMusicStudio();
+    else if (!$("#promptGuideModal").classList.contains("hidden")) closePromptGuide();
+    else if (!$("#gatewayModal").classList.contains("hidden")) closeGatewaySettings();
     else if (!$("#connectionModal").classList.contains("hidden")) closeConnectionSettings();
   });
   $$("[data-close-connection]").forEach(element => element.addEventListener("click", closeConnectionSettings));
+  $$("[data-close-gateway]").forEach(element => element.addEventListener("click", closeGatewaySettings));
+  $("#saveGatewaySettings").addEventListener("click", async () => {
+    const button = $("#saveGatewaySettings");
+    setButtonBusy(button, true);
+    try {
+      const result = await api("/api/gateway/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: $("#gatewayEnabled").checked, port: Number($("#gatewayPort").value) }),
+      });
+      renderGatewayStatus(result);
+      toast(result.running ? "共享引擎已啟用" : "共享引擎已停用");
+    } catch (error) { toast(error.message, true); }
+    finally { setButtonBusy(button, false); }
+  });
+  $("#gatewayCreateUser").addEventListener("submit", async event => {
+    event.preventDefault();
+    const name = $("#gatewayUserName").value.trim();
+    if (!name) return;
+    const button = event.currentTarget.querySelector("button");
+    setButtonBusy(button, true);
+    try {
+      const result = await api("/api/gateway/users", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+      });
+      $("#gatewayUserName").value = "";
+      revealGatewayToken(result);
+      await loadGatewayStatus();
+      toast(`已建立 ${result.user.name} 的共享帳號`);
+    } catch (error) { toast(error.message, true); }
+    finally { setButtonBusy(button, false); }
+  });
+  $("#gatewayUrlList").addEventListener("click", async event => {
+    const button = event.target.closest("[data-gateway-copy-url]");
+    if (!button) return;
+    try { await navigator.clipboard.writeText(button.dataset.gatewayCopyUrl); toast("Gateway 網址已複製"); }
+    catch { toast("無法複製網址", true); }
+  });
+  $("#copyGatewayToken").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText($("#gatewayTokenValue").textContent); toast("個人金鑰已複製"); }
+    catch { toast("無法複製金鑰", true); }
+  });
+  $("#gatewayUserList").addEventListener("click", async event => {
+    const rotate = event.target.closest("[data-gateway-rotate]");
+    const toggle = event.target.closest("[data-gateway-enable]");
+    const button = rotate || toggle;
+    if (!button) return;
+    setButtonBusy(button, true);
+    try {
+      if (rotate) {
+        const result = await api(`/api/gateway/users/${rotate.dataset.gatewayRotate}/rotate`, { method: "POST" });
+        revealGatewayToken(result);
+        toast(`${result.user.name} 的舊金鑰已失效`);
+      } else {
+        await api(`/api/gateway/users/${toggle.dataset.gatewayEnable}/enabled`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: toggle.dataset.enabled === "true" }),
+        });
+      }
+      await loadGatewayStatus();
+    } catch (error) { toast(error.message, true); }
+    finally { setButtonBusy(button, false); }
+  });
   $$("input[name='connectionMode']").forEach(element => element.addEventListener("change", refreshConnectionFields));
   $("#connectionComfyDir").addEventListener("input", () => {
     installerPreflightData = null;
@@ -1398,6 +1931,7 @@ function bindEvents() {
       connectionSettings = await api("/api/connection", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(connectionPayload()),
       });
+      applyStudioRole(connectionSettings);
       closeConnectionSettings();
       engineStartingAt = 0;
       toast("引擎設定已儲存");
@@ -1541,11 +2075,35 @@ function bindEvents() {
   $("#replacementVideoPreview").addEventListener("click", event => {
     if (!event.target.closest("#removeReplacementVideo")) return;
     state.replacement.video = null;
-    state.replacement.videoUseAudio = false;
+    state.replacement.videoInfo = null;
+    state.replacement.segmentPlan = [];
     renderReplacement(); updateSummary(); saveState();
   });
   $("#replacementUseAudio").addEventListener("change", event => {
     state.replacement.videoUseAudio = event.target.checked;
+    saveState();
+  });
+  $("#replacementAutoSplit").addEventListener("change", event => {
+    state.replacement.autoSplit = event.target.checked;
+    renderReplacement(); updateSummary(); saveState();
+  });
+  $("#replacementContinuity").addEventListener("change", event => {
+    state.replacement.continuity = event.target.checked;
+    saveState();
+  });
+  $("#replacementAudioMode").addEventListener("change", event => {
+    state.replacement.audioMode = event.target.value;
+    saveState();
+  });
+  $("#replacementSplitStrategy").addEventListener("change", async event => {
+    state.replacement.splitStrategy = event.target.value;
+    if (state.replacement.video) {
+      try {
+        toast("正在重新規劃影片切點...");
+        await prepareReplacementVideo();
+        renderReplacement(); updateSummary();
+      } catch (error) { toast(error.message, true); }
+    }
     saveState();
   });
 
@@ -1696,6 +2254,7 @@ function bindEvents() {
     const copyPromptButton = event.target.closest("[data-job-copy-prompt]");
     const applyButton = event.target.closest("[data-job-apply]");
     const cancelButton = event.target.closest("[data-job-cancel]");
+    const resumeButton = event.target.closest("[data-job-resume]");
     const renameButton = event.target.closest("[data-job-rename]");
     if (favoriteButton) {
       event.preventDefault();
@@ -1740,6 +2299,17 @@ function bindEvents() {
     if (cancelButton) {
       try { await api(`/api/jobs/${cancelButton.dataset.jobCancel}/cancel`, { method: "POST" }); toast("已送出取消要求"); loadJobs(true); }
       catch (error) { toast(error.message, true); }
+      return;
+    }
+    if (resumeButton) {
+      resumeButton.disabled = true;
+      try {
+        await api(`/api/jobs/${resumeButton.dataset.jobResume}/resume`, { method: "POST" });
+        toast("已從第一個未完成片段接續工作。");
+        loadJobs(true);
+      } catch (error) { toast(error.message, true); }
+      finally { resumeButton.disabled = false; }
+      return;
     }
     if (renameButton) {
       const name = prompt("輸入任務名稱（最多 80 個字）", renameButton.dataset.jobName || "");
@@ -1812,6 +2382,9 @@ async function setKeyframe(target, file) {
 function initialize() {
   restoreForm();
   bindEvents();
+  installInteractionMotion();
+  setMusicMode("instrumental");
+  $("#musicSeed").value = randomMusicSeed();
   renderKeyframePreview("first", state.firstImage, "起始圖片", false);
   renderKeyframePreview("last", state.lastImage, "結束圖片", true);
   renderContinuation();
@@ -1826,6 +2399,11 @@ function initialize() {
   setInterval(() => loadInstallerStatus().catch(error => console.warn(error)), 2500);
   setInterval(() => engineStartingAt && showEngineStarting(), 1000);
   setInterval(loadJobs, 3000);
+  setInterval(() => {
+    if ($("#musicModal").classList.contains("hidden")) return;
+    loadMusicStatus().catch(error => console.warn(error));
+    loadMusicJobs().catch(error => console.warn(error));
+  }, 2500);
 }
 
 initialize();

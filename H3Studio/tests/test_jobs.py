@@ -1,11 +1,16 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import av
+from PIL import Image
+
 from app import (
+    AssetStore,
     JobManager,
     RequestError,
     clean_job_name,
@@ -14,8 +19,11 @@ from app import (
     output_timestamp,
     paginate_job_records,
     request_asset_ids,
+    replacement_segment_plan,
     sort_job_records,
 )
+from domain import compile_request
+from tests.test_continuation import make_video
 
 
 class JobListingTests(unittest.TestCase):
@@ -94,6 +102,28 @@ class FakeRecoveryComfy:
         return b"recovered-video", "video/mp4"
 
 
+class FakeBatchComfy:
+    def __init__(self, video_bytes):
+        self.video_bytes = video_bytes
+        self.counter = 0
+
+    async def ensure_running(self):
+        return None
+
+    async def upload_asset(self, path, _subfolder):
+        return path.name
+
+    async def run_prompt(self, _workflow, progress, _cancel_event):
+        self.counter += 1
+        await progress({"status": "running", "progress": 50, "current_node": None})
+        output = {"filename": f"fake-{self.counter}.mp4", "subfolder": "H3Studio", "type": "output"}
+        history = {"outputs": {"15": {"video": output}}, "status": {"messages": []}}
+        return f"prompt-{self.counter}", history
+
+    async def fetch_output(self, _output):
+        return self.video_bytes, "video/mp4"
+
+
 class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def test_failed_progress_connection_is_reconciled_from_comfy_history(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -140,6 +170,65 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(manager.jobs[job_id]["progress"], 100)
             self.assertIsNone(manager.jobs[job_id]["error"])
             self.assertEqual((output_dir / f"{job_id}.mp4").read_bytes(), b"recovered-video")
+
+    async def test_long_replacement_batch_runs_hidden_children_and_merges_original_audio(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            asset_dir = root / "assets"
+            job_dir = root / "jobs"
+            output_dir = root / "outputs"
+            asset_dir.mkdir()
+            job_dir.mkdir()
+            output_dir.mkdir()
+            source_id = "d" * 32
+            source_path = asset_dir / f"{source_id}.mp4"
+            make_video(source_path, [(20, 30, 40)] * (16 * 24), with_audio=True)
+            assets = AssetStore(asset_dir)
+            assets.register_derived_video(source_id, "source.mp4", "replacement-performance-video")
+            image = assets.save_image(Image.new("RGB", (64, 64), (200, 30, 40)), "new.png", "replacement-character")
+            generated = root / "generated.mp4"
+            make_video(generated, [(60, 120, 180)] * (10 * 24), with_audio=True)
+            payload = {
+                "mode": "replace",
+                "prompt": "新角色完整取代主要角色。",
+                "aspect_ratio": "16:9",
+                "megapixels": 0.4,
+                "duration": 5,
+                "seed": 42,
+                "steps": 4,
+                "replacement_auto_split": True,
+                "replacement_continuity": True,
+                "replacement_audio_mode": "original",
+                "references": [{
+                    "alias": "新角色",
+                    "type": "character",
+                    "image_asset_ids": [image["id"]],
+                    "video_asset_id": source_id,
+                    "video_use_audio": True,
+                }],
+            }
+            compiled = replace(compile_request(payload), width=96, height=64)
+            source_info = {"width": 96, "height": 64, "fps": 24.0, "duration": 16.0, "has_audio": True}
+            plan = replacement_segment_plan(16.0, smart=False)
+            fake = FakeBatchComfy(generated.read_bytes())
+
+            with patch("app.JOB_DIR", job_dir), patch("app.OUTPUT_DIR", output_dir):
+                manager = JobManager(assets, fake)
+                parent = manager.create_replacement_batch(compiled, payload, source_info, plan)
+                await manager.tasks[parent["id"]]
+
+            completed = manager.jobs[parent["id"]]
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(len(completed["segments"]), 2)
+            self.assertTrue(all(segment["status"] == "completed" for segment in completed["segments"]))
+            children = [job for job in manager.jobs.values() if job.get("parent_job_id") == parent["id"]]
+            self.assertEqual(len(children), 2)
+            self.assertTrue(all(job["hidden"] for job in children))
+            final_path = output_dir / completed["local_output"]
+            with av.open(str(final_path)) as container:
+                frames = list(container.decode(video=0))
+                self.assertTrue(container.streams.audio)
+            self.assertEqual(len(frames), 16 * 24)
 
 
 if __name__ == "__main__":
