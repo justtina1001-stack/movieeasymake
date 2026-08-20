@@ -1,4 +1,5 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,6 +84,18 @@ class ComfyClientRecoveryTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(self.client.history_state(history), "error")
         self.assertEqual(self.client.history_error(history), "GPU out of memory")
+
+    def test_decodes_comfy_preview_binary_messages(self):
+        jpeg = b"\xff\xd8preview"
+        decoded = self.client.decode_preview_message((1).to_bytes(4, "big") + (1).to_bytes(4, "big") + jpeg)
+        self.assertEqual(decoded, (jpeg, "image/jpeg"))
+
+        metadata = json.dumps({"image_type": "image/png"}).encode("utf-8")
+        png = b"\x89PNGpreview"
+        decoded = self.client.decode_preview_message(
+            (4).to_bytes(4, "big") + len(metadata).to_bytes(4, "big") + metadata + png
+        )
+        self.assertEqual(decoded, (png, "image/png"))
 
 
 if __name__ == "__main__":

@@ -87,6 +87,20 @@ async def main():
             if not valid:
                 raise RuntimeError(f"{label} validation failed: {error}; {node_errors}")
             print(f"{label}: valid ({len(workflow)} nodes, outputs={outputs})")
+
+        data = payload("t2v")
+        data["storyboards"] = [{
+            "duration": 2,
+            "description": "The subject reaches the exact storyboard composition, then continues naturally.",
+            "image_asset_id": ASSET,
+            "guide_mode": "exact",
+        }]
+        compiled = compile_request(data)
+        workflow = build_workflow(compiled, {ASSET: "example.png"}, "validate-exact-guide")
+        valid, error, outputs, node_errors = await execution.validate_prompt("exact-guide", workflow, None)
+        if not valid:
+            raise RuntimeError(f"exact-guide validation failed: {error}; {node_errors}")
+        print(f"exact-guide: valid ({len(workflow)} nodes, outputs={outputs})")
     finally:
         VALIDATION_VIDEO.unlink(missing_ok=True)
 

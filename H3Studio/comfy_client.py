@@ -104,7 +104,10 @@ class ComfyClient:
             if sys.platform == "win32":
                 creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
             self.process = subprocess.Popen(
-                [str(python), "main.py", "--lowvram", "--reserve-vram", "1.5", "--listen", "127.0.0.1"],
+                [
+                    str(python), "main.py", "--lowvram", "--reserve-vram", "1.5",
+                    "--preview-method", "taesd", "--listen", "127.0.0.1",
+                ],
                 cwd=self.comfy_dir,
                 stdout=self.log_handle,
                 stderr=subprocess.STDOUT,
@@ -294,6 +297,11 @@ class ComfyClient:
                                     await callback({"status": "running", "current_node": data.get("node")})
                                 elif event.get("type") == "execution_error":
                                     raise RuntimeError(data.get("exception_message") or "ComfyUI 執行失敗。")
+                            elif message.type == aiohttp.WSMsgType.BINARY:
+                                preview = self.decode_preview_message(message.data)
+                                if preview:
+                                    image, content_type = preview
+                                    await callback({"preview_bytes": image, "preview_mime": content_type})
                             elif message.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR}:
                                 break
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
@@ -308,6 +316,27 @@ class ComfyClient:
                 await callback({"status": "running", "current_node": "進度連線中斷，正在自動重連"})
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(10.0, reconnect_delay * 2)
+
+    @staticmethod
+    def decode_preview_message(data: bytes) -> tuple[bytes, str] | None:
+        if len(data) < 8:
+            return None
+        event_type = int.from_bytes(data[:4], "big")
+        if event_type == 1:
+            image_type = int.from_bytes(data[4:8], "big")
+            content_type = "image/png" if image_type == 2 else "image/jpeg"
+            return data[8:], content_type
+        if event_type == 4:
+            metadata_length = int.from_bytes(data[4:8], "big")
+            image_start = 8 + metadata_length
+            if metadata_length < 2 or image_start >= len(data):
+                return None
+            try:
+                metadata = json.loads(data[8:image_start].decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            return data[image_start:], str(metadata.get("image_type") or "image/jpeg")
+        return None
 
     async def interrupt(self, prompt_id: str | None = None) -> None:
         try:

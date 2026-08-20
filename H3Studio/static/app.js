@@ -129,7 +129,7 @@ function loadState() {
       images: [], audio: null, video: null, videoUseAudio: false, voiceMode: "timbre", description: "", ...item,
     }));
     restored.mgAnimation = { ...structuredClone(defaultState.mgAnimation), ...(restored.mgAnimation || {}) };
-    restored.storyboards = (restored.storyboards || []).map(shot => ({ motionBeats: "", effects: "", ...shot }));
+    restored.storyboards = (restored.storyboards || []).map(shot => ({ motionBeats: "", effects: "", guideMode: "reference", ...shot }));
     restored.replacement = { ...structuredClone(defaultState.replacement), ...(restored.replacement || {}) };
     restored.symbolLoop = { ...structuredClone(defaultState.symbolLoop), ...(restored.symbolLoop || {}) };
     restored.continuation = { ...structuredClone(defaultState.continuation), ...(restored.continuation || {}) };
@@ -820,8 +820,8 @@ function setMode(mode) {
   $("#promptStep").textContent = mode === "t2v" ? "03" : mode === "mg_animation" ? "05" : "04";
   $("#storyboardStep").textContent = mode === "mg_animation" ? "06" : "05";
   $("#storyboardHint").textContent = ["r2v", "mg_animation"].includes(mode)
-    ? "分鏡圖片會作為構圖參考；出現時間為近似控制"
-    : "可加入文字分鏡；中間參考圖片需切換到多模態模式";
+    ? "圖片可選柔性構圖參考，或用官方 Guide 精確錨定在本段開始"
+    : "分鏡圖片會用官方 Guide 精確錨定在本段開始時間";
   if (isReferenceMode(mode) && $("#qualityMode").value !== "turbo" && $("#scheduler").value === "simple") $("#scheduler").value = "beta";
   if (!isReferenceMode(mode) && $("#qualityMode").value !== "turbo" && $("#scheduler").value === "beta") $("#scheduler").value = "simple";
   if (mode === "replace" && !state.replacement.safeDefaultsApplied) {
@@ -885,8 +885,22 @@ function renderKeyframePreview(target, asset, label, optional) {
   const sourceName = asset?.source_name || asset?.name || "";
   const size = asset?.width && asset?.height ? `${asset.width} × ${asset.height}` : "";
   element.innerHTML = asset
-    ? `<strong>${escapeHtml(label)}</strong><small>${escapeHtml(sourceName)}${size ? ` · ${size}` : ""}</small>`
+    ? `<button class="keyframe-remove" type="button" data-remove-keyframe="${target}" aria-label="移除${escapeHtml(label)}" title="移除${escapeHtml(label)}">×</button><strong>${escapeHtml(label)}</strong><small>${escapeHtml(sourceName)}${size ? ` · ${size}` : ""}</small>`
     : `<span class="upload-plus">＋</span><strong>${escapeHtml(label)}</strong><small>${optional ? "選填" : "點擊或拖入圖片"}</small>`;
+}
+
+function clearKeyframe(target) {
+  const stateKey = target === "first" ? "firstImage" : "lastImage";
+  const label = target === "first" ? "起始圖片" : "結束圖片";
+  if (!state[stateKey]) return;
+  keyframePrepareVersion++;
+  state[stateKey] = null;
+  const input = $(`#${target}ImageInput`);
+  if (input) input.value = "";
+  renderKeyframePreview(target, null, label, target === "last");
+  updateSummary();
+  saveState();
+  toast(`${label}已移除。`);
 }
 
 function renderReplacement() {
@@ -1068,6 +1082,11 @@ function renderStoryboards() {
   list.innerHTML = state.storyboards.map((shot, index) => {
     const start = cursor;
     cursor += Number(shot.duration) || 0;
+    const softReferenceAllowed = ["r2v", "mg_animation"].includes(state.mode);
+    const guideMode = softReferenceAllowed ? (shot.guideMode || "reference") : "exact";
+    const guideOptions = softReferenceAllowed
+      ? `<option value="reference" ${guideMode === "reference" ? "selected" : ""}>提示詞構圖參考</option><option value="exact" ${guideMode === "exact" ? "selected" : ""}>精確錨定本段開始</option>`
+      : `<option value="exact" selected>精確錨定本段開始</option>`;
     return `
       <article class="shot-card" data-shot-id="${shot.id}">
         <div class="shot-index"><span>SHOT</span><strong>${String(index + 1).padStart(2, "0")}</strong><small>${start.toFixed(1)}–${cursor.toFixed(1)}s</small></div>
@@ -1080,8 +1099,11 @@ function renderStoryboards() {
           <label class="wide-field">特效時序<input data-shot-field="effects" value="${escapeHtml(shot.effects)}" placeholder="例如：接觸點閃光 → 衝擊波擴散 → 火花拖尾消散"></label>
           <label class="wide-field">聲音與音樂<input data-shot-field="sound" value="${escapeHtml(shot.sound)}" placeholder="腳步聲、風聲、低沉配樂"></label>
         </div>
-        <div>
-          <div class="shot-image ${shot.image ? "has-image" : ""}" data-shot-action="image" style="${shot.image ? `background-image:url('${shot.image.url}')` : ""}">${["r2v", "mg_animation"].includes(state.mode) ? (shot.image ? "已加入" : "＋ 分鏡圖") : "文字分鏡"}</div>
+        <div class="shot-guide">
+          <div class="shot-image ${shot.image ? "has-image" : ""}" data-shot-action="image" style="${shot.image ? `background-image:url('${shot.image.url}')` : ""}">${shot.image ? "已加入" : "＋ 分鏡圖"}</div>
+          ${shot.image ? `<button class="shot-image-remove" data-shot-action="remove-image" title="移除分鏡圖" type="button">×</button>` : ""}
+          <label>圖片用途<select data-shot-field="guideMode">${guideOptions}</select></label>
+          <small>${guideMode === "exact" ? `鎖定 ${start.toFixed(3)} 秒畫面` : "作為柔性構圖參考"}</small>
           <button class="delete-button" data-shot-action="delete" title="刪除鏡頭" type="button">×</button>
         </div>
       </article>
@@ -1154,7 +1176,8 @@ function collectPayload() {
       sound: shot.sound.trim(),
       motion_beats: shot.motionBeats.trim(),
       effects: shot.effects.trim(),
-      image_asset_id: ["r2v", "mg_animation"].includes(state.mode) ? shot.image?.id || null : null,
+      image_asset_id: shot.image?.id || null,
+      guide_mode: ["r2v", "mg_animation"].includes(state.mode) ? (shot.guideMode || "reference") : "exact",
     })),
   };
 }
@@ -1398,7 +1421,7 @@ async function applyJobRecipe(jobId) {
   state.storyboards = (raw.storyboards || []).map(shot => ({
     id: uid(), duration: shot.duration ?? 2, description: shot.description || "", camera: shot.camera || "",
     dialogue: shot.dialogue || "", sound: shot.sound || "", motionBeats: shot.motion_beats || "",
-    effects: shot.effects || "", image: recipeAsset(shot.image_asset_id, assets),
+    effects: shot.effects || "", guideMode: shot.guide_mode || "reference", image: recipeAsset(shot.image_asset_id, assets),
   }));
 
   if (mode === "replace" && state.replacement.video && !state.replacement.videoInfo) {
@@ -1558,6 +1581,7 @@ async function loadJobs(force = false) {
               ${job.batch_type === "replace_long" && ["failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button secondary" data-job-resume="${job.id}" type="button">從未完成片段接續</button>` : ""}
             </div>
             ${batchSegmentsHtml(job)}
+            ${job.preview_version ? `<div class="job-live-preview"><div><span>TAEH3 LIVE PREVIEW</span><strong>${active ? "生成中近似畫面" : "最後一張生成預覽"}</strong><small>這是低成本潛空間預覽，細節與最終影片可能不同。</small></div><img src="/api/jobs/${job.id}/preview?v=${encodeURIComponent(job.preview_version)}" alt="${escapeHtml(title)}生成中預覽"></div>` : ""}
             <div class="job-recipe hidden" data-job-recipe-panel="${job.id}"><div class="job-recipe-heading"><strong>實際送給 AI 的生成提示詞</strong><button class="text-button" data-job-copy-prompt="${job.id}" type="button">複製提示詞</button></div><pre data-job-compiled-prompt></pre></div>
             ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
             ${job.merge_error ? `<div class="job-error">${escapeHtml(job.merge_error)}</div>` : ""}
@@ -1646,7 +1670,8 @@ function addReference() {
 }
 
 function addStoryboard() {
-  state.storyboards.push({ id: uid(), duration: 2, description: "", camera: "", dialogue: "", sound: "", motionBeats: "", effects: "", image: null });
+  const guideMode = ["r2v", "mg_animation"].includes(state.mode) ? "reference" : "exact";
+  state.storyboards.push({ id: uid(), duration: 2, description: "", camera: "", dialogue: "", sound: "", motionBeats: "", effects: "", guideMode, image: null });
   renderStoryboards();
   saveState();
 }
@@ -1943,13 +1968,25 @@ function bindEvents() {
   $$(".upload-box").forEach(box => {
     const target = box.dataset.uploadTarget;
     const input = $(`#${target}ImageInput`);
-    box.addEventListener("click", () => input.click());
+    box.addEventListener("click", event => {
+      const removeButton = event.target.closest("[data-remove-keyframe]");
+      if (removeButton) {
+        event.stopPropagation();
+        clearKeyframe(removeButton.dataset.removeKeyframe);
+        return;
+      }
+      input.click();
+    });
     box.addEventListener("dragover", event => event.preventDefault());
     box.addEventListener("drop", async event => {
       event.preventDefault();
       if (event.dataTransfer.files[0]) await setKeyframe(target, event.dataTransfer.files[0]);
     });
-    input.addEventListener("change", async () => input.files[0] && setKeyframe(target, input.files[0]));
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      input.value = "";
+      if (file) await setKeyframe(target, file);
+    });
   });
 
   const symbolUpload = $("#symbolUpload");
@@ -2186,7 +2223,7 @@ function bindEvents() {
     const shot = state.storyboards.find(value => value.id === card.dataset.shotId);
     shot[field] = event.target.value;
     saveState();
-    if (field === "duration") renderStoryboards();
+    if (["duration", "guideMode"].includes(field)) renderStoryboards();
   });
   $("#storyboardList").addEventListener("click", async event => {
     const actionElement = event.target.closest("[data-shot-action]");
@@ -2194,10 +2231,13 @@ function bindEvents() {
     if (!actionElement || !card) return;
     const shot = state.storyboards.find(value => value.id === card.dataset.shotId);
     if (actionElement.dataset.shotAction === "delete") state.storyboards = state.storyboards.filter(value => value.id !== shot.id);
+    if (actionElement.dataset.shotAction === "remove-image") shot.image = null;
     if (actionElement.dataset.shotAction === "image") {
-      if (!["r2v", "mg_animation"].includes(state.mode)) return toast("中間分鏡圖片需要使用多模態參考模式。", true);
       const files = await chooseFiles("image/*");
-      if (files[0]) shot.image = await uploadFile(files[0], "storyboard-image");
+      if (files[0]) {
+        shot.image = await uploadFile(files[0], "storyboard-image");
+        if (!["r2v", "mg_animation"].includes(state.mode)) shot.guideMode = "exact";
+      }
     }
     renderStoryboards(); updateSummary(); saveState();
   });

@@ -1007,6 +1007,8 @@ class JobManager:
             "error": None,
             "prompt_id": None,
             "output": None,
+            "preview_version": None,
+            "preview_mime": None,
             "width": compiled.width,
             "height": compiled.height,
             "duration": compiled.actual_duration,
@@ -1557,6 +1559,13 @@ class JobManager:
                 node_titles = {node_id: node.get("_meta", {}).get("title", node["class_type"]) for node_id, node in workflow.items()}
 
                 async def progress(event: dict[str, Any]) -> None:
+                    preview_bytes = event.pop("preview_bytes", None)
+                    preview_mime = event.pop("preview_mime", None)
+                    if preview_bytes:
+                        preview_path = JOB_DIR / f"{job_id}.preview"
+                        await asyncio.to_thread(preview_path.write_bytes, preview_bytes)
+                        event["preview_version"] = uuid.uuid4().hex[:12]
+                        event["preview_mime"] = preview_mime or "image/jpeg"
                     node_id = event.get("current_node")
                     changes = dict(event)
                     if node_id:
@@ -2027,6 +2036,21 @@ def create_app() -> web.Application:
         except Exception as error:
             return json_response_error(error, 502)
 
+    async def job_preview(request: web.Request) -> web.Response:
+        job = jobs.jobs.get(request.match_info["job_id"])
+        preview_path = JOB_DIR / f"{request.match_info['job_id']}.preview"
+        if not job or not job.get("preview_version") or not preview_path.exists():
+            return json_response_error(RequestError("尚無生成中預覽。"), 404)
+        try:
+            content = await asyncio.to_thread(preview_path.read_bytes)
+            return web.Response(
+                body=content,
+                content_type=job.get("preview_mime") or "image/jpeg",
+                headers={"Cache-Control": "no-store"},
+            )
+        except OSError as error:
+            return json_response_error(error, 404)
+
     async def music_status(_: web.Request) -> web.Response:
         result = await music_installer.status_for_current_engine()
         result["engine_ready"] = await comfy.is_ready()
@@ -2181,6 +2205,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/jobs/{job_id}/rename", rename_job)
     app.router.add_post("/api/jobs/{job_id}/favorite", favorite_job)
     app.router.add_get("/api/jobs/{job_id}/recipe", job_recipe)
+    app.router.add_get("/api/jobs/{job_id}/preview", job_preview)
     app.router.add_get("/api/jobs/{job_id}/video", job_video)
     app.router.add_get("/api/music/status", music_status)
     app.router.add_post("/api/music/install", install_music_models)

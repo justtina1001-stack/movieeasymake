@@ -93,6 +93,7 @@ class CompiledRequest:
     reference_videos: list[str]
     reference_video_use_audio: list[bool]
     reference_audios: list[str]
+    guides: list[dict[str, Any]]
     continuation_source_job: str | None
     continuation_source_asset: str | None
     continuation_merge: bool
@@ -174,9 +175,13 @@ def _motion_direction(payload: dict[str, Any]) -> str:
     ])
 
 
-def _storyboard_text(storyboards: list[dict[str, Any]], aliases: dict[str, str]) -> tuple[list[str], list[str]]:
+def _storyboard_text(
+    storyboards: list[dict[str, Any]],
+    aliases: dict[str, str],
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     lines: list[str] = []
     image_assets: list[str] = []
+    guides: list[dict[str, Any]] = []
     cursor = 0.0
     for index, shot in enumerate(storyboards, start=1):
         duration = min(15.0, max(0.5, _safe_float(shot.get("duration"), 2.0)))
@@ -190,10 +195,24 @@ def _storyboard_text(storyboards: list[dict[str, Any]], aliases: dict[str, str])
         motion_beats = _rewrite_aliases(_clean_text(shot.get("motion_beats")), aliases)
         effects = _rewrite_aliases(_clean_text(shot.get("effects")), aliases)
         image_id = _clean_text(shot.get("image_asset_id"))
+        guide_mode = "exact" if shot.get("guide_mode") == "exact" else "reference"
         parts = [f"[Shot {index}, {start:.1f}s-{end:.1f}s]"]
         if image_id:
-            image_assets.append(image_id)
-            parts.append("使用分鏡參考圖 {STORYBOARD_TAG} 的構圖、人物位置與鏡位，不要複製其中不相關的文字或浮水印。")
+            if guide_mode == "exact":
+                frame_idx = min(max(0, round(start * FPS)), 3599)
+                guides.append({
+                    "asset_id": image_id,
+                    "frame_idx": frame_idx,
+                    "shot_index": index,
+                    "time": round(frame_idx / FPS, 3),
+                })
+                parts.append(
+                    f"精確分鏡 Guide 會在 {frame_idx / FPS:.3f} 秒（第 {frame_idx} 幀）鎖定這張圖的構圖、人物位置與鏡位；"
+                    "前後動作必須連續收斂並自然離開該畫面，不要把它當成切鏡或重新開場。"
+                )
+            else:
+                image_assets.append(image_id)
+                parts.append("使用分鏡參考圖 {STORYBOARD_TAG} 的構圖、人物位置與鏡位，不要複製其中不相關的文字或浮水印。")
         if description:
             parts.append(description)
         if camera:
@@ -207,7 +226,7 @@ def _storyboard_text(storyboards: list[dict[str, Any]], aliases: dict[str, str])
         if effects:
             parts.append(f"Effects: {effects}")
         lines.append(" ".join(parts))
-    return lines, image_assets
+    return lines, image_assets, guides
 
 
 def _mg_animation_description(payload: dict[str, Any], aliases: dict[str, str], duration: float) -> str:
@@ -413,6 +432,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     reference_videos: list[str] = []
     reference_video_use_audio: list[bool] = []
     reference_audios: list[str] = []
+    guides: list[dict[str, Any]] = []
     definitions: list[str] = []
     assignments: list[str] = []
     motion_direction = _motion_direction(payload)
@@ -531,7 +551,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 "audio_tag": audio_tag,
             })
 
-        shot_lines, storyboard_images = _storyboard_text(storyboards, aliases)
+        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, aliases)
+        guides.extend(storyboard_guides)
         for shot_index, image_id in enumerate(storyboard_images, start=1):
             picture_index += 1
             reference_images.append(image_id)
@@ -621,7 +642,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 sections.append("retention_rules:\n嚴格保持每個已命名角色的身份、臉部、服裝與聲音歸屬；不要把背景、風格或其他角色的特徵互相混合；動作參考只控制動態與時序，不得覆蓋角色身份；保持肢體結構、重心轉移、接觸和反作用力連續。")
             final_prompt = "\n\n".join(sections)
     else:
-        shot_lines, storyboard_images = _storyboard_text(storyboards, {})
+        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, {})
+        guides.extend(storyboard_guides)
         if storyboard_images:
             raise RequestError("中間分鏡圖片需要使用多模態參考模式；此模式仍可使用純文字分鏡。")
         intro: list[str] = []
@@ -669,6 +691,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         reference_videos=reference_videos,
         reference_video_use_audio=reference_video_use_audio,
         reference_audios=reference_audios,
+        guides=guides,
         continuation_source_job=continuation_source_job,
         continuation_source_asset=continuation_source_asset,
         continuation_merge=continuation_merge,
@@ -769,6 +792,17 @@ def build_workflow(
             condition_inputs["last_frame"] = [image_node(compiled.last_image), 0]
         conditioning = add("MiniMaxH3ImageToVideo", condition_inputs, "MiniMax H3 Image to Video")
 
+    latent_source = conditioning
+    positive_source = conditioning
+    for guide in compiled.guides:
+        positive_source = add("MiniMaxH3AddGuide", {
+            "positive": [positive_source, 0],
+            "vae": [video_vae, 0],
+            "latent": [latent_source, 1],
+            "image": [image_node(guide["asset_id"]), 0],
+            "frame_idx": guide["frame_idx"],
+        }, f"Exact Storyboard Guide · Shot {guide['shot_index']}")
+
     noise = add("RandomNoise", {"noise_seed": compiled.seed}, "Seed")
     sampler = add("KSamplerSelect", {"sampler_name": compiled.sampler_name}, "Sampler")
     sigmas = add("BasicScheduler", {
@@ -777,13 +811,13 @@ def build_workflow(
         "steps": compiled.steps,
         "denoise": 1.0,
     }, "Scheduler")
-    guider = add("BasicGuider", {"model": [model, 0], "conditioning": [conditioning, 0]}, "Guider")
+    guider = add("BasicGuider", {"model": [model, 0], "conditioning": [positive_source, 0]}, "Guider")
     sampled = add("SamplerCustomAdvanced", {
         "noise": [noise, 0],
         "guider": [guider, 0],
         "sampler": [sampler, 0],
         "sigmas": [sigmas, 0],
-        "latent_image": [conditioning, 1],
+        "latent_image": [latent_source, 1],
     }, "Generate")
     decoded_video = add("VAEDecode", {"samples": [sampled, 0], "vae": [video_vae, 0]}, "Decode Video")
     decoded_audio = add("VAEDecodeAudio", {"samples": [sampled, 0], "vae": [audio_vae, 0]}, "Decode Audio")
@@ -803,5 +837,12 @@ def build_workflow(
 
 
 def required_asset_ids(compiled: CompiledRequest) -> list[str]:
-    values = [compiled.first_image, compiled.last_image, *compiled.reference_images, *compiled.reference_videos, *compiled.reference_audios]
+    values = [
+        compiled.first_image,
+        compiled.last_image,
+        *compiled.reference_images,
+        *compiled.reference_videos,
+        *compiled.reference_audios,
+        *(guide["asset_id"] for guide in compiled.guides),
+    ]
     return list(dict.fromkeys(value for value in values if value))

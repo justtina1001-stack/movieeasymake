@@ -1,6 +1,6 @@
 import unittest
 
-from domain import RequestError, build_workflow, compile_request
+from domain import RequestError, build_workflow, compile_request, required_asset_ids
 
 
 IMAGE_A = "a" * 32
@@ -306,6 +306,28 @@ class CompileRequestTests(unittest.TestCase):
         payload["storyboards"] = [{"duration": 4, "description": "A"}, {"duration": 4, "description": "B"}]
         with self.assertRaisesRegex(RequestError, "超過影片"):
             compile_request(payload)
+
+    def test_exact_storyboard_guides_anchor_images_at_shot_start_frames(self):
+        payload = self.base()
+        payload["storyboards"] = [
+            {"duration": 2, "description": "第一段", "image_asset_id": IMAGE_A, "guide_mode": "exact"},
+            {"duration": 3, "description": "第二段", "image_asset_id": IMAGE_B, "guide_mode": "exact"},
+        ]
+        compiled = compile_request(payload)
+        self.assertEqual(compiled.reference_images, [])
+        self.assertEqual([guide["frame_idx"] for guide in compiled.guides], [0, 48])
+        self.assertEqual(required_asset_ids(compiled), [IMAGE_A, IMAGE_B])
+        self.assertIn("精確分鏡 Guide", compiled.prompt)
+
+        workflow = build_workflow(compiled, {IMAGE_A: "h3/shot-1.png", IMAGE_B: "h3/shot-2.png"}, "exact-guides")
+        conditioning_id = next(node_id for node_id, node in workflow.items() if node["class_type"] == "MiniMaxH3ImageToVideo")
+        guides = [(node_id, node) for node_id, node in workflow.items() if node["class_type"] == "MiniMaxH3AddGuide"]
+        self.assertEqual(len(guides), 2)
+        self.assertEqual(guides[0][1]["inputs"]["positive"], [conditioning_id, 0])
+        self.assertEqual(guides[0][1]["inputs"]["latent"], [conditioning_id, 1])
+        self.assertEqual(guides[1][1]["inputs"]["positive"], [guides[0][0], 0])
+        guider = next(node for node in workflow.values() if node["class_type"] == "BasicGuider")
+        self.assertEqual(guider["inputs"]["conditioning"], [guides[1][0], 0])
 
     def test_r2v_workflow_uses_dynamic_reference_inputs(self):
         payload = self.base("r2v")
