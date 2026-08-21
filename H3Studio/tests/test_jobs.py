@@ -83,6 +83,71 @@ class JobListingTests(unittest.TestCase):
         self.assertEqual(request_asset_ids(payload), {"a" * 32, "b" * 32, "c" * 32})
 
 
+class JobDeletionTests(unittest.TestCase):
+    def test_terminal_batch_deletion_removes_children_records_and_local_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job_dir = root / "jobs"
+            output_dir = root / "outputs"
+            job_dir.mkdir()
+            output_dir.mkdir()
+            parent_id = "a" * 32
+            child_id = "b" * 32
+            unrelated_id = "c" * 32
+
+            with patch("app.JOB_DIR", job_dir), patch("app.OUTPUT_DIR", output_dir):
+                manager = JobManager(object(), object())
+                manager.jobs[parent_id] = {
+                    "id": parent_id,
+                    "status": "completed",
+                    "batch_type": "replace_long",
+                    "local_output": f"{parent_id}_replaced.mp4",
+                }
+                manager.jobs[child_id] = {
+                    "id": child_id,
+                    "status": "completed",
+                    "hidden": True,
+                    "parent_job_id": parent_id,
+                    "local_output": f"{child_id}.mp4",
+                }
+                for job_id in (parent_id, child_id):
+                    manager._persist(manager.jobs[job_id])
+                    (job_dir / f"{job_id}.request.json").write_text("{}", encoding="utf-8")
+                    (job_dir / f"{job_id}.prompt.txt").write_text("test", encoding="utf-8")
+                (output_dir / f"{parent_id}_replaced.mp4").write_bytes(b"parent")
+                (output_dir / f"{child_id}.mp4").write_bytes(b"child")
+                unrelated = output_dir / f"{unrelated_id}.mp4"
+                unrelated.write_bytes(b"keep")
+
+                result = manager.delete_job(parent_id)
+
+            self.assertEqual(result["deleted_job_ids"], [parent_id, child_id])
+            self.assertEqual(result["deleted_cached_outputs"], 2)
+            self.assertTrue(result["comfy_output_preserved"])
+            self.assertNotIn(parent_id, manager.jobs)
+            self.assertNotIn(child_id, manager.jobs)
+            self.assertFalse(any(job_dir.glob(f"{parent_id}.*")))
+            self.assertFalse(any(job_dir.glob(f"{child_id}.*")))
+            self.assertTrue(unrelated.exists())
+
+    def test_running_job_cannot_be_deleted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job_dir = root / "jobs"
+            output_dir = root / "outputs"
+            job_dir.mkdir()
+            output_dir.mkdir()
+            job_id = "d" * 32
+            with patch("app.JOB_DIR", job_dir), patch("app.OUTPUT_DIR", output_dir):
+                manager = JobManager(object(), object())
+                manager.jobs[job_id] = {"id": job_id, "status": "running"}
+                manager._persist(manager.jobs[job_id])
+                with self.assertRaisesRegex(RequestError, "仍在執行"):
+                    manager.delete_job(job_id)
+            self.assertIn(job_id, manager.jobs)
+            self.assertTrue((job_dir / f"{job_id}.json").exists())
+
+
 class FakeRecoveryComfy:
     async def get_history(self, _prompt_id):
         return {

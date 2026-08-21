@@ -1602,6 +1602,75 @@ class JobManager:
                 **self.finish_timing(job_id),
             )
 
+    def delete_job(self, job_id: str) -> dict[str, Any]:
+        """Remove a terminal Studio job and its local cache without touching ComfyUI output."""
+        job = self.jobs.get(job_id)
+        if not job:
+            raise RequestError("找不到工作。")
+        if not SAFE_ID.fullmatch(job_id):
+            raise RequestError("工作編號格式錯誤。")
+
+        related_ids = {job_id}
+        while True:
+            children = {
+                str(candidate_id)
+                for candidate_id, candidate in self.jobs.items()
+                if str(candidate.get("parent_job_id") or "") in related_ids
+            }
+            expanded = related_ids | children
+            if expanded == related_ids:
+                break
+            related_ids = expanded
+
+        active_statuses = {"queued", "preparing", "running"}
+        for related_id in related_ids:
+            related = self.jobs.get(related_id) or {}
+            task = self.tasks.get(related_id)
+            if related.get("status") in active_statuses or (task and not task.done()):
+                raise RequestError("工作仍在執行，請先取消並等待狀態更新後再刪除。")
+
+        active_dependents = [
+            candidate
+            for candidate_id, candidate in self.jobs.items()
+            if candidate_id not in related_ids
+            and str(candidate.get("continuation_source_job") or "") in related_ids
+            and candidate.get("status") in active_statuses
+        ]
+        if active_dependents:
+            raise RequestError("這段影片正被另一筆生成工作使用，暫時不能刪除。")
+
+        job_root = JOB_DIR.resolve()
+        output_root = OUTPUT_DIR.resolve()
+        deleted_files = 0
+        deleted_outputs = 0
+        for related_id in related_ids:
+            if not SAFE_ID.fullmatch(related_id):
+                continue
+            for suffix in (".json", ".request.json", ".workflow.json", ".prompt.txt", ".preview"):
+                path = (JOB_DIR / f"{related_id}{suffix}").resolve()
+                if path.parent == job_root and path.is_file():
+                    path.unlink()
+                    deleted_files += 1
+            for path in OUTPUT_DIR.glob(f"{related_id}*"):
+                resolved = path.resolve()
+                if resolved.parent == output_root and resolved.is_file():
+                    resolved.unlink()
+                    deleted_files += 1
+                    deleted_outputs += 1
+
+        for related_id in related_ids:
+            self.jobs.pop(related_id, None)
+            self.tasks.pop(related_id, None)
+            self.cancel_events.pop(related_id, None)
+        return {
+            "deleted": True,
+            "job_id": job_id,
+            "deleted_job_ids": sorted(related_ids),
+            "deleted_files": deleted_files,
+            "deleted_cached_outputs": deleted_outputs,
+            "comfy_output_preserved": True,
+        }
+
 
 def find_video_output(value: Any) -> dict[str, str] | None:
     if isinstance(value, dict):
@@ -1949,6 +2018,17 @@ def create_app() -> web.Application:
         except (RequestError, OSError, json.JSONDecodeError) as error:
             return json_response_error(error, 409)
 
+    async def delete_job(request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        if job_id not in jobs.jobs:
+            return json_response_error(RequestError("找不到工作。"), 404)
+        try:
+            return web.json_response(jobs.delete_job(job_id))
+        except RequestError as error:
+            return json_response_error(error, 409)
+        except OSError as error:
+            return json_response_error(RuntimeError(f"刪除工作檔案失敗：{error}"), 500)
+
     async def rename_job(request: web.Request) -> web.Response:
         job_id = request.match_info["job_id"]
         if job_id not in jobs.jobs:
@@ -2200,6 +2280,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/jobs", list_jobs)
     app.router.add_get("/api/jobs/options", job_options)
     app.router.add_get("/api/jobs/{job_id}", get_job)
+    app.router.add_delete("/api/jobs/{job_id}", delete_job)
     app.router.add_post("/api/jobs/{job_id}/cancel", cancel_job)
     app.router.add_post("/api/jobs/{job_id}/resume", resume_job)
     app.router.add_post("/api/jobs/{job_id}/rename", rename_job)

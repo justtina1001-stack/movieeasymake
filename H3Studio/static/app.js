@@ -1592,6 +1592,7 @@ async function loadJobs(force = false) {
               ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>下載</a>` : ""}
               ${active ? `<button class="button ghost" data-job-cancel="${job.id}" type="button">取消</button>` : ""}
               ${job.batch_type === "replace_long" && ["failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button secondary" data-job-resume="${job.id}" type="button">從未完成片段接續</button>` : ""}
+              ${["completed", "failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button danger" data-job-delete="${job.id}" type="button">刪除項目</button>` : ""}
             </div>
             ${batchSegmentsHtml(job)}
             ${job.preview_version ? `<div class="job-live-preview"><div><span>TAEH3 LIVE PREVIEW</span><strong>${active ? "生成中近似畫面" : "最後一張生成預覽"}</strong><small>這是低成本潛空間預覽，細節與最終影片可能不同。</small></div><img src="/api/jobs/${job.id}/preview?v=${encodeURIComponent(job.preview_version)}" alt="${escapeHtml(title)}生成中預覽"></div>` : ""}
@@ -2417,6 +2418,7 @@ function bindEvents() {
     const cancelButton = event.target.closest("[data-job-cancel]");
     const resumeButton = event.target.closest("[data-job-resume]");
     const renameButton = event.target.closest("[data-job-rename]");
+    const deleteButton = event.target.closest("[data-job-delete]");
     if (favoriteButton) {
       event.preventDefault();
       event.stopPropagation();
@@ -2470,6 +2472,24 @@ function bindEvents() {
         loadJobs(true);
       } catch (error) { toast(error.message, true); }
       finally { resumeButton.disabled = false; }
+      return;
+    }
+    if (deleteButton) {
+      const confirmed = confirm(
+        "確定要永久刪除這筆生成項目嗎？\n\n操作面板中的任務紀錄、提示詞、工作流、預覽與本機快取影片會一併刪除。ComfyUI 原始輸出會保留。此操作無法復原。"
+      );
+      if (!confirmed) return;
+      deleteButton.disabled = true;
+      try {
+        const jobId = deleteButton.dataset.jobDelete;
+        await api(`/api/jobs/${jobId}`, { method: "DELETE" });
+        expandedJobIds.delete(jobId);
+        toast("生成項目已刪除；ComfyUI 原始輸出仍保留。");
+        await loadJobs(true);
+      } catch (error) {
+        toast(error.message, true);
+        deleteButton.disabled = false;
+      }
       return;
     }
     if (renameButton) {
