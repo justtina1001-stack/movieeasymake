@@ -16,6 +16,7 @@ import aiohttp
 from domain import TURBO_LORA_CANDIDATES
 
 from settings import ConnectionSettings
+from runtime_env import inspect_python_candidates
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -95,8 +96,18 @@ class ComfyClient:
                 self.comfy_dir / "venv" / "Scripts" / "python.exe",
                 self.comfy_dir.parent / "python_embeded" / "python.exe",
             ]
-            python = next((candidate for candidate in python_candidates if candidate.exists()), None)
+            environment = await asyncio.to_thread(
+                inspect_python_candidates,
+                python_candidates,
+                ("torch",),
+            )
+            python = Path(str(environment["executable"])) if environment["ready"] else None
             if python is None or not (self.comfy_dir / "main.py").exists():
+                if (self.comfy_dir / "main.py").exists() and any(candidate.is_file() for candidate in python_candidates):
+                    raise RuntimeError(
+                        "ComfyUI 的 Python 環境來自另一台電腦，目前無法執行。"
+                        "請在引擎設定中執行本機引擎修復；模型與影片不會被刪除。"
+                    )
                 raise RuntimeError("找不到 ComfyUI 主程式或 Python 環境，請在引擎設定中確認本機 ComfyUI 資料夾。")
             self.data_dir.mkdir(parents=True, exist_ok=True)
             self.log_handle = (self.data_dir / "comfyui.log").open("a", encoding="utf-8")

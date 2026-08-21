@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260820-guides-preview">
+  <link rel="stylesheet" href="/static/styles.css?v=20260820-official-templates">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -286,6 +286,11 @@
           <div id="mgPromptInfo" class="info-strip mg-prompt-info hidden"><strong>會自動整合</strong><span>角色、轉輪帶、背景與鏡頭的設定會由工具自動整理成一份官方 Ref2VA 提示詞，再一次送給 AI 生成。這裡不用重複填寫，只需補充跨圖層互動、整體故事、聲音或特殊時間安排。</span></div>
           <textarea id="prompt" rows="10" placeholder="例如：小明走進神殿，看見金色佛像後停下腳步。攝影機從背後緩慢推進，小明轉頭說：「有人在這裡嗎？」背景只有微弱風聲與遠處鐘聲。"></textarea>
           <div class="prompt-footer"><span id="promptCount">0 字</span><button id="insertPromptTemplate" class="text-button" type="button">插入提示詞範本</button></div>
+          <div id="promptTemplateHelp" class="prompt-template-help hidden">
+            <div><strong>快速替換關鍵字</strong><span id="promptKeywordStatus">點一下標籤，即可選取提示詞中的對應內容</span></div>
+            <div id="promptKeywordList" class="prompt-keyword-list"></div>
+            <small>請替換所有 {{關鍵字}}；不需要的台詞、音效或配樂整句刪除即可。素材名稱請與上方「名稱代號」完全一致。</small>
+          </div>
         </section>
 
         <section class="panel storyboard-panel">
@@ -582,6 +587,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260820-guides-preview"></script>
+  <script src="/static/app.js?v=20260820-official-templates"></script>
 </body>
 </html>

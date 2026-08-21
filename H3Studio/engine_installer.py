@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from runtime_env import inspect_python_candidates
+
 
 MODEL_REPO = "Comfy-Org/MiniMax-H3"
 MODEL_REVISION = "0543966fbdce5ba05709a8f2031c94bdba629b4a"
@@ -119,11 +121,13 @@ def installer_preflight(target: Path) -> dict[str, Any]:
     existing_unknown = target.exists() and any(target.iterdir()) and not (target / "main.py").is_file()
     models = model_state(target)
     missing_model_bytes = sum(item["expected_bytes"] for item in models if not item["ready"])
-    environment_ready = any((target / relative).is_file() for relative in (
-        ".venv/Scripts/python.exe",
-        "venv/Scripts/python.exe",
-        "../python_embeded/python.exe",
-    ))
+    environment = inspect_python_candidates([
+        target / ".venv" / "Scripts" / "python.exe",
+        target / "venv" / "Scripts" / "python.exe",
+        target.parent / "python_embeded" / "python.exe",
+    ], required_imports=("torch",))
+    environment_ready = bool(environment["ready"])
+    environment_repair_required = (target / "main.py").is_file() and not environment_ready
     overhead = 5 * GIB if environment_ready else 15 * GIB
     required_bytes = missing_model_bytes + overhead
     disk_probe = target if target.exists() else target.parent
@@ -148,6 +152,8 @@ def installer_preflight(target: Path) -> dict[str, Any]:
         warnings.append("系統記憶體低於 48 GB，模型卸載到 RAM 時可能不足。")
     if existing_unknown:
         issues.append("目標資料夾已有其他檔案，而且不是 ComfyUI；請選擇空資料夾。")
+    if (target / "main.py").is_file() and not environment_ready:
+        warnings.append("ComfyUI Python 環境無法在這台電腦執行；安裝器會保留程式與模型，只重建本機 .venv。")
     if disk.free < required_bytes:
         issues.append(f"磁碟空間不足，還需要約 {required_bytes / GIB:.1f} GiB，目前只有 {disk.free / GIB:.1f} GiB。")
     installed = (
@@ -159,6 +165,8 @@ def installer_preflight(target: Path) -> dict[str, Any]:
         "target": str(target),
         "ready_to_install": not issues,
         "installed": installed,
+        "environment": environment,
+        "environment_repair_required": environment_repair_required,
         "issues": issues,
         "warnings": warnings,
         "git": bool(shutil.which("git")),

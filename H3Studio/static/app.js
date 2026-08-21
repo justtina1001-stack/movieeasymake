@@ -64,6 +64,8 @@ const defaultState = {
     merge: true,
     audio: "both",
   },
+  modePrompts: {},
+  promptTemplateSnapshots: {},
 };
 
 let state = loadState();
@@ -490,7 +492,9 @@ function updateInstallerButton() {
   const active = ["starting", "running", "cancelling"].includes(lastInstallerStatus);
   const ready = Boolean(installerPreflightData?.ready_to_install);
   $("#installLocalEngine").disabled = !accepted || !ready || active;
-  $("#installLocalEngine").textContent = installerPreflightData?.installed ? "套用此本機引擎" : "開始一鍵安裝";
+  $("#installLocalEngine").textContent = installerPreflightData?.installed
+    ? "套用此本機引擎"
+    : installerPreflightData?.environment_repair_required ? "修復這台電腦的引擎環境" : "開始一鍵安裝";
 }
 
 function renderInstallerPreflight(data) {
@@ -500,6 +504,8 @@ function renderInstallerPreflight(data) {
   lines.push(`GPU：${data.gpu ? `${data.gpu.name} · ${data.gpu.vram_gb} GB VRAM` : "未偵測到 NVIDIA GPU"}`);
   lines.push(`記憶體：${data.ram_gb ?? "未知"} GB · 可用磁碟：${data.disk_free_gb} GiB`);
   lines.push(`本次還需要：約 ${data.required_gb} GiB · 模型完成：${data.models.filter(item => item.ready).length} / ${data.models.length}`);
+  if (data.environment?.ready) lines.push(`✓ Python 環境可在這台電腦執行：${data.environment.executable}`);
+  else if (data.environment_repair_required) lines.push("需要修復：偵測到從其他電腦複製來的 Python 環境；只會重建 .venv，不會刪除模型或生成檔。");
   if (data.installed) lines.push("✓ 這個資料夾已具備完整的 H3 本機引擎，可直接套用。");
   for (const warning of data.warnings || []) lines.push(`注意：${warning}`);
   for (const issue of data.issues || []) lines.push(`錯誤：${issue}`);
@@ -793,6 +799,7 @@ function updateSummary() {
   $("#motionPresetHint").textContent = motionHints[motionProfile];
   $("#summaryAssets").textContent = `${assetCount()} 個`;
   $("#promptCount").textContent = `${$("#prompt").value.length} 字`;
+  renderPromptKeywords();
   const filenameStem = filenameStemPreview($("#jobName").value);
   $("#filenamePreview").textContent = filenameStem ? `${filenameStem}_00001.mp4` : "未命名時：年-月-日_時-分-秒_微秒_00001.mp4";
   persistForm();
@@ -801,13 +808,19 @@ function updateSummary() {
 function setMode(mode) {
   const previousMode = state.mode;
   state.modePrompts ||= {};
+  state.promptTemplateSnapshots ||= {};
   if (previousMode !== mode) {
     state.modePrompts[previousMode] = $("#prompt").value;
-    const savedPrompt = state.modePrompts[mode];
-    const defaultPrompt = mode === "replace" ? replacementPrompt() : mode === "symbol_loop" ? symbolLoopPrompt() : mode === "popup_panel" ? popupPanelPrompt() : mode === "mg_animation" ? mgAnimationPrompt() : $("#prompt").value;
-    $("#prompt").value = savedPrompt !== undefined ? savedPrompt : defaultPrompt;
   }
   state.mode = mode;
+  if (previousMode !== mode) {
+    const savedPrompt = state.modePrompts[mode];
+    if (savedPrompt !== undefined) {
+      $("#prompt").value = savedPrompt;
+    } else {
+      applyPromptTemplate(mode);
+    }
+  }
   if (["extend", "r2v"].includes(mode)) $("#referencePanel").before($("#continuationPanel"));
   $$(".mode-card").forEach(card => card.classList.toggle("active", card.dataset.mode === mode));
   $("#keyframePanel").classList.toggle("hidden", mode !== "fl2va");
@@ -845,10 +858,7 @@ function setMode(mode) {
     $("#cameraResponse").value = "stable";
     state.mgAnimation.safeDefaultsApplied = true;
   }
-  if (mode === "replace" && !$("#prompt").value.trim()) $("#prompt").value = replacementPrompt();
-  if (mode === "symbol_loop" && !$("#prompt").value.trim()) $("#prompt").value = symbolLoopPrompt();
-  if (mode === "popup_panel" && !$("#prompt").value.trim()) $("#prompt").value = popupPanelPrompt();
-  if (mode === "mg_animation" && !$("#prompt").value.trim()) $("#prompt").value = mgAnimationPrompt();
+  if (!$("#prompt").value.trim()) applyPromptTemplate(mode);
   const popupMode = mode === "popup_panel";
   const mgMode = mode === "mg_animation";
   $("#promptPanelTitle").textContent = mgMode ? "整體情境補充（選填）" : "影片敘述";
@@ -895,6 +905,7 @@ function clearKeyframe(target) {
   if (!state[stateKey]) return;
   keyframePrepareVersion++;
   state[stateKey] = null;
+  refreshPromptTemplateIfUntouched();
   const input = $(`#${target}ImageInput`);
   if (input) input.value = "";
   renderKeyframePreview(target, null, label, target === "last");
@@ -1204,6 +1215,8 @@ async function compilePreview() {
 }
 
 async function renderVideo() {
+  const unresolvedKeywords = promptKeywords();
+  if (unresolvedKeywords.length && !confirm(`提示詞還有 ${unresolvedKeywords.length} 個 {{關鍵字}} 尚未替換：\n\n${unresolvedKeywords.slice(0, 8).join("、")}${unresolvedKeywords.length > 8 ? "…" : ""}\n\n仍要送出生成嗎？`)) return;
   if (state.mode === "replace") {
     const batchDuration = state.replacement.autoSplit && Number(state.replacement.videoInfo?.duration) > 15
       ? Math.max(...(state.replacement.segmentPlan || []).map(segment => Number(segment.input_duration) || 0), 5)
@@ -1679,50 +1692,150 @@ function addStoryboard() {
 function replacementPrompt() {
   const alias = state.replacement?.alias?.trim() || "新角色";
   const target = state.replacement?.target?.trim() || "動態參考影片中的主要角色";
-  return `${alias}完整取代${target}。\n\n${alias}必須始終保持參考圖片中的臉部、髮型、服裝與身材特徵。\n完全沿用原角色的動作、姿勢、表演節奏、畫面位置和鏡頭運動，\n但不要保留或生成原角色的臉部、髮型、服裝與身份特徵。\n全程只出現${alias}，不要同時出現${alias}與原角色，也不要混合兩者外觀。\n除指定角色外，盡量維持原影片的場景、構圖、光線、道具與其他人物。\n指定原角色未出現的畫面保持原樣，不要憑空加入${alias}。\n若影片被自動分段，開頭與結尾必須沿用相鄰片段的動作慣性、角色身份、鏡頭方向與空間位置，不得重新起步、停頓或重設姿勢。`;
+  return `[Shot 1] Create ${alias} as the only visual replacement for ${target} in the uploaded source video. Preserve ${alias}'s face, hairstyle, body proportions, costume, colors, and identifying details from the reference pictures throughout the entire shot. Transfer only the source character's screen position, pose sequence, timing, gaze direction, body mechanics, and interactions to ${alias}. The replacement performance is {{主要表演動作}}.
+
+Remove every visual identity trait of the original character. Never show the original character beside ${alias}, never blend their faces, hair, clothing, or anatomy, and never add ${alias} to frames where the specified source character is absent. Preserve all other people, props, scenery, lighting, camera motion, framing, and edit rhythm from the source video.
+
+Across automatically split segments, continue the incoming pose, motion vector, gaze, camera direction, lighting, and spatial position without a fresh start or pause. End with ${alias} in {{最後姿勢與畫面位置}}, while all non-replaced content remains consistent with the source video.
+
+Sound direction: preserve {{原影片環境聲與同步音效}}. Audience-only score: {{配樂；不需要請整句刪除}}.`;
 }
 
 function symbolLoopPrompt() {
-  return "輸入圖片是不可修改的遊戲圖騰設計。保持固定畫布、固定正面攝影機、固定中心 Pivot、固定視覺比例，完整輪廓全程可見。\n\n在一個緩慢循環中，圖騰只做非常克制的 1～2% 呼吸脈動；加入一次寬而乾淨的材質高光掃過。動作在中段達到最大幅度，然後沿相反路徑平順返回原始靜止姿勢。第一幀與最後一幀的姿勢、位置、旋轉、比例、輪廓、材質、光線與效果狀態必須一致。\n\n保持原始身份、文字、材質、顏色、外框形狀與所有比例。禁止攝影機移動、縮放、裁切、重新構圖、主體平移、比例漂移、造型重設、增加物件、複製部件、融化變形、文字改變、背景場景、粗糙顆粒或碰到畫布邊界的雜亂粒子。";
+  return `[Shot 1] The uploaded slot symbol is the immutable design and the exact opening and closing frame. Keep the canvas, front-facing camera, crop, center pivot, visual scale, silhouette, text, materials, colors, border shape, and margins fixed. The complete symbol remains visible at all times.
+
+The symbol performs one closed motion cycle: {{主要循環動作}}. Add only {{次要材質或特效表演}}. Build from a still opening state through clear anticipation, reach the largest readable motion near the middle, then reverse the motion path and progressively settle. Return the pose, position, rotation, scale, silhouette, material, lighting, particles, and effect state to the exact opening state at the final frame, without a second pause at the seam.
+
+The camera remains completely static. Prohibit camera movement, crop changes, subject translation, scale drift, redesign, added objects, duplicated parts, melting deformation, text changes, background generation, lighting drift, flicker, and particles crossing the canvas boundary.
+
+Sound direction: {{循環同步音效；不需要請整句刪除}}. Audience-only score: N/A.`;
 }
 
 function popupPanelPrompt() {
-  return `鏡頭固定。背景圖是全程鎖定不動的遊戲底板環境，不得平移、縮放、變形、閃爍或產生景深變化。面板位於背景圖上方；面板出現期間，面板與背景圖之間加入約 80% 不透明度的黑色壓暗圖層。
+  const duration = actualDuration();
+  const enterEnd = Math.min(0.75, Math.max(0.35, duration * 0.1));
+  const exitStart = Math.max(enterEnd + 0.5, duration - enterEnd);
+  return `[Shot 1] Use 背景圖 as a completely locked game background for the full ${duration.toFixed(2)}-second shot. Keep its position, scale, crop, pixels, lighting, depth of field, and parallax unchanged. The camera is a Static Shot with no push, pan, zoom, shake, or reframing. Animate only 面板 and the named foreground assets.
 
-[0.0秒～0.5秒] 面板從畫面正中央由小到大快速縮放彈出，帶有清楚但不過度的 overshoot 回彈，最後穩定停在畫面中央。背景圖保持完全靜止，黑色壓暗圖層同步淡入。
+From 0.00s to ${enterEnd.toFixed(2)}s, an approximately 80%-opaque black dimming layer fades in above 背景圖. 面板 enters from {{進場方向或起始位置}}, scales from small to full size, makes one restrained overshoot, and settles at {{面板最後位置}}. Synchronize the entrance with {{進場音效}}.
 
-[0.5秒～4.5秒] 面板的位置與外框保持穩定。面板上的分數在 1.00～1.05 倍之間緩慢來回縮放；其他面板物件依需求表演，例如數字跳動、光效掃過、粒子閃爍、按鈕呼吸或裝飾物輕微擺動。所有動態都限制在面板範圍內，不得帶動背景圖或整體鏡頭。
+From ${enterEnd.toFixed(2)}s to ${exitStart.toFixed(2)}s, keep the panel frame and anchor stable. {{面板主要內容}} performs {{面板內物件表演}}; use one readable primary action and restrained supporting glow or particles. All motion stays inside the panel safe area and never moves 背景圖.
 
-[4.5秒～5.0秒] 面板連同面板上的所有物件整體快速縮小並完全消失，黑色壓暗圖層同步淡出。最後只剩原本的背景圖，背景圖的位置、比例、亮度與最初畫面完全一致。
+From ${exitStart.toFixed(2)}s to ${duration.toFixed(2)}s, 面板 and every attached foreground element {{退場動作}}, then disappear completely as the dimming layer fades out. The final visible state contains only the original unchanged 背景圖.
 
-全程規則：固定鏡頭、固定背景圖、禁止背景運動、禁止鏡頭推拉與晃動；只允許面板、面板內容與壓暗圖層產生動畫。`;
+Sound direction: {{面板動作同步音效與環境聲}}. Audience-only score: {{配樂；不需要請整句刪除}}.`;
 }
 
 function mgAnimationPrompt() {
-  return `The target video is a polished slot-game main-game animation in one continuous shot.
+  return `Cross-layer event: when {{觸發事件或指定軸停輪}} occurs, 角色 looks toward {{目標圖騰或介面位置}} and performs {{角色主要反應}}. The reaction begins with anticipation and a natural weight shift, reaches one clear peak, includes delayed secondary motion in clothing or accessories, and ends in {{角色最後姿勢}} without covering the reel window, title, score, payout values, or JP meters.
 
-[Shot 1] Use the uploaded 背景圖, 轉輪帶, and 角色 as three independent visual layers. Keep the full reel window readable, preserve every reel cell's size and center anchor, and keep all titles, payout values, and JP meters unchanged.
+At the same moment, 轉輪帶 shows {{停輪結果或中獎圖騰表演}} only after the relevant reels have fully settled. 背景圖 responds only with {{低幅度背景回饋}}, remaining visually subordinate and preserving the complete game layout.
 
-The camera remains completely static. The 角色 stays in the selected screen position without covering the reel symbols or dynamic information. The 轉輪帶 performs a clear acceleration, continuous spin, ordered deceleration, mechanical settle, and post-stop symbol reaction. The 背景圖 remains subordinate to the reels and character, using only the selected low-amplitude environmental motion.
-
-Animate only the visible reel-window presentation. Do not change mathematical reel-strip order, symbol frequency, payout values, interface text, or product-owned top and bottom UI. End on a clean, stable, readable final state.`;
+Sound direction: synchronize {{停輪聲、角色聲音與中獎音效}} with the visible contacts and reactions. Audience-only score: {{配樂；不需要請整句刪除}}. End on a clean, stable, readable final state.`;
 }
 
-function promptTemplate() {
-  if (state.mode === "popup_panel") return popupPanelPrompt();
-  if (state.mode === "mg_animation") return mgAnimationPrompt();
-  if (state.mode === "r2v") {
-    return "場景概述：角色名稱出現在背景名稱所代表的場景中。\n\n[Shot 1, 0s-5s]\n描述角色動作、表情與其他角色的互動。攝影機以中景緩慢推進。\n\nDialogue：角色名稱說：「台詞內容。」\nAudio：描述環境聲、動作聲與背景音樂。\n\n保持所有已命名角色的臉部、服裝與聲音一致，不要混合不同參考素材的特徵。";
+function firstReferenceAlias(types, fallback) {
+  return activeReferences().find(item => types.includes(item.type) && item.alias?.trim())?.alias.trim() || fallback;
+}
+
+function t2vPrompt() {
+  return `[Shot 1] In {{場景}}, {{角色}} is {{初始姿勢與畫面位置}}. The visual style and lighting are {{美術風格與光線}}. The character begins with {{預備動作}}, then performs {{主要動作}} with visible weight shift, contact, reaction, follow-through, and a natural settle.
+
+The camera {{運鏡方式、幅度與速度}} while keeping the subject readable and spatially consistent. Optional dialogue: {{角色}} (S1) says <d>[Chinese] {{台詞內容}}</d>. Visible on-screen text reads "{{畫面文字；不需要請整句刪除}}".
+
+The shot ends with {{最後可見狀態}}, held clearly and stably. Sound direction: {{環境聲與同步動作音效}}. Audience-only score: {{配樂樂器、速度與強弱；不需要請整句刪除}}.`;
+}
+
+function keyframePrompt() {
+  const subject = "{{主體}}";
+  let path;
+  if (state.firstImage && state.lastImage) {
+    path = `The shot begins from the exact uploaded first frame and ends on the exact uploaded final frame. Preserve ${subject}'s identity, composition, object layout, and lighting while describing the visible path between the two anchors.`;
+  } else if (state.firstImage) {
+    path = `The shot begins from the exact uploaded first frame. Preserve ${subject}'s identity, composition, pose, object layout, and lighting at the start, then develop the action continuously.`;
+  } else if (state.lastImage) {
+    path = `The action begins from {{合理的前置狀態}} and progressively converges on the exact uploaded final frame. Narrow every difference in pose, composition, object layout, lighting, and camera angle before the ending.`;
+  } else {
+    path = `Use the uploaded frame anchors exactly as configured. Describe a continuous, observable path between the opening and required final state.`;
   }
-  if (state.mode === "extend") {
-    return "延續上一段最後一幀的動作與運鏡，不要重新起步或停頓。角色維持相同外觀、姿勢慣性、視線、光線與空間位置。\n\n[Shot 1, 0s-5s]\n角色順著原本的動量繼續完成動作，鏡頭平順跟隨並呈現自然的加速、減速與身體重心變化。\n\nAudio：延續現場環境音與動作音效。";
-  }
-  if (state.mode === "replace") return replacementPrompt();
-  if (state.mode === "symbol_loop") return symbolLoopPrompt();
-  if (state.mode === "fl2va") {
-    return "從起始畫面自然開始，描述主體如何移動與改變，最後準確抵達結束畫面。\n\nCamera：描述運鏡。\nAudio：描述台詞、環境聲、音效與音樂。";
-  }
-  return "場景概述：描述地點、角色與正在發生的事件。\n\n[Shot 1, 0s-5s]\n描述動作、表情、鏡位與攝影機移動。\n\nDialogue：描述台詞。\nAudio：描述環境聲、音效與背景音樂。";
+  return `[Shot 1] ${path}
+
+${subject} moves through {{中間連續動作}} with clear anticipation, weight transfer, interaction, reaction, follow-through, and deceleration. The camera {{運鏡方式、幅度與速度}} without sudden reframing. Avoid teleportation, pose resets, identity drift, or unexplained changes.
+
+The final visible state is {{最後姿勢、構圖與光線}}, clearly settled${state.lastImage ? " and matching the uploaded final frame" : ""}. Optional dialogue: ${subject} (S1) says <d>[Chinese] {{台詞內容；不需要請整句刪除}}</d>. Sound direction: {{環境聲與同步音效}}. Audience-only score: {{配樂；不需要請整句刪除}}.`;
+}
+
+function referencePrompt() {
+  const character = firstReferenceAlias(["character", "creature"], "{{角色名稱代號}}");
+  const background = firstReferenceAlias(["background"], "{{背景名稱代號}}");
+  return `[Shot 1] ${character} appears in ${background} at {{角色畫面方位與初始姿勢}}. Preserve ${character}'s face, body proportions, costume, colors, and voice ownership from the named reference assets. Preserve ${background}'s spatial layout, architecture, palette, and lighting without transferring its traits into the character.
+
+${character} performs {{主要動作與互動對象}} through clear anticipation, weight shift, contact or reaction, follow-through, and a stable settle. The camera {{運鏡方式、幅度與速度}}. Any named motion reference controls only timing and body mechanics; it must not overwrite identity, costume, or scene design.
+
+Optional dialogue: ${character} (S1) says <d>[Chinese] {{台詞內容}}</d>, using only the voice sample assigned to ${character}. The final visible state is {{所有角色、物件與鏡頭的結尾狀態}}. Sound direction: {{環境聲、動作音效與同步聲音}}. Audience-only score: {{配樂；不需要請整句刪除}}.`;
+}
+
+function continuationPrompt() {
+  const character = firstReferenceAlias(["character", "creature"], "{{角色名稱代號}}");
+  return `[Shot 1] Continue directly from the previous video's final frame with no restart, duplicated opening pose, or pause. Preserve ${character}'s identity, costume, exact incoming pose, gaze, screen position, motion vector, lighting, environment, and camera direction.
+
+${character} follows the existing momentum into {{接續主要動作}}. Show natural acceleration or deceleration, weight transfer, contact, reaction, follow-through, and continuity of secondary motion. The camera {{接續運鏡}} without a cut or sudden reframing. If other named characters, objects, or scenes are referenced, preserve each alias independently and do not mix their attributes.
+
+The continuation ends with {{新的最後姿勢與畫面狀態}}, clearly settled and ready for a possible next segment. Optional dialogue: ${character} (S1) says <d>[Chinese] {{台詞內容；不需要請整句刪除}}</d>. Sound direction: continue {{上一段環境聲}} and synchronize {{新的動作音效}}. Audience-only score: {{延續配樂；不需要請整句刪除}}.`;
+}
+
+function promptTemplate(mode = state.mode) {
+  if (mode === "popup_panel") return popupPanelPrompt();
+  if (mode === "mg_animation") return mgAnimationPrompt();
+  if (mode === "r2v") return referencePrompt();
+  if (mode === "extend") return continuationPrompt();
+  if (mode === "replace") return replacementPrompt();
+  if (mode === "symbol_loop") return symbolLoopPrompt();
+  if (mode === "fl2va") return keyframePrompt();
+  return t2vPrompt();
+}
+
+function applyPromptTemplate(mode = state.mode) {
+  const template = promptTemplate(mode);
+  $("#prompt").value = template;
+  state.promptTemplateSnapshots ||= {};
+  state.modePrompts ||= {};
+  state.promptTemplateSnapshots[mode] = template;
+  state.modePrompts[mode] = template;
+  renderPromptKeywords();
+  return template;
+}
+
+function refreshPromptTemplateIfUntouched() {
+  state.promptTemplateSnapshots ||= {};
+  const previous = state.promptTemplateSnapshots[state.mode];
+  if (!previous || $("#prompt").value !== previous) return false;
+  applyPromptTemplate(state.mode);
+  updateSummary();
+  return true;
+}
+
+function promptKeywords(value = $("#prompt")?.value || "") {
+  return [...new Set([...value.matchAll(/\{\{([^{}\n]+)\}\}/g)].map(match => match[1].trim()))];
+}
+
+function renderPromptKeywords() {
+  const panel = $("#promptTemplateHelp");
+  if (!panel) return;
+  const keywords = promptKeywords();
+  panel.classList.toggle("hidden", !keywords.length);
+  $("#promptKeywordStatus").textContent = keywords.length ? `尚有 ${keywords.length} 個待替換項目；點擊即可定位` : "範本關鍵字已全部替換";
+  $("#promptKeywordList").innerHTML = keywords.map(keyword => `<button type="button" data-prompt-keyword="${escapeHtml(keyword)}">${escapeHtml(keyword)}</button>`).join("");
+}
+
+function selectPromptKeyword(keyword) {
+  const textarea = $("#prompt");
+  const token = `{{${keyword}}}`;
+  let index = textarea.value.indexOf(token, textarea.selectionEnd);
+  if (index < 0) index = textarea.value.indexOf(token);
+  if (index < 0) return;
+  textarea.focus();
+  textarea.setSelectionRange(index, index + token.length);
 }
 
 function bindEvents() {
@@ -1734,6 +1847,7 @@ function bindEvents() {
     $(`#${id}`).addEventListener("input", updateSummary);
     $(`#${id}`).addEventListener("change", updateSummary);
   });
+  $("#duration").addEventListener("change", refreshPromptTemplateIfUntouched);
   $("#qualityMode").addEventListener("change", changeQualityMode);
   ["aspectRatio", "megapixels", "keyframeFit"].forEach(id => {
     $(`#${id}`).addEventListener("change", refreshKeyframes);
@@ -2151,6 +2265,7 @@ function bindEvents() {
     if (!card || !field) return;
     const item = activeReferences().find(value => value.id === card.dataset.referenceId);
     item[field] = event.target.type === "checkbox" ? event.target.checked : event.target.value;
+    if (["alias", "type"].includes(field)) refreshPromptTemplateIfUntouched();
     updateSummary();
     saveState();
   });
@@ -2244,8 +2359,14 @@ function bindEvents() {
 
   $("#insertPromptTemplate").addEventListener("click", () => {
     if ($("#prompt").value.trim() && !confirm("要用提示詞範本取代目前內容嗎？")) return;
-    $("#prompt").value = promptTemplate();
+    applyPromptTemplate();
     updateSummary();
+    saveState();
+    toast("已載入目前模式的官方格式範本；點擊下方關鍵字即可逐一替換。");
+  });
+  $("#promptKeywordList").addEventListener("click", event => {
+    const button = event.target.closest("[data-prompt-keyword]");
+    if (button) selectPromptKeyword(button.dataset.promptKeyword);
   });
   $("#compileButton").addEventListener("click", () => compilePreview().catch(() => {}));
   $("#copyCompiled").addEventListener("click", async () => {
@@ -2413,6 +2534,7 @@ async function setKeyframe(target, file) {
     const sourceAsset = await uploadFile(file, `${target}-frame-source`);
     const asset = await prepareKeyframeAsset(sourceAsset);
     state[target === "first" ? "firstImage" : "lastImage"] = asset;
+    refreshPromptTemplateIfUntouched();
     renderKeyframePreview(target, asset, target === "first" ? "起始圖片" : "結束圖片", target === "last");
     updateSummary(); saveState();
     toast(asset.transparency_filled ? "透明背景已填入螢光綠，並依輸出比例完成適配。" : "圖片已依輸出比例完成適配。");

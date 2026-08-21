@@ -22,6 +22,7 @@ from engine_installer import (
     TURBO_LORA_REPO,
     TURBO_LORA_REVISION,
 )
+from runtime_env import check_python_executable
 
 
 OFFICIAL_REPO = "MiniMaxAI/MiniMax-H3"
@@ -54,19 +55,28 @@ def main() -> None:
         return
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    event(3, "下載 ComfyUI 程式")
-    if not (target / "main.py").is_file():
+    existing_comfy = (target / "main.py").is_file()
+    event(3, "檢查 ComfyUI 程式")
+    if not existing_comfy:
         if target.exists() and any(target.iterdir()):
             raise RuntimeError("目標資料夾不是空的。")
         run(["git", "clone", COMFY_REPO, str(target)])
-    if (target / ".git").is_dir():
-        run(["git", "fetch", "origin", COMFY_REVISION, "--depth", "1"], cwd=target)
-        run(["git", "checkout", "--detach", COMFY_REVISION], cwd=target)
+        if (target / ".git").is_dir():
+            run(["git", "fetch", "origin", COMFY_REVISION, "--depth", "1"], cwd=target)
+            run(["git", "checkout", "--detach", COMFY_REVISION], cwd=target)
+    else:
+        event(7, "保留已複製的 ComfyUI 程式與版本")
 
     event(10, "建立 ComfyUI Python 環境")
     python = target / ".venv" / "Scripts" / "python.exe"
-    if not python.is_file():
-        run([sys.executable, "-m", "venv", str(target / ".venv")])
+    environment_ready, _ = check_python_executable(python, required_imports=("torch",))
+    if not environment_ready:
+        event(11, "修復從其他電腦搬移的 Python 環境")
+        command = [sys.executable, "-m", "venv"]
+        if (target / ".venv").exists():
+            command.append("--clear")
+        command.append(str(target / ".venv"))
+        run(command)
 
     event(14, "更新安裝工具")
     run([str(python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])

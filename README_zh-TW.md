@@ -10,6 +10,17 @@ MiniMax H3 Studio 是 ComfyUI MiniMax H3 工作流的中文操作面板。專案
 4. 雙擊 `start_h3_studio.bat`，開啟 <http://127.0.0.1:8787>。
 5. 點右上角「引擎設定」，選擇本機或遠端模式。
 
+### 直接複製完整資料夾到另一台電腦
+
+Windows 的 `.venv` 會記住原電腦 Python 的絕對路徑，因此不能直接跨電腦使用。新版 `start_h3_studio.bat` 會實際執行環境健康檢查，不再只判斷 `python.exe` 是否存在：
+
+1. 同事電腦先安裝 64 位元 Python 3.12（或 3.11），並啟用 `Add Python to PATH`。
+2. 完整資料夾複製完成後直接執行 `start_h3_studio.bat`。
+3. 若 H3 Studio 環境缺失或來自其他電腦，啟動器會自動建立同事自己的 `H3Studio/.venv` 並安裝面板依賴。
+4. 面板開啟後若偵測到 `ComfyUI/.venv` 無法執行，在「引擎設定」的一鍵安裝區會顯示「修復這台電腦的引擎環境」。修復只重建 `.venv` 並安裝 CUDA PyTorch／ComfyUI 依賴，會保留現有 ComfyUI 程式、模型、LoRA、輸入素材和輸出影片。
+
+若同事電腦完全沒有 Python，啟動器會停留在錯誤畫面並顯示安裝指引，不會再像雙擊後沒有反應。Git for Windows 與 NVIDIA 驅動仍是本機引擎安裝／生成所需；只連遠端 Gateway 的同事不需要本機 H3 模型或 NVIDIA GPU。
+
 若電腦完全沒有 ComfyUI，選「使用這台電腦」，展開「這台電腦還沒有引擎？」即可執行一鍵安裝。安裝器會先檢查 NVIDIA GPU、Python、Git、記憶體及磁碟空間，並要求使用者自行閱讀和接受 MiniMax H3 授權。
 
 ## 工作站角色
