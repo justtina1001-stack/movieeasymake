@@ -357,6 +357,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     base_prompt = _clean_text(payload.get("prompt"))
     if not base_prompt:
         raise RequestError("請輸入影片敘述。")
+    prompt_profile = _clean_text(payload.get("prompt_profile"))
 
     first_image = _clean_text(payload.get("first_image_asset_id")) or None
     last_image = _clean_text(payload.get("last_image_asset_id")) or None
@@ -574,7 +575,60 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             raise RequestError("多模態模式至少需要圖片、影片或聲音其中一種。")
 
         rewritten_prompt = _rewrite_aliases(base_prompt, aliases)
-        if mode == "mg_animation":
+        if prompt_profile == "shortfilm":
+            retention: list[str] = []
+            if first_image:
+                retention.append(
+                    "<Picture 1>: fully_preserved in the opening frame as the preceding shot's exact continuity anchor; "
+                    "its pose, composition, camera direction, lighting, and momentum lead naturally into the new action."
+                )
+            for item in mapping:
+                alias = item["alias"]
+                subject_tag = item.get("subject_tag")
+                picture_tags = item.get("picture_tags") or []
+                video_tags = item.get("video_tags") or []
+                audio_tag = item.get("audio_tag")
+                if subject_tag:
+                    retention.append(
+                        f"{subject_tag}: fully_preserved whenever {alias} appears; keep identity, face, body proportions, "
+                        "clothing, colors, and distinguishing features consistent across the shot."
+                    )
+                    for tag in picture_tags:
+                        retention.append(
+                            f"{tag}: attribute_transfer to {subject_tag}; transfer appearance and fixed visual attributes only."
+                        )
+                else:
+                    for tag in picture_tags:
+                        retention.append(
+                            f"{tag}: fully_preserved as the visual reference for {alias}, including layout, palette, lighting, and spatial identity."
+                        )
+                for tag in video_tags:
+                    retention.append(
+                        f"{tag}: attribute_transfer for {alias}; transfer timing, motion mechanics, and camera rhythm without copying unrelated identities."
+                    )
+                if audio_tag:
+                    retention.append(
+                        f"{audio_tag}: reference for {alias}; use voice timbre and delivery characteristics without copying unrelated words."
+                    )
+            if not retention:
+                retention.append("N/A")
+            detail_parts = [rewritten_prompt]
+            if shot_lines:
+                detail_parts.append("Storyboard guidance:\n" + "\n".join(shot_lines))
+            summary_prefix = "keyframe completion + reference generation" if first_image else "reference generation"
+            summary = _clean_text(payload.get("shortfilm_summary")) or "A coherent narrative short-film shot generated from the selected references."
+            soundscape = _clean_text(payload.get("shortfilm_soundscape")) or "Natural ambience and synchronized physical action sounds appropriate to the scene."
+            music = _clean_text(payload.get("shortfilm_music")) or "N/A"
+            sections = [
+                "subject_definitions:\n" + ("\n".join(definitions) if definitions else "N/A"),
+                f"summary:\n{summary_prefix}. {summary}",
+                "retention_analysis:\n" + "\n".join(retention),
+                "detailed_description:\n" + "\n\n".join(detail_parts),
+                "overall_soundscape:\n" + soundscape,
+                "non_diegetic_music:\n" + music,
+            ]
+            final_prompt = "\n\n".join(sections)
+        elif mode == "mg_animation":
             timeline = _mg_animation_description(payload, aliases, length / FPS)
             retention = assignments + [
                 "Keep the background, visible reel window, and character as independent visual layers; do not merge, duplicate, or deform their identities.",
@@ -646,6 +700,46 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         guides.extend(storyboard_guides)
         if storyboard_images:
             raise RequestError("中間分鏡圖片需要使用多模態參考模式；此模式仍可使用純文字分鏡。")
+        if prompt_profile == "shortfilm":
+            soundscape = _clean_text(payload.get("shortfilm_soundscape")) or "Natural ambience and synchronized physical action sounds appropriate to the scene."
+            music = _clean_text(payload.get("shortfilm_music")) or "N/A"
+            final_prompt = "\n\n".join([
+                "integrated_multimodal_description: " + base_prompt,
+                "overall_soundscape: " + soundscape,
+                "non_diegetic_music: " + music,
+            ])
+            return CompiledRequest(
+                mode=mode,
+                prompt=final_prompt,
+                width=width,
+                height=height,
+                length=length,
+                requested_duration=requested_duration,
+                actual_duration=length / FPS,
+                seed=seed,
+                steps=steps,
+                scheduler=scheduler,
+                ref_image_size=ref_image_size,
+                quality_mode=quality_mode,
+                sampler_name=sampler_name,
+                turbo_profile=turbo_profile,
+                turbo_lora=turbo_lora,
+                turbo_lora_strength=turbo_lora_strength,
+                shift_video=shift_video,
+                shift_audio=shift_audio,
+                first_image=first_image,
+                last_image=last_image,
+                reference_images=reference_images,
+                reference_videos=reference_videos,
+                reference_video_use_audio=reference_video_use_audio,
+                reference_audios=reference_audios,
+                guides=guides,
+                continuation_source_job=continuation_source_job,
+                continuation_source_asset=continuation_source_asset,
+                continuation_merge=continuation_merge,
+                continuation_audio=continuation_audio,
+                mapping=mapping,
+            )
         intro: list[str] = []
         if mode == "fl2va" and first_image:
             intro.append("<Picture 1> 是影片的精確起始畫面。")

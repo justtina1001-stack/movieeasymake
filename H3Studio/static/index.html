@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260821-model-updates">
+  <link rel="stylesheet" href="/static/styles.css?v=20260824-shortfilm">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -28,6 +28,16 @@
   </header>
 
   <main class="page-shell">
+    <nav class="workspace-switch" aria-label="工作模式">
+      <button class="active" type="button" data-workspace="quick">
+        <span>QUICK</span><strong>快速生成</strong><small>老虎機示意影片與單段 H3 工作</small>
+      </button>
+      <button type="button" data-workspace="shortfilm">
+        <span>STORY</span><strong>短片創作</strong><small>角色、場次、分鏡與連戲製作</small>
+      </button>
+    </nav>
+
+    <div id="quickWorkspace">
     <section class="hero">
       <div>
         <p class="eyebrow">CREATE WITH MINIMAX H3</p>
@@ -339,6 +349,90 @@
       <div id="jobEmpty" class="empty-state"><span>□</span><strong>還沒有生成工作</strong><p>設定完成後，按下「開始生成影片」。</p></div>
       <div id="jobPagination" class="job-pagination hidden"><button id="previousJobPage" class="button ghost small" type="button">← 上一頁</button><span id="jobPageLabel">第 1 / 1 頁</span><button id="nextJobPage" class="button ghost small" type="button">下一頁 →</button></div>
     </section>
+    </div>
+
+    <section id="shortfilmWorkspace" class="shortfilm-workspace hidden">
+      <header class="shortfilm-hero">
+        <div>
+          <p class="eyebrow">RULE-BASED SHORT FILM WORKSPACE</p>
+          <h1>把故事拆成可控制的<span>場次與鏡頭。</span></h1>
+          <p>不使用外部 Agent 或官方 API；創意由你決定，工具負責素材對應、官方 H3 格式、連戲檢查與依序生成。</p>
+        </div>
+        <div class="shortfilm-project-picker">
+          <label>目前專案<select id="shortfilmProjectSelect"><option value="">尚未建立專案</option></select></label>
+          <div><button id="newShortfilmProject" class="button primary" type="button">＋ 新增短片</button><button id="deleteShortfilmProject" class="button ghost" type="button">刪除專案</button></div>
+        </div>
+      </header>
+
+      <div id="shortfilmEmpty" class="panel shortfilm-empty">
+        <span>STORY</span><h2>建立第一個短片專案</h2><p>先建立專案，再加入角色、場景與分鏡。快速生成模式不會受到影響。</p>
+        <button class="button primary" type="button" data-shortfilm-create>建立短片專案</button>
+      </div>
+
+      <div id="shortfilmEditor" class="hidden">
+        <div class="shortfilm-grid">
+          <div class="shortfilm-main-column">
+            <section class="panel shortfilm-project-panel">
+              <div class="panel-title"><span class="step-number">01</span><div><h2>故事企劃</h2><p>設定短片方向與全片共用輸出規格</p></div></div>
+              <div class="form-grid three">
+                <label>專案名稱<input id="sfTitle" maxlength="80" placeholder="例如：午夜車站"></label>
+                <label>短片類型<select id="sfFormat"><option value="narrative">敘事短片</option><option value="dialogue">角色對話</option><option value="commercial">電影式宣傳片</option><option value="montage">視覺蒙太奇</option></select></label>
+                <label>目標總長<div class="field-unit"><input id="sfTargetDuration" type="number" min="5" max="3600" step="1"><span>秒</span></div></label>
+              </div>
+              <div class="form-grid three">
+                <label>畫面比例<select id="sfAspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label>
+                <label>解析度<select id="sfMegapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">原生畫質 · 0.98MP</option></select></label>
+                <label>生成品質<select id="sfQuality"><option value="native">原生品質</option><option value="turbo">Turbo 預覽</option></select></label>
+              </div>
+              <label class="shortfilm-wide-field">視覺風格<input id="sfStyle" placeholder="例如：cinematic realism, warm tungsten lighting, restrained camera motion"></label>
+              <label class="shortfilm-wide-field">故事大綱<textarea id="sfSynopsis" rows="4" placeholder="描述故事起點、衝突、轉折與結局；這裡只保存企劃，不會直接整段送給影片模型。"></textarea></label>
+            </section>
+
+            <section class="panel shortfilm-assets-panel">
+              <div class="panel-title action-title">
+                <div><span class="step-number">02</span><div><h2>角色與場景素材庫</h2><p>名稱代號會跨鏡頭保持一致，可附加形象圖與選填聲音</p></div></div>
+                <div class="shortfilm-add-menu"><button class="button secondary" type="button" data-sf-add-asset="character">＋ 角色</button><button class="button secondary" type="button" data-sf-add-asset="background">＋ 場景</button><button class="button secondary" type="button" data-sf-add-asset="object">＋ 道具</button></div>
+              </div>
+              <div id="shortfilmAssetList" class="shortfilm-asset-list"></div>
+              <div id="shortfilmAssetEmpty" class="empty-state compact"><span>◎</span><strong>尚未建立素材</strong><p>角色參考圖不是起始幀；它只用於維持外觀與身份。</p></div>
+            </section>
+
+            <section class="panel shortfilm-scenes-panel">
+              <div class="panel-title action-title">
+                <div><span class="step-number">03</span><div><h2>場次與分鏡</h2><p>每個鏡頭獨立生成 5～15 秒；可選擇沿用上一鏡尾幀</p></div></div>
+                <button id="addShortfilmScene" class="button secondary" type="button">＋ 新增場次</button>
+              </div>
+              <div id="shortfilmSceneList" class="shortfilm-scene-list"></div>
+              <div id="shortfilmSceneEmpty" class="empty-state compact"><span>⌁</span><strong>尚未建立場次</strong><p>新增場次後，再安排其中的鏡頭。</p></div>
+            </section>
+          </div>
+
+          <aside class="shortfilm-side-column">
+            <div class="sticky-stack">
+              <section class="panel shortfilm-summary-panel">
+                <p class="eyebrow">PRODUCTION CHECK</p>
+                <h2>短片製作總覽</h2>
+                <div class="summary-list">
+                  <div><span>場次</span><strong id="sfSceneCount">0</strong></div>
+                  <div><span>鏡頭</span><strong id="sfShotCount">0</strong></div>
+                  <div><span>分鏡總長</span><strong id="sfTimelineDuration">0 秒</strong></div>
+                  <div><span>已完成</span><strong id="sfCompletedCount">0</strong></div>
+                </div>
+                <div id="shortfilmWarnings" class="shortfilm-warnings"><p>建立鏡頭後會顯示規則檢查。</p></div>
+                <button id="runShortfilmBatch" class="button primary wide" type="button"><span>依序生成未完成鏡頭</span></button>
+                <button id="stopShortfilmBatch" class="button ghost wide hidden" type="button">停止後續鏡頭</button>
+                <p id="shortfilmBatchNote" class="render-note">連戲鏡頭會等待上一鏡完成並自動擷取尾幀；請保持 H3 Studio 開啟。</p>
+              </section>
+
+              <section id="shortfilmCompiledPanel" class="panel compiled-panel hidden">
+                <div class="mini-title"><h3 id="shortfilmCompiledTitle">鏡頭提示詞</h3><button id="copyShortfilmCompiled" class="text-button" type="button">複製</button></div>
+                <pre id="shortfilmCompiledPrompt"></pre>
+              </section>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </section>
   </main>
 
   <div id="connectionModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="connectionTitle">
@@ -629,6 +723,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260821-model-updates"></script>
+  <script src="/static/app.js?v=20260824-shortfilm"></script>
 </body>
 </html>

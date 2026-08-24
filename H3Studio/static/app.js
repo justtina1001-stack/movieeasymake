@@ -91,6 +91,12 @@ let musicModelsInstalled = false;
 let musicPage = 1;
 let musicTotalPages = 1;
 let lastMusicJobsSignature = "";
+let studioWorkspace = localStorage.getItem("h3studio-workspace-v1") || "quick";
+let shortFilmProjects = [];
+let activeShortFilmId = localStorage.getItem("h3studio-shortfilm-active-v1") || "";
+let shortFilmSaveTimer;
+let shortFilmBatchRunning = false;
+let shortFilmStatusRefreshing = false;
 
 const modeLabels = { t2v: "文生影片", fl2va: "首尾圖片", r2v: "多模態參考", replace: "角色替換", symbol_loop: "圖騰循環", extend: "續接影片", popup_panel: "彈窗面板動畫", mg_animation: "MG 動畫" };
 const promptGuideModeAdvice = {
@@ -1950,7 +1956,515 @@ function selectPromptKeyword(keyword) {
   textarea.setSelectionRange(index, index + token.length);
 }
 
+const shortFilmAssetTypeLabels = {
+  character: "角色", creature: "動物／怪物", object: "道具／物件", background: "場景／背景",
+  style: "美術風格", motion: "動作參考", effect: "特效參考",
+};
+const shortFilmShotSizeLabels = { wide: "遠景／建立鏡頭", full: "全身", medium: "中景", close: "近景", extreme_close: "特寫", pov: "主觀鏡頭" };
+const shortFilmCameraLabels = { static: "固定鏡頭", push_in: "緩慢推進", pull_out: "緩慢拉遠", pan_left: "向左平移", pan_right: "向右平移", tracking: "跟隨運鏡", handheld: "克制手持", custom: "自訂運鏡" };
+
+function activeShortFilmProject() {
+  return shortFilmProjects.find(project => project.id === activeShortFilmId) || null;
+}
+
+function setWorkspace(workspace, animate = true) {
+  studioWorkspace = workspace === "shortfilm" ? "shortfilm" : "quick";
+  localStorage.setItem("h3studio-workspace-v1", studioWorkspace);
+  $$('[data-workspace]').forEach(button => button.classList.toggle("active", button.dataset.workspace === studioWorkspace));
+  $("#quickWorkspace").classList.toggle("hidden", studioWorkspace !== "quick");
+  $("#shortfilmWorkspace").classList.toggle("hidden", studioWorkspace !== "shortfilm");
+  if (studioWorkspace === "shortfilm") {
+    renderShortFilmWorkspace();
+    if (animate) replayAnimation($("#shortfilmWorkspace"), "interface-enter");
+  } else if (animate) {
+    replayAnimation($("#quickWorkspace"), "interface-enter");
+  }
+}
+
+async function loadShortFilmProjects(force = false) {
+  if (shortFilmProjects.length && !force) return;
+  shortFilmProjects = await api("/api/shortfilms");
+  if (!shortFilmProjects.some(project => project.id === activeShortFilmId)) activeShortFilmId = shortFilmProjects[0]?.id || "";
+  localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
+  renderShortFilmWorkspace();
+}
+
+async function createShortFilmProject() {
+  const project = await api("/api/shortfilms", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: "未命名短片", scenes: [{ title: "場次 1", shots: [{}] }] }),
+  });
+  shortFilmProjects.unshift(project);
+  activeShortFilmId = project.id;
+  localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
+  renderShortFilmWorkspace();
+  setTimeout(() => { $("#sfTitle")?.focus(); $("#sfTitle")?.select(); }, 80);
+  toast("短片專案已建立，可直接輸入專案名稱。")
+}
+
+async function deleteShortFilmProject() {
+  const project = activeShortFilmProject();
+  if (!project || !confirm(`確定刪除短片專案「${project.title}」嗎？\n\n生成工作與影片不會刪除，但場次、分鏡和素材對應設定會移除。`)) return;
+  await api(`/api/shortfilms/${project.id}`, { method: "DELETE" });
+  shortFilmProjects = shortFilmProjects.filter(item => item.id !== project.id);
+  activeShortFilmId = shortFilmProjects[0]?.id || "";
+  localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
+  renderShortFilmWorkspace();
+  toast("短片專案已刪除；已生成影片仍保留。")
+}
+
+async function saveShortFilmProject() {
+  clearTimeout(shortFilmSaveTimer);
+  const project = activeShortFilmProject();
+  if (!project) return null;
+  const updated = await api(`/api/shortfilms/${project.id}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(project),
+  });
+  const index = shortFilmProjects.findIndex(item => item.id === updated.id);
+  if (index >= 0) shortFilmProjects[index] = updated;
+  return updated;
+}
+
+function scheduleShortFilmSave() {
+  clearTimeout(shortFilmSaveTimer);
+  shortFilmSaveTimer = setTimeout(() => saveShortFilmProject().catch(error => toast(`短片專案儲存失敗：${error.message}`, true)), 650);
+}
+
+function shortFilmFlatten(project) {
+  return (project?.scenes || []).flatMap(scene => (scene.shots || []).map(shot => ({ scene, shot })));
+}
+
+function shortFilmWarnings(project) {
+  const warnings = [];
+  const shots = shortFilmFlatten(project);
+  const total = shots.reduce((sum, item) => sum + Number(item.shot.duration || 0), 0);
+  if (!shots.length) warnings.push("尚未建立任何分鏡鏡頭。");
+  else if (Math.abs(total - Number(project.target_duration || 0)) > 1) warnings.push(`分鏡合計 ${total.toFixed(1)} 秒，與目標 ${Number(project.target_duration || 0).toFixed(1)} 秒不一致。`);
+  const aliases = new Set((project.assets || []).map(asset => asset.alias));
+  shots.forEach(({ scene, shot }, index) => {
+    const label = `${scene.title}／${shot.title}`;
+    if (!shot.action?.trim()) warnings.push(`${label} 尚未填寫可見動作。`);
+    if (shot.dialogue?.trim() && !shot.speaker_alias) warnings.push(`${label} 有台詞但沒有指定說話角色。`);
+    if (shot.speaker_alias && !aliases.has(shot.speaker_alias)) warnings.push(`${label} 的說話角色不存在。`);
+    if (shot.continue_previous && index === 0) warnings.push(`${label} 是第一鏡，不能沿用上一鏡尾幀。`);
+  });
+  return warnings;
+}
+
+function renderShortFilmWorkspace() {
+  const select = $("#shortfilmProjectSelect");
+  if (!select) return;
+  select.innerHTML = shortFilmProjects.length
+    ? shortFilmProjects.map(project => `<option value="${project.id}" ${project.id === activeShortFilmId ? "selected" : ""}>${escapeHtml(project.title)}</option>`).join("")
+    : '<option value="">尚未建立專案</option>';
+  const project = activeShortFilmProject();
+  $("#shortfilmEmpty").classList.toggle("hidden", Boolean(project));
+  $("#shortfilmEditor").classList.toggle("hidden", !project);
+  $("#deleteShortfilmProject").disabled = !project;
+  if (!project) return;
+  $("#sfTitle").value = project.title || "";
+  $("#sfFormat").value = project.format || "narrative";
+  $("#sfTargetDuration").value = project.target_duration || 30;
+  $("#sfAspectRatio").value = project.aspect_ratio || "16:9";
+  $("#sfMegapixels").value = String(project.megapixels ?? 0.4);
+  $("#sfQuality").value = project.quality_mode || "native";
+  $("#sfStyle").value = project.style || "";
+  $("#sfSynopsis").value = project.synopsis || "";
+  renderShortFilmAssets();
+  renderShortFilmScenes();
+  renderShortFilmSummary();
+}
+
+function renderShortFilmAssets() {
+  const project = activeShortFilmProject();
+  if (!project) return;
+  const list = $("#shortfilmAssetList");
+  $("#shortfilmAssetEmpty").classList.toggle("hidden", project.assets.length > 0);
+  list.innerHTML = project.assets.map(asset => {
+    const imageHtml = asset.image_asset_ids.length
+      ? asset.image_asset_ids.map((assetId, index) => `<div class="shortfilm-asset-thumb" style="background-image:url('/api/assets/${assetId}')"><button type="button" data-sf-remove-image="${index}" title="移除圖片">×</button></div>`).join("")
+      : '<span class="asset-placeholder">拖入或選擇角色／場景參考圖</span>';
+    const typeOptions = Object.entries(shortFilmAssetTypeLabels).map(([value, label]) => `<option value="${value}" ${asset.type === value ? "selected" : ""}>${label}</option>`).join("");
+    return `<article class="shortfilm-asset-card" data-sf-asset-id="${asset.id}">
+      <div class="shortfilm-asset-head">
+        <span>${escapeHtml(shortFilmAssetTypeLabels[asset.type] || asset.type)}</span>
+        <button class="delete-button" type="button" data-sf-delete-asset title="刪除素材">×</button>
+      </div>
+      <div class="form-grid two">
+        <label>名稱代號<input data-sf-asset-field="alias" value="${escapeHtml(asset.alias)}" placeholder="例如：小雨"></label>
+        <label>素材類型<select data-sf-asset-field="type">${typeOptions}</select></label>
+      </div>
+      <label>固定特徵<input data-sf-asset-field="description" value="${escapeHtml(asset.description || "")}" placeholder="臉部、髮型、服裝、色彩與不可改變的特徵"></label>
+      <div class="shortfilm-asset-media">
+        <div class="shortfilm-image-zone" data-sf-drop="images"><div class="thumb-grid">${imageHtml}</div><button class="text-button" type="button" data-sf-add-images>＋ 加入圖片 (${asset.image_asset_ids.length}/9)</button></div>
+        <div class="shortfilm-audio-zone ${asset.audio_asset_id ? "has-audio" : ""}" data-sf-drop="audio"><span>${asset.audio_asset_id ? "已加入聲音參考" : "聲音選填"}</span><button class="text-button" type="button" data-sf-add-audio>${asset.audio_asset_id ? "更換" : "＋ 加入聲音"}</button>${asset.audio_asset_id ? '<button class="text-button danger-text" type="button" data-sf-remove-audio>移除</button>' : ""}</div>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+function renderShortFilmScenes() {
+  const project = activeShortFilmProject();
+  if (!project) return;
+  $("#shortfilmSceneEmpty").classList.toggle("hidden", project.scenes.length > 0);
+  $("#shortfilmSceneList").innerHTML = project.scenes.map((scene, sceneIndex) => {
+    const shots = scene.shots.map((shot, shotIndex) => {
+      const assetChecks = project.assets.length ? project.assets.map(asset => `<label class="shortfilm-asset-chip ${shot.asset_ids.includes(asset.id) ? "selected" : ""}"><input type="checkbox" data-sf-shot-asset="${asset.id}" ${shot.asset_ids.includes(asset.id) ? "checked" : ""}><span>${escapeHtml(asset.alias)}</span></label>`).join("") : '<small class="asset-placeholder">請先建立角色或場景素材</small>';
+      const speakerOptions = ['<option value="">無台詞／未指定</option>', ...project.assets.filter(asset => ["character", "creature"].includes(asset.type)).map(asset => `<option value="${escapeHtml(asset.alias)}" ${shot.speaker_alias === asset.alias ? "selected" : ""}>${escapeHtml(asset.alias)}</option>`)].join("");
+      const shotSizeOptions = Object.entries(shortFilmShotSizeLabels).map(([value, label]) => `<option value="${value}" ${shot.shot_size === value ? "selected" : ""}>${label}</option>`).join("");
+      const cameraOptions = Object.entries(shortFilmCameraLabels).map(([value, label]) => `<option value="${value}" ${shot.camera === value ? "selected" : ""}>${label}</option>`).join("");
+      const storyboard = shot.storyboard_asset_id
+        ? `<div class="shortfilm-storyboard-preview" style="background-image:url('/api/assets/${shot.storyboard_asset_id}')"><button type="button" data-sf-remove-storyboard>×</button></div>`
+        : '<div class="shortfilm-storyboard-placeholder">＋ 分鏡圖</div>';
+      return `<article class="shortfilm-shot-card" data-sf-shot-id="${shot.id}">
+        <div class="shortfilm-shot-heading"><div><span>SHOT ${String(shotIndex + 1).padStart(2, "0")}</span><input data-sf-shot-field="title" value="${escapeHtml(shot.title)}"></div><div class="shortfilm-shot-status ${escapeHtml(shot.status || "draft")}">${escapeHtml(statusLabel(shot.status || "draft"))}</div><button class="delete-button" type="button" data-sf-delete-shot>×</button></div>
+        <div class="form-grid three">
+          <label>時長<div class="field-unit"><input data-sf-shot-field="duration" type="number" min="5" max="15" step="0.5" value="${escapeHtml(shot.duration)}"><span>秒</span></div></label>
+          <label>景別<select data-sf-shot-field="shot_size">${shotSizeOptions}</select></label>
+          <label>運鏡<select data-sf-shot-field="camera">${cameraOptions}</select></label>
+        </div>
+        <label>運鏡補充<input data-sf-shot-field="camera_detail" value="${escapeHtml(shot.camera_detail || "")}" placeholder="例如：保持兩位角色在同一軸線，不跨越視線方向"></label>
+        <label>畫面與動作<textarea data-sf-shot-field="action" rows="4" placeholder="用可見動作描述：預備 → 主要動作 → 反應 → 收勢">${escapeHtml(shot.action || "")}</textarea></label>
+        <label>最後狀態<input data-sf-shot-field="ending" value="${escapeHtml(shot.ending || "")}" placeholder="明確描述鏡頭最後停在哪個姿勢與構圖"></label>
+        <div class="shortfilm-dialogue-grid">
+          <label>說話角色<select data-sf-shot-field="speaker_alias">${speakerOptions}</select></label>
+          <label>語言<input data-sf-shot-field="dialogue_language" value="${escapeHtml(shot.dialogue_language || "Chinese")}"></label>
+          <label class="dialogue-text">精確台詞<input data-sf-shot-field="dialogue" value="${escapeHtml(shot.dialogue || "")}" placeholder="保留原文與標點，不要加引號"></label>
+        </div>
+        <div class="form-grid two"><label>環境與動作聲<input data-sf-shot-field="sound" value="${escapeHtml(shot.sound || "")}"></label><label>觀眾配樂<input data-sf-shot-field="music" value="${escapeHtml(shot.music || "N/A")}" placeholder="不需要配樂請填 N/A"></label></div>
+        <div class="shortfilm-shot-assets"><strong>本鏡頭使用素材</strong><div>${assetChecks}</div></div>
+        <div class="shortfilm-shot-footer">
+          <label class="check-option"><input type="checkbox" data-sf-shot-field="continue_previous" ${shot.continue_previous ? "checked" : ""}><span><strong>沿用上一鏡尾幀</strong><small>上一鏡完成後自動擷取</small></span></label>
+          <div class="shortfilm-storyboard-button" role="button" tabindex="0" data-sf-add-storyboard>${storyboard}</div>
+          <label>Seed<input data-sf-shot-field="seed" type="number" min="0" value="${escapeHtml(shot.seed ?? 1)}"></label>
+          <div class="shortfilm-shot-actions"><button class="button ghost small" type="button" data-sf-preview-shot>預覽提示詞</button><button class="button primary small" type="button" data-sf-generate-shot>生成此鏡頭</button>${shot.job_id ? '<button class="button ghost small" type="button" data-sf-open-jobs>查看工作</button>' : ""}</div>
+        </div>
+      </article>`;
+    }).join("");
+    return `<section class="shortfilm-scene-card" data-sf-scene-id="${scene.id}">
+      <div class="shortfilm-scene-heading"><span>SCENE ${String(sceneIndex + 1).padStart(2, "0")}</span><input data-sf-scene-field="title" value="${escapeHtml(scene.title)}"><button class="button ghost small" type="button" data-sf-add-shot>＋ 新增鏡頭</button><button class="delete-button" type="button" data-sf-delete-scene>×</button></div>
+      <div class="form-grid two"><label>地點<input data-sf-scene-field="location" value="${escapeHtml(scene.location || "")}" placeholder="例如：雨夜的老車站月台"></label><label>時間／光線<input data-sf-scene-field="time_of_day" value="${escapeHtml(scene.time_of_day || "")}" placeholder="例如：午夜，冷色日光燈"></label></div>
+      <label>場景固定狀態<input data-sf-scene-field="description" value="${escapeHtml(scene.description || "")}" placeholder="空間配置、固定道具、光源與跨鏡頭不能改變的內容"></label>
+      <div class="shortfilm-shot-list">${shots || '<div class="empty-state compact"><span>＋</span><strong>這個場次還沒有鏡頭</strong></div>'}</div>
+    </section>`;
+  }).join("");
+}
+
+function renderShortFilmSummary(extraWarnings = null) {
+  const project = activeShortFilmProject();
+  if (!project) return;
+  const shots = shortFilmFlatten(project);
+  const total = shots.reduce((sum, item) => sum + Number(item.shot.duration || 0), 0);
+  $("#sfSceneCount").textContent = project.scenes.length;
+  $("#sfShotCount").textContent = shots.length;
+  $("#sfTimelineDuration").textContent = `${total.toFixed(1)} 秒`;
+  $("#sfCompletedCount").textContent = shots.filter(item => item.shot.status === "completed").length;
+  const warnings = extraWarnings || shortFilmWarnings(project);
+  $("#shortfilmWarnings").innerHTML = warnings.length
+    ? `<strong>需要確認 ${warnings.length} 項</strong><ul>${warnings.slice(0, 8).map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+    : '<strong class="all-clear">規則檢查通過</strong><p>素材、台詞與鏡頭時長目前沒有明顯衝突。</p>';
+}
+
+function findShortFilmShot(shotId) {
+  return shortFilmFlatten(activeShortFilmProject()).find(item => item.shot.id === shotId) || null;
+}
+
+async function compileShortFilmShot(shotId, generate = false) {
+  await saveShortFilmProject();
+  const project = activeShortFilmProject();
+  const item = findShortFilmShot(shotId);
+  if (!project || !item) throw new Error("找不到短片鏡頭。");
+  const result = await api(`/api/shortfilms/${project.id}/shots/${shotId}/compile`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prepare_continuity: true }),
+  });
+  const projectIndex = shortFilmProjects.findIndex(value => value.id === project.id);
+  if (projectIndex >= 0) shortFilmProjects[projectIndex] = result.project;
+  $("#shortfilmCompiledTitle").textContent = `${item.scene.title}／${item.shot.title}`;
+  $("#shortfilmCompiledPrompt").textContent = result.compiled.prompt;
+  $("#shortfilmCompiledPanel").classList.remove("hidden");
+  renderShortFilmSummary(result.warnings);
+  if (!generate) {
+    toast(`提示詞已依官方格式編譯，使用 ${result.compiled.asset_count} 個素材。`);
+    return null;
+  }
+  const job = await api("/api/render", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(result.payload),
+  });
+  const refreshed = findShortFilmShot(shotId);
+  refreshed.shot.job_id = job.id;
+  refreshed.shot.status = job.status || "queued";
+  refreshed.shot.continuation_asset_id = result.project.scenes.flatMap(scene => scene.shots).find(shot => shot.id === shotId)?.continuation_asset_id || null;
+  const flattened = shortFilmFlatten(activeShortFilmProject());
+  const refreshedIndex = flattened.findIndex(item => item.shot.id === shotId);
+  for (let index = refreshedIndex + 1; index < flattened.length && flattened[index].shot.continue_previous; index += 1) {
+    flattened[index].shot.continuation_asset_id = null;
+    flattened[index].shot.status = "draft";
+  }
+  await saveShortFilmProject();
+  renderShortFilmScenes();
+  renderShortFilmSummary();
+  loadJobs(true);
+  toast(`${refreshed.scene.title}／${refreshed.shot.title} 已加入生成佇列。`);
+  return job;
+}
+
+async function refreshShortFilmShotStatuses() {
+  if (shortFilmStatusRefreshing || !shortFilmProjects.length) return;
+  shortFilmStatusRefreshing = true;
+  try {
+    const project = activeShortFilmProject();
+    if (!project) return;
+    const tracked = shortFilmFlatten(project).filter(item => item.shot.job_id);
+    let changed = false;
+    await Promise.all(tracked.map(async item => {
+      try {
+        const job = await api(`/api/jobs/${item.shot.job_id}`);
+        if (item.shot.status !== job.status) { item.shot.status = job.status; changed = true; }
+      } catch { /* deleted jobs remain linked for traceability */ }
+    }));
+    if (changed) {
+      await saveShortFilmProject();
+      if (studioWorkspace === "shortfilm") { renderShortFilmScenes(); renderShortFilmSummary(); }
+    }
+  } finally {
+    shortFilmStatusRefreshing = false;
+  }
+}
+
+async function waitForShortFilmJob(jobId) {
+  while (shortFilmBatchRunning) {
+    const job = await api(`/api/jobs/${jobId}`);
+    $("#shortfilmBatchNote").textContent = `目前工作：${job.name || job.id.slice(0, 8)} · ${statusLabel(job.status)} ${Math.round(job.progress || 0)}%`;
+    if (job.status === "completed") return job;
+    if (["failed", "cancelled", "interrupted"].includes(job.status)) throw new Error(`鏡頭工作${statusLabel(job.status)}：${job.error || "請檢查生成紀錄"}`);
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  }
+  return null;
+}
+
+async function runShortFilmBatch() {
+  if (shortFilmBatchRunning) return;
+  const project = activeShortFilmProject();
+  if (!project || !shortFilmFlatten(project).length) return toast("請先建立至少一個鏡頭。", true);
+  shortFilmBatchRunning = true;
+  $("#runShortfilmBatch").classList.add("hidden");
+  $("#stopShortfilmBatch").classList.remove("hidden");
+  try {
+    await refreshShortFilmShotStatuses();
+    for (const { shot } of shortFilmFlatten(activeShortFilmProject())) {
+      if (!shortFilmBatchRunning) break;
+      if (shot.status === "completed") continue;
+      let jobId = shot.job_id;
+      if (jobId && ["queued", "preparing", "running"].includes(shot.status)) {
+        $("#shortfilmBatchNote").textContent = `等待既有鏡頭工作：${shot.title}`;
+      } else {
+        $("#shortfilmBatchNote").textContent = `正在編譯並送出：${shot.title}`;
+        const job = await compileShortFilmShot(shot.id, true);
+        jobId = job.id;
+      }
+      const completed = await waitForShortFilmJob(jobId);
+      if (!completed) break;
+      const current = findShortFilmShot(shot.id);
+      if (current) current.shot.status = "completed";
+      await saveShortFilmProject();
+      renderShortFilmScenes(); renderShortFilmSummary();
+    }
+    if (shortFilmBatchRunning) toast("短片的未完成鏡頭已依序生成完畢。")
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    shortFilmBatchRunning = false;
+    $("#runShortfilmBatch").classList.remove("hidden");
+    $("#stopShortfilmBatch").classList.add("hidden");
+    $("#shortfilmBatchNote").textContent = "連戲鏡頭會等待上一鏡完成並自動擷取尾幀；請保持 H3 Studio 開啟。";
+    refreshShortFilmShotStatuses();
+  }
+}
+
 function bindEvents() {
+  $(".workspace-switch").addEventListener("click", event => {
+    const button = event.target.closest("[data-workspace]");
+    if (button) setWorkspace(button.dataset.workspace);
+  });
+  $("#newShortfilmProject").addEventListener("click", () => createShortFilmProject().catch(error => toast(error.message, true)));
+  $("[data-shortfilm-create]").addEventListener("click", () => createShortFilmProject().catch(error => toast(error.message, true)));
+  $("#deleteShortfilmProject").addEventListener("click", () => deleteShortFilmProject().catch(error => toast(error.message, true)));
+  $("#shortfilmProjectSelect").addEventListener("change", event => {
+    activeShortFilmId = event.target.value;
+    localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
+    renderShortFilmWorkspace();
+  });
+  const shortFilmProjectFields = {
+    sfTitle: "title", sfFormat: "format", sfTargetDuration: "target_duration", sfAspectRatio: "aspect_ratio",
+    sfMegapixels: "megapixels", sfQuality: "quality_mode", sfStyle: "style", sfSynopsis: "synopsis",
+  };
+  Object.entries(shortFilmProjectFields).forEach(([id, field]) => {
+    $(`#${id}`).addEventListener("input", event => {
+      const project = activeShortFilmProject();
+      if (!project) return;
+      project[field] = ["target_duration", "megapixels"].includes(field) ? Number(event.target.value) : event.target.value;
+      if (field === "title") {
+        const option = $(`#shortfilmProjectSelect option[value='${project.id}']`);
+        if (option) option.textContent = project.title || "未命名短片";
+      }
+      renderShortFilmSummary(); scheduleShortFilmSave();
+    });
+    $(`#${id}`).addEventListener("change", scheduleShortFilmSave);
+  });
+  $$("[data-sf-add-asset]").forEach(button => button.addEventListener("click", () => {
+    const project = activeShortFilmProject();
+    if (!project) return;
+    const type = button.dataset.sfAddAsset;
+    const counts = project.assets.filter(asset => asset.type === type).length + 1;
+    const baseName = type === "background" ? "場景" : type === "object" ? "道具" : "角色";
+    project.assets.push({ id: uid(), alias: `${baseName}${counts}`, type, description: "", image_asset_ids: [], audio_asset_id: null, voice_mode: "timbre" });
+    renderShortFilmAssets(); renderShortFilmScenes(); renderShortFilmSummary(); scheduleShortFilmSave();
+  }));
+  $("#shortfilmAssetList").addEventListener("input", event => {
+    const card = event.target.closest("[data-sf-asset-id]");
+    const field = event.target.dataset.sfAssetField;
+    if (!card || !field) return;
+    const asset = activeShortFilmProject()?.assets.find(item => item.id === card.dataset.sfAssetId);
+    if (!asset) return;
+    asset[field] = event.target.value;
+    scheduleShortFilmSave(); renderShortFilmSummary();
+  });
+  $("#shortfilmAssetList").addEventListener("change", event => {
+    if (event.target.dataset.sfAssetField === "alias" || event.target.dataset.sfAssetField === "type") renderShortFilmScenes();
+  });
+  $("#shortfilmAssetList").addEventListener("dragover", event => {
+    const zone = event.target.closest("[data-sf-drop]");
+    if (!zone) return;
+    event.preventDefault(); zone.classList.add("drag-active"); event.dataTransfer.dropEffect = "copy";
+  });
+  $("#shortfilmAssetList").addEventListener("dragleave", event => {
+    const zone = event.target.closest("[data-sf-drop]");
+    if (zone && (!event.relatedTarget || !zone.contains(event.relatedTarget))) zone.classList.remove("drag-active");
+  });
+  $("#shortfilmAssetList").addEventListener("drop", async event => {
+    const zone = event.target.closest("[data-sf-drop]");
+    const card = event.target.closest("[data-sf-asset-id]");
+    if (!zone || !card) return;
+    event.preventDefault(); zone.classList.remove("drag-active");
+    const asset = activeShortFilmProject()?.assets.find(item => item.id === card.dataset.sfAssetId);
+    if (!asset) return;
+    try {
+      if (zone.dataset.sfDrop === "images") {
+        const files = [...event.dataTransfer.files].filter(file => acceptsReferenceFile(file, "images")).slice(0, Math.max(0, 9 - asset.image_asset_ids.length));
+        for (const file of files) asset.image_asset_ids.push((await uploadFile(file, "shortfilm-reference-image")).id);
+      } else {
+        const file = [...event.dataTransfer.files].find(value => acceptsReferenceFile(value, "audio"));
+        if (file) asset.audio_asset_id = (await uploadFile(file, "shortfilm-reference-audio")).id;
+      }
+      renderShortFilmAssets(); scheduleShortFilmSave();
+    } catch (error) { toast(error.message, true); }
+  });
+  $("#shortfilmAssetList").addEventListener("click", async event => {
+    const card = event.target.closest("[data-sf-asset-id]");
+    if (!card) return;
+    const project = activeShortFilmProject();
+    const asset = project?.assets.find(item => item.id === card.dataset.sfAssetId);
+    if (!project || !asset) return;
+    try {
+      if (event.target.closest("[data-sf-delete-asset]")) {
+        if (!confirm(`刪除素材「${asset.alias}」？分鏡中的選取也會一起移除。`)) return;
+        project.assets = project.assets.filter(item => item.id !== asset.id);
+        shortFilmFlatten(project).forEach(item => item.shot.asset_ids = item.shot.asset_ids.filter(id => id !== asset.id));
+      } else if (event.target.closest("[data-sf-add-images]")) {
+        const files = await chooseFiles("image/*", true);
+        const remaining = Math.max(0, 9 - asset.image_asset_ids.length);
+        for (const file of files.slice(0, remaining)) asset.image_asset_ids.push((await uploadFile(file, "shortfilm-reference-image")).id);
+      } else if (event.target.closest("[data-sf-add-audio]")) {
+        const file = (await chooseFiles("audio/*,video/mp4,video/webm,video/quicktime"))[0];
+        if (file) asset.audio_asset_id = (await uploadFile(file, "shortfilm-reference-audio")).id;
+      } else if (event.target.closest("[data-sf-remove-audio]")) {
+        asset.audio_asset_id = null;
+      } else {
+        const removeImage = event.target.closest("[data-sf-remove-image]");
+        if (!removeImage) return;
+        asset.image_asset_ids.splice(Number(removeImage.dataset.sfRemoveImage), 1);
+      }
+      renderShortFilmAssets(); renderShortFilmScenes(); renderShortFilmSummary(); scheduleShortFilmSave();
+    } catch (error) { toast(error.message, true); }
+  });
+  $("#addShortfilmScene").addEventListener("click", () => {
+    const project = activeShortFilmProject();
+    if (!project) return;
+    project.scenes.push({ id: uid(), title: `場次 ${project.scenes.length + 1}`, location: "", time_of_day: "", description: "", shots: [] });
+    renderShortFilmScenes(); renderShortFilmSummary(); scheduleShortFilmSave();
+  });
+  $("#shortfilmSceneList").addEventListener("input", event => {
+    const sceneCard = event.target.closest("[data-sf-scene-id]");
+    const shotCard = event.target.closest("[data-sf-shot-id]");
+    const project = activeShortFilmProject();
+    const scene = project?.scenes.find(item => item.id === sceneCard?.dataset.sfSceneId);
+    if (!scene) return;
+    if (event.target.dataset.sfSceneField) scene[event.target.dataset.sfSceneField] = event.target.value;
+    if (event.target.dataset.sfShotField && shotCard) {
+      const shot = scene.shots.find(item => item.id === shotCard.dataset.sfShotId);
+      const field = event.target.dataset.sfShotField;
+      if (shot) shot[field] = event.target.type === "checkbox" ? event.target.checked : ["duration", "seed"].includes(field) ? Number(event.target.value) : event.target.value;
+    }
+    renderShortFilmSummary(); scheduleShortFilmSave();
+  });
+  $("#shortfilmSceneList").addEventListener("change", event => {
+    const shotCard = event.target.closest("[data-sf-shot-id]");
+    const assetId = event.target.dataset.sfShotAsset;
+    if (!shotCard || !assetId) return;
+    const found = findShortFilmShot(shotCard.dataset.sfShotId);
+    if (!found) return;
+    if (event.target.checked && !found.shot.asset_ids.includes(assetId)) found.shot.asset_ids.push(assetId);
+    if (!event.target.checked) found.shot.asset_ids = found.shot.asset_ids.filter(id => id !== assetId);
+    event.target.closest(".shortfilm-asset-chip")?.classList.toggle("selected", event.target.checked);
+    scheduleShortFilmSave();
+  });
+  $("#shortfilmSceneList").addEventListener("click", async event => {
+    const sceneCard = event.target.closest("[data-sf-scene-id]");
+    const shotCard = event.target.closest("[data-sf-shot-id]");
+    const project = activeShortFilmProject();
+    const scene = project?.scenes.find(item => item.id === sceneCard?.dataset.sfSceneId);
+    if (!project || !scene) return;
+    const shot = shotCard ? scene.shots.find(item => item.id === shotCard.dataset.sfShotId) : null;
+    try {
+      if (event.target.closest("[data-sf-delete-scene]")) {
+        if (!confirm(`刪除「${scene.title}」及其中所有分鏡？已生成影片不會刪除。`)) return;
+        project.scenes = project.scenes.filter(item => item.id !== scene.id);
+      } else if (event.target.closest("[data-sf-add-shot]")) {
+        const globalIndex = shortFilmFlatten(project).length + 1;
+        scene.shots.push({
+          id: uid(), title: `鏡頭 ${globalIndex}`, duration: 5, shot_size: "medium", camera: "static", camera_detail: "", action: "",
+          ending: "The subjects settle into a readable final pose and the final composition remains stable.", speaker_alias: "", dialogue_language: "Chinese", dialogue: "",
+          sound: "Natural room tone and synchronized physical action sounds.", music: "N/A", asset_ids: [], storyboard_asset_id: null,
+          continue_previous: false, continuation_asset_id: null, seed: Math.floor(Math.random() * Number.MAX_SAFE_INTEGER), job_id: null, status: "draft",
+        });
+      } else if (shot && event.target.closest("[data-sf-delete-shot]")) {
+        if (!confirm(`刪除分鏡「${shot.title}」？已生成工作與影片不會刪除。`)) return;
+        scene.shots = scene.shots.filter(item => item.id !== shot.id);
+      } else if (shot && event.target.closest("[data-sf-add-storyboard]")) {
+        if (event.target.closest("[data-sf-remove-storyboard]")) shot.storyboard_asset_id = null;
+        else {
+          const file = (await chooseFiles("image/*"))[0];
+          if (file) shot.storyboard_asset_id = (await uploadFile(file, "shortfilm-storyboard")).id;
+        }
+      } else if (shot && event.target.closest("[data-sf-preview-shot]")) {
+        const button = event.target.closest("[data-sf-preview-shot]"); setButtonBusy(button, true);
+        try { await compileShortFilmShot(shot.id, false); } finally { setButtonBusy(button, false); }
+        return;
+      } else if (shot && event.target.closest("[data-sf-generate-shot]")) {
+        const button = event.target.closest("[data-sf-generate-shot]"); setButtonBusy(button, true);
+        try { await compileShortFilmShot(shot.id, true); } finally { setButtonBusy(button, false); }
+        return;
+      } else if (shot && event.target.closest("[data-sf-open-jobs]")) {
+        setWorkspace("quick"); setTimeout(() => $(".jobs-section").scrollIntoView({ behavior: "smooth" }), 120); return;
+      } else return;
+      renderShortFilmScenes(); renderShortFilmSummary(); scheduleShortFilmSave();
+    } catch (error) { toast(error.message, true); }
+  });
+  $("#copyShortfilmCompiled").addEventListener("click", async () => {
+    await navigator.clipboard.writeText($("#shortfilmCompiledPrompt").textContent || ""); toast("已複製鏡頭提示詞。")
+  });
+  $("#runShortfilmBatch").addEventListener("click", runShortFilmBatch);
+  $("#stopShortfilmBatch").addEventListener("click", () => { shortFilmBatchRunning = false; toast("目前鏡頭完成後不再送出後續鏡頭。") });
   $("#modeGrid").addEventListener("click", event => {
     const card = event.target.closest(".mode-card");
     if (card) setMode(card.dataset.mode);
@@ -2704,6 +3218,8 @@ function initialize() {
   restoreForm();
   bindEvents();
   installInteractionMotion();
+  setWorkspace(studioWorkspace, false);
+  loadShortFilmProjects(true).catch(error => console.warn("短片專案載入失敗：", error));
   setMusicMode("instrumental");
   $("#musicSeed").value = randomMusicSeed();
   renderKeyframePreview("first", state.firstImage, "起始圖片", false);
@@ -2726,6 +3242,7 @@ function initialize() {
   }, 2500);
   setInterval(() => engineStartingAt && showEngineStarting(), 1000);
   setInterval(loadJobs, 3000);
+  setInterval(() => refreshShortFilmShotStatuses().catch(error => console.warn("短片工作狀態更新失敗：", error)), 5000);
   setInterval(() => {
     if ($("#musicModal").classList.contains("hidden")) return;
     loadMusicStatus().catch(error => console.warn(error));

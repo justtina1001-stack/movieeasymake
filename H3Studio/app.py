@@ -33,6 +33,14 @@ from music3 import (
     filename_stem as music_filename_stem,
 )
 from shared_gateway import GatewayError, SharedComfyGateway
+from shortfilm import (
+    ShortFilmError,
+    ShortFilmStore,
+    compile_shot_payload,
+    flatten_shots,
+    new_project,
+    project_warnings,
+)
 from settings import ConnectionSettings, SettingsError, SettingsStore
 
 
@@ -1707,6 +1715,7 @@ def create_app() -> web.Application:
     music_installer = Music3Installer(comfy)
     music_jobs = MusicJobManager(comfy, DATA_DIR, jobs.gpu_lock, music_installer)
     gateway = SharedComfyGateway(DATA_DIR)
+    shortfilms = ShortFilmStore(DATA_DIR / "shortfilms")
 
     async def use_installed_engine(target: Path) -> None:
         updated = settings.update({
@@ -1729,6 +1738,7 @@ def create_app() -> web.Application:
     app["music_installer"] = music_installer
     app["music_jobs"] = music_jobs
     app["shared_gateway"] = gateway
+    app["shortfilms"] = shortfilms
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
@@ -1979,6 +1989,94 @@ def create_app() -> web.Application:
         except RequestError as error:
             return json_response_error(error, 404)
         return web.FileResponse(path, headers={"Content-Type": mimetypes.guess_type(path.name)[0] or "application/octet-stream"})
+
+    async def list_shortfilms(_: web.Request) -> web.Response:
+        return web.json_response(shortfilms.list())
+
+    async def create_shortfilm(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            project = new_project(payload.get("title"))
+            project.update({key: value for key, value in payload.items() if key != "id"})
+            return web.json_response(shortfilms.create(project), status=201)
+        except (ShortFilmError, json.JSONDecodeError, OSError) as error:
+            return json_response_error(error)
+
+    async def get_shortfilm(request: web.Request) -> web.Response:
+        try:
+            project = shortfilms.get(request.match_info["project_id"])
+            return web.json_response({"project": project, "warnings": project_warnings(project)})
+        except ShortFilmError as error:
+            return json_response_error(error, 404)
+
+    async def update_shortfilm(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            return web.json_response(shortfilms.update(request.match_info["project_id"], payload))
+        except (ShortFilmError, json.JSONDecodeError, OSError, ValueError) as error:
+            return json_response_error(error)
+
+    async def delete_shortfilm(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(shortfilms.delete(request.match_info["project_id"]))
+        except ShortFilmError as error:
+            return json_response_error(error, 404)
+
+    async def compile_shortfilm_shot(request: web.Request) -> web.Response:
+        try:
+            request_payload = await request.json()
+            project_id = request.match_info["project_id"]
+            shot_id = request.match_info["shot_id"]
+            project = shortfilms.get(project_id)
+            flattened = flatten_shots(project)
+            shot_index = next((index for index, (_, shot) in enumerate(flattened) if shot["id"] == shot_id), None)
+            if shot_index is None:
+                raise ShortFilmError("找不到指定鏡頭。")
+            scene, shot = flattened[shot_index]
+            continuation_asset_id = shot.get("continuation_asset_id")
+            if shot.get("continue_previous"):
+                if shot_index == 0:
+                    raise ShortFilmError("第一個鏡頭無法沿用上一鏡尾幀。")
+                previous_shot = flattened[shot_index - 1][1]
+                previous_job_id = previous_shot.get("job_id")
+                previous_job = jobs.jobs.get(previous_job_id) if previous_job_id else None
+                if not previous_job or previous_job.get("status") != "completed" or not previous_job.get("output"):
+                    raise ShortFilmError("上一個鏡頭尚未完成，暫時無法擷取尾幀。")
+                valid_cached_asset = False
+                if continuation_asset_id:
+                    try:
+                        assets.path_for(continuation_asset_id)
+                        valid_cached_asset = True
+                    except RequestError:
+                        continuation_asset_id = None
+                if not valid_cached_asset and request_payload.get("prepare_continuity", True):
+                    source_path = await jobs.job_output_path(previous_job)
+                    frame = await asyncio.to_thread(extract_continuation_frame, source_path, assets)
+                    continuation_asset_id = frame["id"]
+                    shot["continuation_asset_id"] = continuation_asset_id
+                    project = shortfilms.update(project_id, project)
+                    flattened = flatten_shots(project)
+                    scene, shot = next((item for item in flattened if item[1]["id"] == shot_id), (scene, shot))
+
+            raw_payload, warnings = compile_shot_payload(
+                project,
+                scene["id"],
+                shot_id,
+                continuation_asset_id=continuation_asset_id,
+            )
+            compiled = compile_request(raw_payload)
+            for asset_id in required_asset_ids(compiled):
+                assets.path_for(asset_id)
+            data = asdict(compiled)
+            data["asset_count"] = len(required_asset_ids(compiled))
+            return web.json_response({
+                "project": project,
+                "payload": raw_payload,
+                "compiled": data,
+                "warnings": [*project_warnings(project), *warnings],
+            })
+        except (ShortFilmError, RequestError, json.JSONDecodeError, OSError, ValueError) as error:
+            return json_response_error(error, 409 if "尚未完成" in str(error) else 400)
 
     async def compile_api(request: web.Request) -> web.Response:
         try:
@@ -2321,6 +2419,12 @@ def create_app() -> web.Application:
     app.router.add_post("/api/continuation/prepare", prepare_continuation)
     app.router.add_post("/api/symbol/prepare", prepare_symbol)
     app.router.add_get("/api/assets/{asset_id}", asset)
+    app.router.add_get("/api/shortfilms", list_shortfilms)
+    app.router.add_post("/api/shortfilms", create_shortfilm)
+    app.router.add_get("/api/shortfilms/{project_id}", get_shortfilm)
+    app.router.add_put("/api/shortfilms/{project_id}", update_shortfilm)
+    app.router.add_delete("/api/shortfilms/{project_id}", delete_shortfilm)
+    app.router.add_post("/api/shortfilms/{project_id}/shots/{shot_id}/compile", compile_shortfilm_shot)
     app.router.add_post("/api/compile", compile_api)
     app.router.add_post("/api/render", render)
     app.router.add_get("/api/jobs", list_jobs)
