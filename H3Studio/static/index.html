@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260820-official-templates">
+  <link rel="stylesheet" href="/static/styles.css?v=20260821-model-updates">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -21,6 +21,7 @@
       <button id="openMusicStudio" class="button ghost small music-toolbar-button" type="button" aria-haspopup="dialog"><b>♫</b><span>Music 3</span></button>
       <button id="openPromptGuide" class="button ghost small guide-toolbar-button" type="button" aria-haspopup="dialog" aria-label="開啟提示詞指南"><b>✦</b><span class="guide-button-label">提示詞指南</span></button>
       <button id="startEngine" class="button ghost small" type="button">啟動引擎</button>
+      <button id="openModelUpdates" class="button ghost small model-update-toolbar" type="button" aria-haspopup="dialog"><span id="modelUpdateToolbarDot" class="model-update-toolbar-dot hidden"></span><span id="modelUpdateToolbarText">模型版本</span></button>
       <button id="openConnectionSettings" class="button ghost small" type="button">引擎設定</button>
       <button id="openGatewaySettings" class="button ghost small hidden" type="button" aria-haspopup="dialog">共享引擎</button>
     </div>
@@ -389,6 +390,47 @@
     </section>
   </div>
 
+  <div id="modelUpdateModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modelUpdateTitle">
+    <div class="modal-backdrop" data-close-model-update></div>
+    <section class="modal-card model-update-card">
+      <div class="modal-heading">
+        <div><p class="eyebrow">MODEL UPDATE CENTER</p><h2 id="modelUpdateTitle">模型更新中心</h2><p>只檢查目前指定的本機 ComfyUI；不會自動下載、刪除或替換模型。</p></div>
+        <button class="icon-button modal-close" type="button" data-close-model-update aria-label="關閉模型更新中心">×</button>
+      </div>
+      <div id="modelUpdateState" class="model-update-state checking">
+        <span class="model-update-icon">↻</span>
+        <div><strong id="modelUpdateStateTitle">正在檢查模型版本...</strong><small id="modelUpdateStateDetail">比對版本清單與本機檔案</small></div>
+      </div>
+      <div id="modelUpdateRelease" class="model-update-release hidden">
+        <div class="model-update-release-heading">
+          <div><span id="modelUpdateChannel" class="model-update-channel">STABLE</span><h3 id="modelUpdateReleaseTitle"></h3></div>
+          <div><strong id="modelUpdateVersion"></strong><small id="modelUpdatePublished"></small></div>
+        </div>
+        <p id="modelUpdateSummary"></p>
+        <ul id="modelUpdateChanges"></ul>
+        <div class="model-update-facts">
+          <div><span>需要下載</span><strong id="modelUpdateDownloadSize">—</strong></div>
+          <div><span>可用磁碟</span><strong id="modelUpdateDiskFree">—</strong></div>
+          <div><span>模型檔案</span><strong id="modelUpdateFileCount">—</strong></div>
+          <div><span>顯卡建議</span><strong id="modelUpdateVram">—</strong></div>
+        </div>
+      </div>
+      <div id="modelUpdateProgress" class="installer-progress hidden">
+        <div><strong id="modelUpdateStep">準備更新</strong><span id="modelUpdatePercent">0%</span></div>
+        <div class="progress-track"><i id="modelUpdateProgressBar" style="width:0%"></i></div>
+        <p id="modelUpdateError" class="hidden"></p>
+        <details><summary>更新紀錄</summary><pre id="modelUpdateLogs"></pre></details>
+      </div>
+      <p class="model-update-safety"><strong>安全更新：</strong>完整檔案驗證成功後才會使用；更新失敗或取消時，既有可用模型會保留。</p>
+      <div class="modal-actions model-update-actions">
+        <button id="skipModelUpdate" class="button ghost" type="button">略過此版本</button>
+        <button id="remindModelUpdate" class="button secondary" type="button">明天再提醒</button>
+        <button id="cancelModelUpdate" class="button ghost hidden" type="button">取消更新</button>
+        <button id="startModelUpdate" class="button primary" type="button">立即更新</button>
+      </div>
+    </section>
+  </div>
+
   <div id="gatewayModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="gatewayTitle">
     <div class="modal-backdrop" data-close-gateway></div>
     <section class="modal-card gateway-card">
@@ -587,6 +629,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260821-job-delete"></script>
+  <script src="/static/app.js?v=20260821-model-updates"></script>
 </body>
 </html>

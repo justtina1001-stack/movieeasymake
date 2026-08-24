@@ -24,6 +24,7 @@ from PIL import Image, ImageOps
 from comfy_client import ComfyClient
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids
 from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
+from model_updates import ModelUpdateError, ModelUpdateManager
 from music3 import (
     Music3Error,
     Music3Installer,
@@ -1717,12 +1718,14 @@ def create_app() -> web.Application:
         comfy.configure(updated)
 
     installer = EngineInstaller(APP_DIR, DATA_DIR, use_installed_engine)
+    model_updates = ModelUpdateManager(APP_DIR, DATA_DIR, lambda: settings.current)
     app = web.Application(client_max_size=2 * 1024**3)
     app["assets"] = assets
     app["comfy"] = comfy
     app["jobs"] = jobs
     app["settings"] = settings
     app["installer"] = installer
+    app["model_updates"] = model_updates
     app["music_installer"] = music_installer
     app["music_jobs"] = music_jobs
     app["shared_gateway"] = gateway
@@ -1807,6 +1810,45 @@ def create_app() -> web.Application:
         try:
             return web.json_response(await installer.cancel())
         except InstallerError as error:
+            return json_response_error(error)
+
+    async def model_update_status(_: web.Request) -> web.Response:
+        try:
+            return web.json_response(await asyncio.to_thread(model_updates.inspect))
+        except (ModelUpdateError, OSError, ValueError) as error:
+            return json_response_error(error)
+
+    async def start_model_update(_: web.Request) -> web.Response:
+        installer_active = installer.public_status().get("status") in {"starting", "running", "cancelling"}
+        if jobs.gpu_lock.locked() or comfy.is_starting or installer_active or music_installer.public_status()["active"]:
+            return json_response_error(
+                RequestError("目前有生成、引擎安裝或其他模型下載工作，請完成後再更新 H3 模型。"), 409
+            )
+        try:
+            return web.json_response(await model_updates.start(), status=202)
+        except (ModelUpdateError, OSError, ValueError) as error:
+            return json_response_error(error, 409)
+
+    async def cancel_model_update(_: web.Request) -> web.Response:
+        try:
+            return web.json_response(await model_updates.cancel())
+        except ModelUpdateError as error:
+            return json_response_error(error, 409)
+
+    async def set_model_update_preference(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            action = str(payload.get("action") or "").strip()
+            if action == "later":
+                result = model_updates.remind_later(payload.get("hours", 24))
+            elif action == "skip":
+                result = model_updates.skip_current()
+            elif action == "restore":
+                result = model_updates.restore_prompt()
+            else:
+                raise ModelUpdateError("不支援的模型更新選項。")
+            return web.json_response(result)
+        except (ModelUpdateError, json.JSONDecodeError, TypeError, ValueError) as error:
             return json_response_error(error)
 
     async def start_comfy(_: web.Request) -> web.Response:
@@ -2268,6 +2310,10 @@ def create_app() -> web.Application:
     app.router.add_get("/api/engine-installer/status", engine_installer_status)
     app.router.add_post("/api/engine-installer/start", start_engine_installer)
     app.router.add_post("/api/engine-installer/cancel", cancel_engine_installer)
+    app.router.add_get("/api/model-updates", model_update_status)
+    app.router.add_post("/api/model-updates/start", start_model_update)
+    app.router.add_post("/api/model-updates/cancel", cancel_model_update)
+    app.router.add_post("/api/model-updates/preference", set_model_update_preference)
     app.router.add_post("/api/comfy/start", start_comfy)
     app.router.add_post("/api/assets", upload)
     app.router.add_post("/api/replacement/prepare", prepare_replacement)

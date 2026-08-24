@@ -15,12 +15,7 @@ from engine_installer import (
     ALL_MODEL_FILES,
     COMFY_REPO,
     COMFY_REVISION,
-    MODEL_FILES,
-    MODEL_REPO,
-    MODEL_REVISION,
-    TURBO_LORA_FILES,
-    TURBO_LORA_REPO,
-    TURBO_LORA_REVISION,
+    MODEL_MANIFEST_FILES,
 )
 from runtime_env import check_python_executable
 
@@ -91,21 +86,21 @@ def main() -> None:
     model_root = target / "models"
     start_progress = 35
     progress_span = 58
-    for index, (relative, expected_size) in enumerate(ALL_MODEL_FILES):
-        destination = model_root / Path(relative)
-        progress = start_progress + round(index / len(ALL_MODEL_FILES) * progress_span)
-        event(progress, f"下載模型 {index + 1}/{len(ALL_MODEL_FILES)}：{destination.name}", current_file=destination.name)
-        if destination.is_file() and destination.stat().st_size == expected_size:
+    for index, item in enumerate(MODEL_MANIFEST_FILES):
+        destination = model_root / Path(item["target"])
+        progress = start_progress + round(index / len(MODEL_MANIFEST_FILES) * progress_span)
+        event(progress, f"下載模型 {index + 1}/{len(MODEL_MANIFEST_FILES)}：{destination.name}", current_file=destination.name)
+        if destination.is_file() and destination.stat().st_size == item["size"]:
             continue
         destination.parent.mkdir(parents=True, exist_ok=True)
-        turbo_file = (relative, expected_size) in TURBO_LORA_FILES
         downloaded = Path(hf_hub_download(
-            repo_id=TURBO_LORA_REPO if turbo_file else MODEL_REPO,
-            filename=relative.replace("\\", "/"),
-            revision=TURBO_LORA_REVISION if turbo_file else MODEL_REVISION,
+            repo_id=item["repo_id"],
+            filename=item["source"],
+            revision=item["revision"],
             local_dir=model_root,
+            force_download=destination.exists(),
         ))
-        if downloaded.stat().st_size != expected_size:
+        if downloaded.resolve() != destination.resolve() or downloaded.stat().st_size != item["size"]:
             raise RuntimeError(f"模型檔案大小不符：{destination.name}")
 
     event(94, "下載 MiniMax H3 授權文件")

@@ -92,6 +92,18 @@ GPU 主機先啟動自己的 H3 Studio，在右上角開啟「共享引擎」：
 
 `.gitignore` 已排除 `ComfyUI/`、模型快取、`H3Studio/config.json`、`H3Studio/data/`、虛擬環境及生成簡報。請勿強制加入任何 `.safetensors` 或同事不應取得的素材。
 
+## 模型更新中心
+
+H3 Studio 啟動時會讀取受 Git 追蹤的 `H3Studio/model_manifest.json`，並比對目前本機 ComfyUI 的模型檔案。當同事 `git pull` 取得較新的版本清單後，若本機缺少新版本檔案，介面會顯示更新提示；模型不會因為 Git 更新而自動下載或被刪除。
+
+- 「立即更新」才會開始下載，並在完成檔案大小驗證後啟用。
+- 「明天再提醒」與「略過此版本」只記錄在該電腦的 `H3Studio/data/model_update_preferences.json`，不會提交至 Git。
+- 下載取消或失敗時保留既有完整模型，之後可接續執行。
+- 遠端引擎使用者只會看到由 GPU 主機管理者更新的說明，不能從自己的電腦修改共享主機模型。
+- 一鍵安裝器與模型更新中心共用同一份版本清單，新安裝會直接取得目前清單指定的模型。
+
+發布新模型時應新增或修改版本化檔名、更新版本號／日期／說明／來源 revision／精確檔案大小，測試工作流後再提交 `model_manifest.json`。不要把 `.safetensors` 加入 Git。
+
 ## 測試
 
 ```powershell

@@ -82,6 +82,9 @@ let connectionSettings = null;
 let sharedGatewayStatus = null;
 let installerPreflightData = null;
 let lastInstallerStatus = "idle";
+let modelUpdateData = null;
+let lastModelUpdateStatus = "idle";
+let modelUpdateDismissedThisSession = false;
 let engineModelInventory = {};
 let musicMode = "instrumental";
 let musicModelsInstalled = false;
@@ -561,6 +564,114 @@ async function loadInstallerStatus() {
   const data = await api("/api/engine-installer/status");
   renderInstallerStatus(data);
   return data;
+}
+
+function closeModelUpdates() {
+  modelUpdateDismissedThisSession = true;
+  $("#modelUpdateModal").classList.add("hidden");
+}
+
+function renderModelUpdate(data, autoPrompt = false) {
+  modelUpdateData = data;
+  const installer = data.installer || {};
+  const currentStatus = installer.status || "idle";
+  const active = ["starting", "running", "cancelling"].includes(currentStatus);
+  const failed = currentStatus === "failed";
+  const state = $("#modelUpdateState");
+  let stateClass = "ready";
+  let icon = "✓";
+  let title = "模型已是目前版本";
+  let detail = data.version ? `版本 ${data.version}` : "沒有待處理的模型更新";
+  if (!data.supported) {
+    stateClass = "unavailable";
+    icon = "!";
+    title = "這台工作站無法直接更新模型";
+    detail = data.unavailable_reason || "請先設定本機 ComfyUI。";
+  } else if (active) {
+    stateClass = "available";
+    icon = "↓";
+    title = "模型正在更新";
+    detail = installer.step || `正在安裝版本 ${data.version}`;
+  } else if (failed) {
+    stateClass = "failed";
+    icon = "!";
+    title = "模型更新未完成";
+    detail = installer.error || "可查看紀錄後重新執行更新。";
+  } else if (data.update_available) {
+    stateClass = "available";
+    icon = "↑";
+    title = data.skipped ? "這個版本已設為略過" : data.deferred ? "這個版本已延後提醒" : "發現可用的模型更新";
+    detail = data.skipped
+      ? "仍可在這裡手動立即更新。"
+      : data.deferred ? `下次提醒：${new Date(data.remind_after).toLocaleString("zh-TW")}` : "由你決定是否下載；不會強制更新。";
+  }
+  state.className = `model-update-state ${stateClass}`;
+  $(".model-update-icon", state).textContent = icon;
+  $("#modelUpdateStateTitle").textContent = title;
+  $("#modelUpdateStateDetail").textContent = detail;
+
+  $("#modelUpdateToolbarDot").classList.toggle("hidden", !data.update_available);
+  $("#modelUpdateToolbarText").textContent = data.update_available ? "有模型更新" : "模型版本";
+  $("#modelUpdateRelease").classList.toggle("hidden", !data.version);
+  $("#modelUpdateChannel").textContent = String(data.channel || "stable").toUpperCase();
+  $("#modelUpdateReleaseTitle").textContent = data.title || "MiniMax H3 模型";
+  $("#modelUpdateVersion").textContent = data.version || "—";
+  $("#modelUpdatePublished").textContent = data.published_at ? `發布：${data.published_at}` : "";
+  $("#modelUpdateSummary").textContent = data.summary || "";
+  $("#modelUpdateChanges").innerHTML = (data.changes || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
+  $("#modelUpdateDownloadSize").textContent = data.update_available ? `${data.required_gb} GiB` : "0 GiB";
+  $("#modelUpdateDiskFree").textContent = data.disk_free_gb == null ? "遠端管理" : `${data.disk_free_gb} GiB`;
+  $("#modelUpdateFileCount").textContent = data.total_files ? `${data.ready_files} / ${data.total_files}` : "—";
+  $("#modelUpdateVram").textContent = data.recommended_vram_gb ? `${data.recommended_vram_gb} GB` : "依版本說明";
+
+  const showProgress = active || ["completed", "failed", "cancelled", "interrupted"].includes(currentStatus);
+  $("#modelUpdateProgress").classList.toggle("hidden", !showProgress);
+  const progress = Math.max(0, Math.min(100, Number(installer.progress) || 0));
+  $("#modelUpdateStep").textContent = installer.step || "準備更新";
+  $("#modelUpdatePercent").textContent = `${progress}%`;
+  $("#modelUpdateProgressBar").style.width = `${progress}%`;
+  $("#modelUpdateError").textContent = installer.error || "";
+  $("#modelUpdateError").classList.toggle("hidden", !installer.error);
+  $("#modelUpdateLogs").textContent = (installer.logs || []).join("\n");
+
+  $("#cancelModelUpdate").classList.toggle("hidden", !active);
+  $("#startModelUpdate").classList.toggle("hidden", !data.supported || !data.update_available || active);
+  $("#skipModelUpdate").classList.toggle("hidden", !data.supported || !data.update_available || active);
+  $("#remindModelUpdate").classList.toggle("hidden", !data.supported || !data.update_available || active);
+  if (currentStatus === "completed" && lastModelUpdateStatus !== "completed") {
+    toast(`模型 ${data.version} 更新完成`);
+    checkStatus().catch(error => console.warn(error));
+  }
+  lastModelUpdateStatus = currentStatus;
+  if (autoPrompt && data.should_prompt && !modelUpdateDismissedThisSession) {
+    $("#modelUpdateModal").classList.remove("hidden");
+  }
+}
+
+async function loadModelUpdateStatus(autoPrompt = false) {
+  const data = await api("/api/model-updates");
+  renderModelUpdate(data, autoPrompt);
+  return data;
+}
+
+async function openModelUpdates() {
+  modelUpdateDismissedThisSession = false;
+  $("#modelUpdateModal").classList.remove("hidden");
+  $("#modelUpdateState").className = "model-update-state checking";
+  $("#modelUpdateStateTitle").textContent = "正在檢查模型版本...";
+  $("#modelUpdateStateDetail").textContent = "比對版本清單與本機檔案";
+  await loadModelUpdateStatus(false);
+}
+
+async function setModelUpdatePreference(action) {
+  const data = await api("/api/model-updates/preference", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, hours: 24 }),
+  });
+  renderModelUpdate(data);
+  closeModelUpdates();
+  toast(action === "skip" ? `已略過模型版本 ${data.version}` : "將於明天再次提醒");
 }
 
 function chooseFiles(accept, multiple = false) {
@@ -1878,6 +1989,9 @@ function bindEvents() {
   $("#openConnectionSettings").addEventListener("click", async () => {
     try { await loadConnectionSettings(true); } catch (error) { toast(error.message, true); }
   });
+  $("#openModelUpdates").addEventListener("click", async () => {
+    try { await openModelUpdates(); } catch (error) { toast(error.message, true); }
+  });
   $("#openGatewaySettings").addEventListener("click", async () => {
     try { await loadGatewayStatus(true); } catch (error) { toast(error.message, true); }
   });
@@ -1949,10 +2063,34 @@ function bindEvents() {
     if (!$("#musicModal").classList.contains("hidden")) closeMusicStudio();
     else if (!$("#promptGuideModal").classList.contains("hidden")) closePromptGuide();
     else if (!$("#gatewayModal").classList.contains("hidden")) closeGatewaySettings();
+    else if (!$("#modelUpdateModal").classList.contains("hidden")) closeModelUpdates();
     else if (!$("#connectionModal").classList.contains("hidden")) closeConnectionSettings();
   });
   $$("[data-close-connection]").forEach(element => element.addEventListener("click", closeConnectionSettings));
+  $$("[data-close-model-update]").forEach(element => element.addEventListener("click", closeModelUpdates));
   $$("[data-close-gateway]").forEach(element => element.addEventListener("click", closeGatewaySettings));
+  $("#startModelUpdate").addEventListener("click", async () => {
+    const button = $("#startModelUpdate");
+    setButtonBusy(button, true);
+    try {
+      const data = await api("/api/model-updates/start", { method: "POST" });
+      renderModelUpdate(data);
+      toast("模型更新已開始；完整檔案會接續下載");
+    } catch (error) { toast(error.message, true); }
+    finally { setButtonBusy(button, false); }
+  });
+  $("#cancelModelUpdate").addEventListener("click", async () => {
+    try {
+      renderModelUpdate(await api("/api/model-updates/cancel", { method: "POST" }));
+      toast("模型更新已取消；已完成的檔案會保留");
+    } catch (error) { toast(error.message, true); }
+  });
+  $("#remindModelUpdate").addEventListener("click", async () => {
+    try { await setModelUpdatePreference("later"); } catch (error) { toast(error.message, true); }
+  });
+  $("#skipModelUpdate").addEventListener("click", async () => {
+    try { await setModelUpdatePreference("skip"); } catch (error) { toast(error.message, true); }
+  });
   $("#saveGatewaySettings").addEventListener("click", async () => {
     const button = $("#saveGatewaySettings");
     setButtonBusy(button, true);
@@ -2076,6 +2214,7 @@ function bindEvents() {
       engineStartingAt = 0;
       toast("引擎設定已儲存");
       await checkStatus();
+      await loadModelUpdateStatus(true);
     } catch (error) { toast(error.message, true); }
     finally { button.disabled = false; }
   });
@@ -2575,10 +2714,16 @@ function initialize() {
   renderStoryboards();
   updateSummary();
   loadConnectionSettings().catch(error => console.warn(error));
+  loadModelUpdateStatus(true).catch(error => console.warn("模型版本檢查失敗：", error));
   checkStatus();
   loadJobs(true);
   setInterval(checkStatus, 10000);
   setInterval(() => loadInstallerStatus().catch(error => console.warn(error)), 2500);
+  setInterval(() => {
+    const active = ["starting", "running", "cancelling"].includes(modelUpdateData?.installer?.status);
+    const modalOpen = !$("#modelUpdateModal").classList.contains("hidden");
+    if (active || modalOpen) loadModelUpdateStatus(false).catch(error => console.warn(error));
+  }, 2500);
   setInterval(() => engineStartingAt && showEngineStarting(), 1000);
   setInterval(loadJobs, 3000);
   setInterval(() => {

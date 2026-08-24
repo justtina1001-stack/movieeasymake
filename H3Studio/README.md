@@ -26,6 +26,7 @@ MiniMax H3 Studio 是 ComfyUI 的簡化操作介面，可使用本機 ComfyUI，
 - 本機／遠端 ComfyUI 切換；遠端輸出自動回存面板電腦
 - 共享 GPU Gateway：每位同事各自執行 H3 Studio，以個人金鑰共用主機 ComfyUI；素材、歷史、輸出與取消操作均依所有權隔離
 - 一鍵安裝本機 ComfyUI、CUDA PyTorch、五個 H3 基礎模型與三個壓縮 Turbo LoRA，支援中斷後續裝
+- 模型更新中心：啟動時依 Git 版本清單檢查本機模型，可選立即更新、明天再提醒或略過版本；遠端模式由 GPU 主機管理者處理
 - MiniMax Music 3 音樂工作室：歌曲／純音樂、官方三段式 Caption、自訂歌詞、時長、Seed、MP3／FLAC、試聽、下載、歷史與我的最愛
 
 ## MiniMax Music 3
