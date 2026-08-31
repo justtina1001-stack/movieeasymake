@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -56,9 +57,25 @@ def load_model_manifest(path: Path) -> dict[str, Any]:
             "source": source.as_posix(),
             "target": target.as_posix(),
             "size": size,
+            "sha256": str(item.get("sha256") or "").strip().lower() or None,
         })
+        if normalized[-1]["sha256"] and not re.fullmatch(r"[a-f0-9]{64}", normalized[-1]["sha256"]):
+            raise ModelUpdateError("模型檔案包含無效的 SHA-256。")
+    custom_nodes = []
+    for item in manifest.get("custom_nodes") or []:
+        if not isinstance(item, dict):
+            raise ModelUpdateError("自訂節點資料格式錯誤。")
+        repo_url = str(item.get("repo_url") or "").strip()
+        revision = str(item.get("revision") or "").strip().lower()
+        target = _safe_relative_path(item.get("target"))
+        if len(target.parts) != 1 or not repo_url.startswith("https://github.com/"):
+            raise ModelUpdateError("自訂節點包含不安全的來源或安裝路徑。")
+        if not re.fullmatch(r"[a-f0-9]{40}", revision):
+            raise ModelUpdateError("自訂節點缺少固定的 Git 提交版本。")
+        custom_nodes.append({"repo_url": repo_url, "revision": revision, "target": target.as_posix()})
     result = dict(manifest)
     result["files"] = normalized
+    result["custom_nodes"] = custom_nodes
     return result
 
 
@@ -127,6 +144,7 @@ class ModelUpdateManager:
         target, unavailable_reason = self._model_target()
         files: list[dict[str, Any]] = []
         missing_bytes = 0
+        custom_nodes: list[dict[str, Any]] = []
         if target:
             model_root = target / "models"
             for item in manifest["files"]:
@@ -142,7 +160,26 @@ class ModelUpdateManager:
                     "actual_bytes": actual_size,
                     "ready": ready,
                 })
-        update_available = bool(target and any(not item["ready"] for item in files))
+            for item in manifest["custom_nodes"]:
+                destination = target / "custom_nodes" / item["target"]
+                actual_revision = None
+                if (destination / ".git").is_dir():
+                    completed = subprocess.run(
+                        ["git", "-C", str(destination), "rev-parse", "HEAD"],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if completed.returncode == 0:
+                        actual_revision = completed.stdout.strip().lower()
+                custom_nodes.append({
+                    "target": item["target"],
+                    "revision": item["revision"],
+                    "actual_revision": actual_revision,
+                    "ready": actual_revision == item["revision"],
+                })
+        update_available = bool(target and (
+            any(not item["ready"] for item in files)
+            or any(not item["ready"] for item in custom_nodes)
+        ))
         deferred = False
         remind_after = preferences.get("remind_after")
         if remind_after:
@@ -177,10 +214,13 @@ class ModelUpdateManager:
             "disk_free_gb": round(disk_free / GIB, 1) if target else None,
             "ready_files": sum(1 for item in files if item["ready"]),
             "total_files": len(files),
+            "ready_custom_nodes": sum(1 for item in custom_nodes if item["ready"]),
+            "total_custom_nodes": len(custom_nodes),
             "installer": dict(self.status),
         }
         if include_files:
             result["files"] = files
+            result["custom_nodes"] = custom_nodes
         return result
 
     async def start(self) -> dict[str, Any]:

@@ -13,6 +13,7 @@ SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
 ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
 ASSET_TYPES = {"character", "creature", "object", "background", "style", "motion", "effect"}
 FORMATS = {"narrative", "dialogue", "commercial", "montage"}
+QUALITY_MODES = {"native", "turbo", "turbo_fast", "turbo_quality", "sparse_experimental"}
 SHOT_SIZES = {
     "wide": "wide establishing shot",
     "full": "full shot",
@@ -146,7 +147,8 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
     base["format"] = raw.get("format") if raw.get("format") in FORMATS else "narrative"
     base["aspect_ratio"] = raw.get("aspect_ratio") if raw.get("aspect_ratio") in ASPECT_RATIOS else "16:9"
     base["megapixels"] = _bounded_number(raw.get("megapixels"), 0.4, 0.2, 1.0)
-    base["quality_mode"] = "turbo" if raw.get("quality_mode") == "turbo" else "native"
+    quality_mode = _text(raw.get("quality_mode"), limit=40) or "native"
+    base["quality_mode"] = quality_mode if quality_mode in QUALITY_MODES else "native"
     base["target_duration"] = _bounded_number(raw.get("target_duration"), 30, 5, 3600)
     base["style"] = _text(raw.get("style"), limit=1000)
     base["synopsis"] = _text(raw.get("synopsis"), limit=5000)
@@ -349,6 +351,10 @@ def compile_shot_payload(
         "voice_mode": asset["voice_mode"],
     } for asset in referenced]
     use_reference_mode = bool(references or shot["storyboard_asset_id"] or prepared_continuation)
+    quality_mode = project["quality_mode"]
+    if use_reference_mode and quality_mode in {"turbo_fast", "turbo_quality", "sparse_experimental"}:
+        quality_mode = "turbo"
+        warnings.append("這個鏡頭使用 Ref2VA 素材，已自動改用相容的 Turbo 穩定模式。")
     payload: dict[str, Any] = {
         "mode": "r2v" if use_reference_mode else "t2v",
         "prompt_profile": "shortfilm",
@@ -359,7 +365,7 @@ def compile_shot_payload(
         "job_name": f"{project['title']}_{scene['title']}_{shot['title']}",
         "aspect_ratio": project["aspect_ratio"],
         "megapixels": project["megapixels"],
-        "quality_mode": project["quality_mode"],
+        "quality_mode": quality_mode,
         "duration": shot["duration"],
         "seed": shot["seed"],
         "steps": 20,

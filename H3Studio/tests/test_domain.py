@@ -81,6 +81,41 @@ class CompileRequestTests(unittest.TestCase):
         workflow = build_workflow(compiled, {}, "native")
         self.assertFalse(any(value["class_type"] in {"LoraLoaderModelOnly", "MiniMaxH3SigmaShift"} for value in workflow.values()))
 
+    def test_new_fast_768p_profile_uses_v11_four_step_lora(self):
+        payload = self.base()
+        payload.update({"quality_mode": "turbo_fast", "megapixels": 0.98})
+        compiled = compile_request(payload)
+        self.assertEqual(compiled.steps, 4)
+        self.assertEqual((compiled.shift_video, compiled.shift_audio), (6.0, 3.0))
+        self.assertIn("4step_v1.1_768p", compiled.turbo_lora)
+
+    def test_new_quality_768p_profile_uses_eight_steps(self):
+        payload = self.base()
+        payload.update({"quality_mode": "turbo_quality", "megapixels": 0.98})
+        compiled = compile_request(payload)
+        self.assertEqual(compiled.steps, 8)
+        self.assertIn("8step_v1.0_768p", compiled.turbo_lora)
+
+    def test_sparse_experimental_adds_memory_and_sparse_nodes(self):
+        payload = self.base()
+        payload.update({"quality_mode": "sparse_experimental", "megapixels": 0.98})
+        compiled = compile_request(payload)
+        workflow = build_workflow(compiled, {}, "sparse")
+        memory = next(value for value in workflow.values() if value["class_type"] == "H3MemoryOptimization")
+        sparse = next(value for value in workflow.values() if value["class_type"] == "H3SparseAttention")
+        self.assertEqual(memory["inputs"]["precision_mode"], "Auto")
+        self.assertEqual(sparse["inputs"]["video_budget"], 0.30)
+        self.assertTrue(sparse["inputs"]["denser_early_late_steps"])
+
+    def test_new_fl2v_only_profiles_reject_reference_mode(self):
+        payload = self.base("r2v")
+        payload.update({
+            "quality_mode": "turbo_quality",
+            "references": [{"alias": "小明", "type": "character", "image_asset_ids": [IMAGE_A]}],
+        })
+        with self.assertRaisesRegex(RequestError, "多模態參考"):
+            compile_request(payload)
+
     def test_fl2va_requires_a_keyframe(self):
         with self.assertRaisesRegex(RequestError, "至少需要一張"):
             compile_request(self.base("fl2va"))

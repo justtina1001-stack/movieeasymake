@@ -161,6 +161,11 @@ class ComfyClient:
                         available_loras = payload.get("LoraLoaderModelOnly", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
                         for profile, candidates in TURBO_LORA_CANDIDATES.items():
                             result[f"turbo_{profile}"] = any(candidate in available_loras for candidate in candidates)
+                optimizer_nodes = []
+                for node in ("H3MemoryOptimization", "H3SparseAttention"):
+                    async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
+                        optimizer_nodes.append(response.status == 200)
+                result["h3_optimizations"] = all(optimizer_nodes)
         except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
             pass
         self._model_cache = (time.monotonic() + 60, dict(result))

@@ -15,7 +15,10 @@ REFERENCE_SUBJECT_TYPES = {"character", "creature", "object"}
 
 TURBO_PROFILE_FL_544 = "fl2v_544"
 TURBO_PROFILE_FL_768 = "fl2v_768"
+TURBO_PROFILE_FL_768_FAST_V11 = "fl2v_768_fast_v11"
+TURBO_PROFILE_FL_768_QUALITY_V10 = "fl2v_768_quality_v10"
 TURBO_PROFILE_REF_544 = "ref2v_544"
+QUALITY_MODES = {"native", "turbo", "turbo_fast", "turbo_quality", "sparse_experimental"}
 TURBO_LORA_CANDIDATES: dict[str, tuple[str, ...]] = {
     TURBO_PROFILE_FL_544: (
         "minimax_h3_fl2v_lightx2v_turbo_8step_v1.0_resized_avg_rank_24_bf16.safetensors",
@@ -24,6 +27,12 @@ TURBO_LORA_CANDIDATES: dict[str, tuple[str, ...]] = {
     TURBO_PROFILE_FL_768: (
         "minimax_h3_fl2v_lightx2v_turbo_4step_v1.0_768p_resized_avg_rank_31_bf16.safetensors",
         "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+    ),
+    TURBO_PROFILE_FL_768_FAST_V11: (
+        "minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors",
+    ),
+    TURBO_PROFILE_FL_768_QUALITY_V10: (
+        "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
     ),
     TURBO_PROFILE_REF_544: (
         "minimax_h3_ref2v_lightx2v_turbo_4step_v0.1_resized_avg_rank_20_bf16.safetensors",
@@ -327,31 +336,43 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     if scheduler not in {"simple", "beta", "normal", "sgm_uniform", "karras"}:
         scheduler = "beta" if reference_mode else "simple"
     ref_image_size = "max" if payload.get("ref_image_size") == "max" else "match"
-    quality_mode = "turbo" if payload.get("quality_mode") == "turbo" else "native"
+    quality_mode = _clean_text(payload.get("quality_mode")) or "native"
+    if quality_mode not in QUALITY_MODES:
+        quality_mode = "native"
+    if reference_mode and quality_mode in {"turbo_fast", "turbo_quality", "sparse_experimental"}:
+        raise RequestError("這個新版加速模式目前只支援文生、首尾、續接與圖騰循環；多模態參考請改用 Turbo 穩定模式。")
     sampler_name = "res_multistep"
     turbo_profile = None
     turbo_lora = None
     turbo_lora_strength = 0.0
     shift_video = None
     shift_audio = None
-    if quality_mode == "turbo":
+    if quality_mode != "native":
         scheduler = "simple"
         sampler_name = "euler"
         turbo_lora_strength = 0.75
         shift_audio = 3.0
-        if reference_mode:
+        if quality_mode == "turbo" and reference_mode:
             steps = 4
             ref_image_size = "match"
             turbo_profile = TURBO_PROFILE_REF_544
             shift_video = 12.0
-        elif (width, height) == (1344, 768):
+        elif quality_mode == "turbo" and (width, height) == (1344, 768):
             steps = 4
             turbo_profile = TURBO_PROFILE_FL_768
             shift_video = 6.0
-        else:
+        elif quality_mode == "turbo":
             steps = 8
             turbo_profile = TURBO_PROFILE_FL_544
             shift_video = 12.0
+        elif quality_mode in {"turbo_fast", "sparse_experimental"}:
+            steps = 4
+            turbo_profile = TURBO_PROFILE_FL_768_FAST_V11
+            shift_video = 6.0
+        else:
+            steps = 8
+            turbo_profile = TURBO_PROFILE_FL_768_QUALITY_V10
+            shift_video = 6.0
         turbo_lora = TURBO_LORA_CANDIDATES[turbo_profile][0]
 
     base_prompt = _clean_text(payload.get("prompt"))
@@ -816,7 +837,7 @@ def build_workflow(
         else "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     )
     model = add("UNETLoader", {"unet_name": diffusion_model, "weight_dtype": "default"}, "MiniMax H3 Model")
-    if compiled.quality_mode == "turbo":
+    if compiled.quality_mode != "native":
         lora_name = turbo_lora_name or compiled.turbo_lora
         if not lora_name or compiled.shift_video is None or compiled.shift_audio is None:
             raise RequestError("Turbo 工作流缺少相容的 LoRA 或 Sigma Shift 設定。")
@@ -830,6 +851,23 @@ def build_workflow(
             "shift_video": compiled.shift_video,
             "shift_audio": compiled.shift_audio,
         }, "H3 Turbo Sigma Shift")
+        if compiled.quality_mode == "sparse_experimental":
+            model = add("H3MemoryOptimization", {
+                "model": [model, 0],
+                "fused_qkv": "auto",
+                "mlp_memory": "auto",
+                "chunk_rows": 4096,
+                "preserve_precision": True,
+                "precision_mode": "Auto",
+                "qkv_streaming_mode": "Auto",
+                "embedding_memory_mode": "Auto",
+                "kitchen_v_memory_mode": "Standard",
+            }, "H3 Memory Optimization")
+            model = add("H3SparseAttention", {
+                "model": [model, 0],
+                "video_budget": 0.30,
+                "denser_early_late_steps": True,
+            }, "H3 Sparse Attention · Experimental 30%")
     clip = add("CLIPLoader", {
         "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
         "type": "minimax",

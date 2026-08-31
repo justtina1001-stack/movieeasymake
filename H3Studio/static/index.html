@@ -115,7 +115,7 @@
             <label>Seed<div class="seed-row"><input id="seed" type="number" min="0" value="1"><button id="randomSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div></label>
           </div>
           <div class="quality-selector">
-            <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 快速預覽 · 自動最佳化</option></select></label>
+            <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 穩定版 · 自動適配</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1 768p</option><option value="turbo_quality">Turbo 新高品質 · 8-step 768p</option><option value="sparse_experimental">實驗性稀疏加速 · 4-step</option></select></label>
             <div><strong id="qualityModeTitle">原生品質模式</strong><span id="qualityModeHint">保留目前採樣設定，適合正式成品。</span></div>
           </div>
           <details class="advanced">
@@ -382,7 +382,7 @@
               <div class="form-grid three">
                 <label>畫面比例<select id="sfAspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label>
                 <label>解析度<select id="sfMegapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">原生畫質 · 0.98MP</option></select></label>
-                <label>生成品質<select id="sfQuality"><option value="native">原生品質</option><option value="turbo">Turbo 預覽</option></select></label>
+                <label>生成品質<select id="sfQuality"><option value="native">原生品質</option><option value="turbo">Turbo 穩定版</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1</option><option value="turbo_quality">Turbo 新高品質 · 8-step</option><option value="sparse_experimental">實驗性稀疏加速</option></select></label>
               </div>
               <label class="shortfilm-wide-field">視覺風格<input id="sfStyle" placeholder="例如：cinematic realism, warm tungsten lighting, restrained camera motion"></label>
               <label class="shortfilm-wide-field">故事大綱<textarea id="sfSynopsis" rows="4" placeholder="描述故事起點、衝突、轉折與結局；這裡只保存企劃，不會直接整段送給影片模型。"></textarea></label>
@@ -459,7 +459,7 @@
       <details id="localInstallerSection" class="local-installer">
         <summary><span><strong>這台電腦還沒有引擎？</strong><small>一鍵安裝 ComfyUI、CUDA PyTorch、MiniMax H3 與 Turbo LoRA</small></span><b>約 81 GiB</b></summary>
         <div class="installer-body">
-          <div class="installer-warning"><strong>安裝前注意</strong><span>基礎模型與壓縮 Turbo LoRA 約 60.2 GiB，下載與安裝可能需要很長時間。僅支援 Windows + NVIDIA GPU，建議至少 16 GB VRAM、64 GB RAM。</span></div>
+          <div class="installer-warning"><strong>安裝前注意</strong><span>基礎模型、Turbo LoRA 與加速節點約 63.8 GiB，下載與安裝可能需要很長時間。僅支援 Windows + NVIDIA GPU，建議至少 16 GB VRAM、64 GB RAM。</span></div>
           <button id="checkLocalEngine" class="button secondary small" type="button">檢查這台電腦</button>
           <div id="installerPreflight" class="installer-preflight muted">尚未檢查硬體與磁碟空間。</div>
           <label class="license-check"><input id="acceptH3License" type="checkbox"><span>我已閱讀並同意 <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE" target="_blank" rel="noreferrer">MiniMax H3 Community License</a>。</span></label>

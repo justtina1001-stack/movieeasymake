@@ -20,7 +20,9 @@ COMFY_REVISION = "0f1fa67ad8a68b62c65ebc97a7bf485df2459c3a"
 LICENSE_URL = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
 EXCLUDED_TERRITORIES = "歐盟、英國、韓國與美國"
 GIB = 1024**3
-MODEL_MANIFEST_FILES = tuple(load_model_manifest(Path(__file__).with_name("model_manifest.json"))["files"])
+MODEL_MANIFEST = load_model_manifest(Path(__file__).with_name("model_manifest.json"))
+MODEL_MANIFEST_FILES = tuple(MODEL_MANIFEST["files"])
+MODEL_MANIFEST_CUSTOM_NODES = tuple(MODEL_MANIFEST["custom_nodes"])
 ALL_MODEL_FILES: tuple[tuple[str, int], ...] = tuple(
     (item["target"], item["size"]) for item in MODEL_MANIFEST_FILES
 )
@@ -58,6 +60,27 @@ def model_state(target: Path) -> list[dict[str, Any]]:
             "expected_bytes": expected_size,
             "actual_bytes": actual_size,
             "ready": actual_size == expected_size,
+        })
+    return result
+
+
+def custom_node_state(target: Path) -> list[dict[str, Any]]:
+    result = []
+    for item in MODEL_MANIFEST_CUSTOM_NODES:
+        destination = target / "custom_nodes" / item["target"]
+        actual_revision = None
+        if (destination / ".git").is_dir():
+            completed = subprocess.run(
+                ["git", "-C", str(destination), "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if completed.returncode == 0:
+                actual_revision = completed.stdout.strip().lower()
+        result.append({
+            "target": item["target"],
+            "revision": item["revision"],
+            "actual_revision": actual_revision,
+            "ready": actual_revision == item["revision"],
         })
     return result
 
@@ -108,6 +131,7 @@ def system_memory_gb() -> float | None:
 def installer_preflight(target: Path) -> dict[str, Any]:
     existing_unknown = target.exists() and any(target.iterdir()) and not (target / "main.py").is_file()
     models = model_state(target)
+    custom_nodes = custom_node_state(target)
     missing_model_bytes = sum(item["expected_bytes"] for item in models if not item["ready"])
     environment = inspect_python_candidates([
         target / ".venv" / "Scripts" / "python.exe",
@@ -148,6 +172,7 @@ def installer_preflight(target: Path) -> dict[str, Any]:
         (target / "main.py").is_file()
         and environment_ready
         and all(item["ready"] for item in models)
+        and all(item["ready"] for item in custom_nodes)
     )
     return {
         "target": str(target),
@@ -167,6 +192,7 @@ def installer_preflight(target: Path) -> dict[str, Any]:
         "required_gb": round(required_bytes / GIB, 1),
         "missing_model_bytes": missing_model_bytes,
         "models": models,
+        "custom_nodes": custom_nodes,
         "license_url": LICENSE_URL,
         "excluded_territories": EXCLUDED_TERRITORIES,
     }

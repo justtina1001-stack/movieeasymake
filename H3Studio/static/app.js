@@ -512,7 +512,8 @@ function renderInstallerPreflight(data) {
   const lines = [];
   lines.push(`GPU：${data.gpu ? `${data.gpu.name} · ${data.gpu.vram_gb} GB VRAM` : "未偵測到 NVIDIA GPU"}`);
   lines.push(`記憶體：${data.ram_gb ?? "未知"} GB · 可用磁碟：${data.disk_free_gb} GiB`);
-  lines.push(`本次還需要：約 ${data.required_gb} GiB · 模型完成：${data.models.filter(item => item.ready).length} / ${data.models.length}`);
+  const customNodes = data.custom_nodes || [];
+  lines.push(`本次還需要：約 ${data.required_gb} GiB · 模型完成：${data.models.filter(item => item.ready).length} / ${data.models.length} · 加速節點：${customNodes.filter(item => item.ready).length} / ${customNodes.length}`);
   if (data.environment?.ready) lines.push(`✓ Python 環境可在這台電腦執行：${data.environment.executable}`);
   else if (data.environment_repair_required) lines.push("需要修復：偵測到從其他電腦複製來的 Python 環境；只會重建 .venv，不會刪除模型或生成檔。");
   if (data.installed) lines.push("✓ 這個資料夾已具備完整的 H3 本機引擎，可直接套用。");
@@ -627,7 +628,9 @@ function renderModelUpdate(data, autoPrompt = false) {
   $("#modelUpdateChanges").innerHTML = (data.changes || []).map(item => `<li>${escapeHtml(item)}</li>`).join("");
   $("#modelUpdateDownloadSize").textContent = data.update_available ? `${data.required_gb} GiB` : "0 GiB";
   $("#modelUpdateDiskFree").textContent = data.disk_free_gb == null ? "遠端管理" : `${data.disk_free_gb} GiB`;
-  $("#modelUpdateFileCount").textContent = data.total_files ? `${data.ready_files} / ${data.total_files}` : "—";
+  const modelCount = data.total_files ? `${data.ready_files} / ${data.total_files}` : "—";
+  const nodeCount = data.total_custom_nodes ? ` · 節點 ${data.ready_custom_nodes} / ${data.total_custom_nodes}` : "";
+  $("#modelUpdateFileCount").textContent = modelCount + nodeCount;
   $("#modelUpdateVram").textContent = data.recommended_vram_gb ? `${data.recommended_vram_gb} GB` : "依版本說明";
 
   const showProgress = active || ["completed", "failed", "cancelled", "interrupted"].includes(currentStatus);
@@ -812,12 +815,26 @@ function isReferenceMode(mode = state.mode) {
   return ["r2v", "replace", "popup_panel", "mg_animation"].includes(mode);
 }
 
-function turboProfile(width, height) {
+function turboProfile(width, height, qualityMode = $("#qualityMode").value) {
   if (isReferenceMode()) return {
     key: "ref2v_544",
     steps: 4,
     title: "Ref2VA Turbo · 4 steps",
     hint: "多模態參考加速；鎖定 Euler、simple、Shift 12/3 與 match。建議先用 0.4～0.7MP 預覽角色一致性。",
+  };
+  if (qualityMode === "turbo_fast" || qualityMode === "sparse_experimental") return {
+    key: "fl2v_768_fast_v11",
+    steps: 4,
+    title: qualityMode === "sparse_experimental" ? "實驗性稀疏加速 · 4 steps" : "FL2VA Turbo v1.1 768p · 4 steps",
+    hint: qualityMode === "sparse_experimental"
+      ? "使用 v1.1 768p LoRA、H3 記憶體最佳化與 30% 稀疏注意力；速度與品質會依顯卡及鏡頭而變化。"
+      : "新版快速 LoRA；鎖定 Euler、simple 與 Shift 6/3。以 0.9～0.98MP 最符合 768p 訓練尺寸。",
+  };
+  if (qualityMode === "turbo_quality") return {
+    key: "fl2v_768_quality_v10",
+    steps: 8,
+    title: "FL2VA Turbo 高品質 768p · 8 steps",
+    hint: "LightX2V Studio 採用的高品質版本；鎖定 Euler、simple 與 Shift 6/3，重視畫面和音訊穩定度。",
   };
   if (width === 1344 && height === 768) return {
     key: "fl2v_768",
@@ -834,19 +851,28 @@ function turboProfile(width, height) {
 }
 
 function syncQualityMode(width, height) {
-  const turbo = $("#qualityMode").value === "turbo";
-  const profile = turboProfile(width, height);
-  $("#steps").disabled = turbo;
-  $("#scheduler").disabled = turbo;
-  $("#refImageSize").disabled = turbo && isReferenceMode();
-  if (turbo) {
+  const select = $("#qualityMode");
+  const referenceMode = isReferenceMode();
+  const flOnlyModes = new Set(["turbo_fast", "turbo_quality", "sparse_experimental"]);
+  [...select.options].forEach(option => { option.disabled = referenceMode && flOnlyModes.has(option.value); });
+  if (referenceMode && flOnlyModes.has(select.value)) select.value = "turbo";
+  const qualityMode = select.value;
+  const accelerated = qualityMode !== "native";
+  const profile = turboProfile(width, height, qualityMode);
+  $("#steps").disabled = accelerated;
+  $("#scheduler").disabled = accelerated;
+  $("#refImageSize").disabled = accelerated && referenceMode;
+  if (accelerated) {
     $("#steps").value = profile.steps;
     $("#scheduler").value = "simple";
-    if (isReferenceMode()) $("#refImageSize").value = "match";
+    if (referenceMode) $("#refImageSize").value = "match";
     const availability = engineModelInventory[`turbo_${profile.key}`];
     const modelNote = availability === true ? " Turbo LoRA 已就緒。" : availability === false ? " 目前引擎尚未偵測到這個 Turbo LoRA。" : "";
+    const optimizerNote = qualityMode === "sparse_experimental"
+      ? engineModelInventory.h3_optimizations === true ? " 加速節點已就緒。" : " 尚未偵測到 H3-Optimizations，請先執行模型更新並重啟引擎。"
+      : "";
     $("#qualityModeTitle").textContent = profile.title;
-    $("#qualityModeHint").textContent = profile.hint + modelNote;
+    $("#qualityModeHint").textContent = profile.hint + modelNote + optimizerNote;
   } else {
     $("#qualityModeTitle").textContent = "原生品質模式";
     $("#qualityModeHint").textContent = "保留目前採樣設定，適合正式成品；不載入 Turbo LoRA。";
@@ -854,18 +880,19 @@ function syncQualityMode(width, height) {
 }
 
 function changeQualityMode() {
-  const turbo = $("#qualityMode").value === "turbo";
-  if (turbo) {
+  const accelerated = $("#qualityMode").value !== "native";
+  if (accelerated && !state.nativeSampling) {
     state.nativeSampling = {
       steps: Number($("#steps").value) || 20,
       scheduler: $("#scheduler").value,
       refImageSize: $("#refImageSize").value,
     };
-  } else {
+  } else if (!accelerated) {
     const saved = state.nativeSampling || {};
     $("#steps").value = saved.steps || 20;
     $("#scheduler").value = saved.scheduler || (isReferenceMode() ? "beta" : "simple");
     $("#refImageSize").value = saved.refImageSize || "match";
+    state.nativeSampling = null;
   }
   updateSummary();
 }

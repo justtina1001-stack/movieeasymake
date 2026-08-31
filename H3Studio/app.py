@@ -1539,13 +1539,20 @@ class JobManager:
                 self.update(job_id, status="preparing", progress=0)
                 await self.comfy.ensure_running()
                 turbo_lora_name = None
-                if compiled.quality_mode == "turbo":
+                if compiled.quality_mode != "native":
                     turbo_lora_name = await self.comfy.resolve_turbo_lora(compiled.turbo_profile)
                     if not turbo_lora_name:
                         raise RuntimeError(
-                            "Turbo 快速預覽需要對應的 H3 Turbo LoRA。"
+                            "所選生成品質需要對應的 H3 Turbo LoRA。"
                             "請在本機引擎安裝器補齊 Turbo 模型，或在遠端 ComfyUI 的 models/loras 安裝相容 LoRA。"
                         )
+                    if compiled.quality_mode == "sparse_experimental":
+                        inventory = await self.comfy.model_inventory()
+                        if not inventory.get("h3_optimizations"):
+                            raise RuntimeError(
+                                "實驗性稀疏加速需要 H3-Optimizations 節點。"
+                                "請先執行模型更新，並重新啟動 ComfyUI。"
+                            )
                 uploaded: dict[str, str] = {}
                 asset_ids = required_asset_ids(compiled)
                 for index, asset_id in enumerate(asset_ids, start=1):

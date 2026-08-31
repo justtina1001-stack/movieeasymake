@@ -68,13 +68,16 @@ def payload(mode: str, quality_mode: str = "native"):
 async def main():
     create_validation_video()
     try:
-        await nodes.init_extra_nodes(init_custom_nodes=False, init_api_nodes=False)
+        await nodes.init_extra_nodes(init_custom_nodes=True, init_api_nodes=False)
         cases = [
             ("t2v", "native", 0.4),
             ("t2v", "turbo", 0.4),
             ("t2v", "turbo", 0.98),
             ("fl2va", "turbo", 0.4),
             ("r2v", "turbo", 0.4),
+            ("t2v", "turbo_fast", 0.98),
+            ("fl2va", "turbo_quality", 0.98),
+            ("t2v", "sparse_experimental", 0.98),
         ]
         for mode, quality_mode, megapixels in cases:
             data = payload(mode, quality_mode)

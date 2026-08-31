@@ -42,7 +42,7 @@ H3 Studio 會在上方工具列清楚顯示目前角色：
 
 同事的 ComfyUI 必須自行安裝 MiniMax H3 節點與所需模型；模型檔不會從 Git 專案下載。
 
-也可以使用面板內的一鍵安裝器，自動安裝經本專案驗證的 ComfyUI、CUDA 13.0 PyTorch、五個 H3 基礎模型及三個壓縮 Turbo LoRA。模型下載約 60.2 GiB，連同程式、環境與暫存，建議安裝磁碟至少保留 81 GiB。下載可重複執行，已完成的模型檔會略過。
+也可以使用面板內的一鍵安裝器，自動安裝經本專案驗證的 ComfyUI、CUDA 13.0 PyTorch、五個 H3 基礎模型、五個 Turbo LoRA 及鎖定版本的 H3-Optimizations 節點。模型下載約 63.8 GiB，連同程式、環境與暫存，建議安裝磁碟至少保留 81 GiB。下載可重複執行，已完成的模型檔會略過。
 
 ### 使用你的電腦的模型
 
@@ -64,7 +64,7 @@ GPU 主機先啟動自己的 H3 Studio，在右上角開啟「共享引擎」：
 - 文生影片、首尾圖片、多模態參考、角色替換、圖騰循環、續接影片、彈窗面板動畫與 MG 動畫
 - 角色替換支援完整長片：超過 15 秒會智慧切段、加入 0.5 秒動作重疊、逐段替換並自動合併；預設重新掛回完整原聲，失敗後可從未完成片段接續。
 - 共用比例、解析度、時長、隨機 Seed 與進階採樣設定
-- 原生品質與 Turbo 快速預覽雙模式；自動配對 LoRA、步數、Euler、Sigma Shift 與參考圖精度
+- 原生品質、Turbo 穩定版、Turbo 4-step v1.1、新 8-step 768p 高品質與實驗性稀疏加速；自動配對 LoRA、步數、Euler、Sigma Shift 與參考圖精度
 - 角色、背景、物件、圖片、影片與選填聲音的名稱代號
 - 素材拖曳上傳、透明圖自動補螢光綠底、首尾圖擴邊適配
 - 任務命名、生成歷史、折疊預覽、搜尋與每頁 20 筆分頁
@@ -72,15 +72,17 @@ GPU 主機先啟動自己的 H3 Studio，在右上角開啟「共享引擎」：
 - 共用 GPU 安全 Gateway：個人金鑰、任務所有權、素材與輸出路徑隔離、帳號停用與金鑰換發
 - 工具列內建 MiniMax H3 官方提示詞指南，可依目前模式查閱素材代號、鏡頭、對白、聲音及老虎機動畫寫法
 
-## Turbo 快速預覽
+## Turbo 與實驗性加速
 
-「生成品質」可選擇原生品質或 Turbo 快速預覽。Turbo 會鎖定互相相容的設定，避免只改步數造成失敗：
+「生成品質」會鎖定互相相容的 LoRA 與採樣設定，避免只改步數造成失敗：
 
 - 文生、首尾、循環與續接：一般解析度使用 FL2VA 8-step；精確的 1344 × 768 使用 FL2VA 768p 4-step。
+- 「Turbo 新快速」使用 FL2VA 4-step v1.1 768p；「Turbo 新高品質」使用 LightX2V Studio 採用的 FL2VA 8-step v1.0 768p。兩者以 0.9～0.98MP 最符合訓練尺寸。
+- 「實驗性稀疏加速」使用 4-step v1.1、H3 Memory Optimization 與 30% video-attention budget；會改變模型運算與結果，請先用同一 Seed 做 A/B 測試。
 - 多模態、角色替換、彈窗面板與 MG：使用 Ref2VA 4-step，參考圖精度固定為 `match`。
 - 原生品質不載入 LoRA，保留原本採樣設定，建議用於最後正式輸出。
 
-本機一鍵安裝器會安裝 Kijai 轉換的低秩壓縮版本，以降低 16 GB 顯卡的額外負擔。遠端 ComfyUI 也必須在 `models/loras/` 具備對應的壓縮版或 LightX2V 完整版 LoRA，面板才會允許 Turbo 工作送出。
+本機一鍵安裝器會保留 Kijai 轉換的低秩壓縮穩定版，並加入 LightX2V 完整版的 4-step v1.1 與 8-step 768p LoRA。遠端 ComfyUI 也必須在 `models/loras/` 具備對應 LoRA；實驗模式還必須安裝 H3-Optimizations，面板才會允許工作送出。
 
 ## MiniMax H3 官方提示詞 Skill
 
@@ -94,7 +96,7 @@ GPU 主機先啟動自己的 H3 Studio，在右上角開啟「共享引擎」：
 
 ## 模型更新中心
 
-H3 Studio 啟動時會讀取受 Git 追蹤的 `H3Studio/model_manifest.json`，並比對目前本機 ComfyUI 的模型檔案。當同事 `git pull` 取得較新的版本清單後，若本機缺少新版本檔案，介面會顯示更新提示；模型不會因為 Git 更新而自動下載或被刪除。
+H3 Studio 啟動時會讀取受 Git 追蹤的 `H3Studio/model_manifest.json`，並比對目前本機 ComfyUI 的模型檔案與加速節點提交版本。當同事 `git pull` 取得較新的版本清單後，若本機缺少新版檔案或節點，介面會顯示更新提示；模型不會因為 Git 更新而自動下載或被刪除。
 
 - 「立即更新」才會開始下載，並在完成檔案大小驗證後啟用。
 - 「明天再提醒」與「略過此版本」只記錄在該電腦的 `H3Studio/data/model_update_preferences.json`，不會提交至 Git。

@@ -15,8 +15,10 @@ from engine_installer import (
     ALL_MODEL_FILES,
     COMFY_REPO,
     COMFY_REVISION,
+    MODEL_MANIFEST_CUSTOM_NODES,
     MODEL_MANIFEST_FILES,
 )
+from model_update_worker import install_custom_node, sha256
 from runtime_env import check_python_executable
 
 
@@ -44,6 +46,8 @@ def main() -> None:
     if args.dry_run:
         event(5, "乾跑：ComfyUI 程式")
         event(20, "乾跑：CUDA 13.0 PyTorch 與相依套件")
+        for item in MODEL_MANIFEST_CUSTOM_NODES:
+            event(25, f"乾跑：加速節點 {item['target']}")
         for index, (relative, _) in enumerate(ALL_MODEL_FILES, start=1):
             event(20 + round(index / len(ALL_MODEL_FILES) * 70), f"乾跑：模型 {index}/{len(ALL_MODEL_FILES)}", current_file=Path(relative).name)
         event(100, "乾跑完成")
@@ -83,6 +87,10 @@ def main() -> None:
     event(28, "安裝 ComfyUI 相依套件")
     run([str(python), "-m", "pip", "install", "-r", str(target / "requirements.txt")])
 
+    for index, item in enumerate(MODEL_MANIFEST_CUSTOM_NODES, start=1):
+        event(31, f"安裝加速節點 {index}/{len(MODEL_MANIFEST_CUSTOM_NODES)}：{item['target']}")
+        install_custom_node(target, item)
+
     model_root = target / "models"
     start_progress = 35
     progress_span = 58
@@ -100,7 +108,16 @@ def main() -> None:
             local_dir=model_root,
             force_download=destination.exists(),
         ))
-        if downloaded.resolve() != destination.resolve() or downloaded.stat().st_size != item["size"]:
+        if downloaded.resolve() != destination.resolve():
+            try:
+                downloaded.resolve().relative_to(model_root.resolve())
+                destination.resolve().relative_to(model_root.resolve())
+            except ValueError as error:
+                raise RuntimeError(f"模型下載位置超出模型資料夾：{destination.name}") from error
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            downloaded.replace(destination)
+            downloaded = destination
+        if downloaded.stat().st_size != item["size"]:
             raise RuntimeError(f"模型檔案大小不符：{destination.name}")
 
     event(94, "下載 MiniMax H3 授權文件")
@@ -127,6 +144,11 @@ def main() -> None:
         path = model_root / Path(relative)
         if not path.is_file() or path.stat().st_size != expected_size:
             raise RuntimeError(f"缺少模型：{path.name}")
+    for item in MODEL_MANIFEST_FILES:
+        if item.get("sha256"):
+            path = model_root / Path(item["target"])
+            if sha256(path) != item["sha256"]:
+                raise RuntimeError(f"模型檔案雜湊錯誤：{path.name}")
     event(100, "本機引擎安裝完成")
 
 

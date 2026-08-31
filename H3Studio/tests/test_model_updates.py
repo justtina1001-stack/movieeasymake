@@ -98,6 +98,44 @@ class ModelUpdateTests(unittest.TestCase):
             with self.assertRaises(ModelUpdateError):
                 load_model_manifest(path)
 
+    def test_manifest_accepts_pinned_github_custom_node(self):
+        with workspace() as folder:
+            path = folder / "model_manifest.json"
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "version": "nodes",
+                "files": [{
+                    "repo_id": "test/models", "revision": "abc", "source": "model.bin",
+                    "target": "model.bin", "size": 1,
+                }],
+                "custom_nodes": [{
+                    "repo_url": "https://github.com/example/h3-node.git",
+                    "revision": "a" * 40,
+                    "target": "h3-node",
+                }],
+            }), encoding="utf-8")
+            manifest = load_model_manifest(path)
+            self.assertEqual(manifest["custom_nodes"][0]["revision"], "a" * 40)
+
+    def test_manifest_rejects_unpinned_custom_node(self):
+        with workspace() as folder:
+            path = folder / "model_manifest.json"
+            path.write_text(json.dumps({
+                "schema_version": 1,
+                "version": "nodes",
+                "files": [{
+                    "repo_id": "test/models", "revision": "abc", "source": "model.bin",
+                    "target": "model.bin", "size": 1,
+                }],
+                "custom_nodes": [{
+                    "repo_url": "https://github.com/example/h3-node.git",
+                    "revision": "main",
+                    "target": "h3-node",
+                }],
+            }), encoding="utf-8")
+            with self.assertRaises(ModelUpdateError):
+                load_model_manifest(path)
+
 
 if __name__ == "__main__":
     unittest.main()
