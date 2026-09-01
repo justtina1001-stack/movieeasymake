@@ -197,6 +197,12 @@ input:focus, select:focus, textarea:focus { border-color: rgba(255,101,66,.66); 
 .retime-selector > div:last-child { display: flex; flex-direction: column; gap: 4px; }
 .retime-selector > div:last-child strong { color: var(--accent-2); font-size: 11px; }
 .retime-selector > div:last-child small { color: var(--muted); font-size: 9px; line-height: 1.45; }
+.frame-export-selector { display: grid; grid-template-columns: minmax(300px,1.35fr) minmax(240px,.65fr); gap: 14px; align-items: center; margin-top: 12px; padding: 13px 15px; border: 1px solid rgba(85,215,208,.18); border-radius: 14px; background: rgba(85,215,208,.035); }
+.frame-export-selector .check-option { padding: 0; border: 0; background: none; }
+.frame-export-selector > div { display: flex; flex-direction: column; gap: 4px; }
+.frame-export-selector > div strong { color: var(--cyan); font-size: 11px; }
+.frame-export-selector > div small { color: var(--muted); font-size: 9px; line-height: 1.45; }
+.shortfilm-export-option { margin-top: 14px; }
 input:disabled, select:disabled { opacity: .62; cursor: not-allowed; }
 .icon-button { width: 44px; height: 44px; margin-top: 7px; flex: none; border: 1px solid var(--line); background: #171c24; border-radius: 10px; cursor: pointer; }
 .advanced { margin-top: 17px; border-top: 1px solid var(--line); padding-top: 15px; }
@@ -874,7 +880,7 @@ body.ui-ready .studio-grid { animation-delay: 170ms; }
   .mode-grid { grid-template-columns: 1fr; }
   .studio-grid, .sticky-stack { display: block; }
   .sticky-stack > * { margin-top: 18px; }
-  .form-grid.four, .form-grid.three, .form-grid.two, .job-identity, .quality-selector, .retime-selector, .reference-body, .reference-head, .replacement-assets, .replacement-batch-options, .symbol-source-grid, .symbol-preview, .symbol-locks, .continuation-source-grid, .continuation-preview, .keyframe-options, .mg-reel-controls, .mg-text-grid { grid-template-columns: 1fr; }
+  .form-grid.four, .form-grid.three, .form-grid.two, .job-identity, .quality-selector, .retime-selector, .frame-export-selector, .reference-body, .reference-head, .replacement-assets, .replacement-batch-options, .symbol-source-grid, .symbol-preview, .symbol-locks, .continuation-source-grid, .continuation-preview, .keyframe-options, .mg-reel-controls, .mg-text-grid { grid-template-columns: 1fr; }
   .upload-pair, .upload-pair.portrait { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .upload-pair.portrait .upload-box { width: min(100%, 300px); }
   .flow-arrow { transform: rotate(90deg); }

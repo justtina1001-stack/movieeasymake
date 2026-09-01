@@ -741,6 +741,7 @@ function currentSettings() {
     megapixels: Number($("#megapixels").value),
     duration: Number($("#duration").value),
     retime_duration: $("#retimeEnabled").checked ? Number($("#retimeDuration").value) : null,
+    export_frames: $("#exportFrames").checked,
     seed: Number($("#seed").value),
     steps: Number($("#steps").value),
     scheduler: $("#scheduler").value,
@@ -786,6 +787,7 @@ function restoreForm() {
   $("#retimeEnabled").checked = hasRetime;
   if (hasRetime) $("#retimeDuration").value = form.retime_duration;
   $("#retimeDuration").disabled = !hasRetime;
+  $("#exportFrames").checked = form.export_frames === true;
 }
 
 function dimensions() {
@@ -943,7 +945,8 @@ function updateSummary() {
   const retimeDuration = Number($("#retimeDuration").value);
   const validRetime = retimeEnabled && Number.isFinite(retimeDuration) && retimeDuration >= 0.5 && retimeDuration <= 60;
   const retimeSuffix = validRetime ? ` → 節奏版 ${retimeDuration.toFixed(2)} 秒` : "";
-  $("#dimensionPreview").textContent = `預計輸出 ${width} × ${height} · 24 FPS · 約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}${retimeSuffix}`;
+  const frameSuffix = $("#exportFrames").checked ? " · 自動輸出 PNG 連續圖" : "";
+  $("#dimensionPreview").textContent = `預計輸出 ${width} × ${height} · 24 FPS · 約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}${retimeSuffix}${frameSuffix}`;
   $("#summaryMode").textContent = modeLabels[state.mode];
   $("#summarySize").textContent = `${width} × ${height}`;
   $("#summaryDuration").textContent = validRetime ? `原始 ${displayDuration.toFixed(2)} 秒 → 節奏 ${retimeDuration.toFixed(2)} 秒` : `約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}`;
@@ -1513,6 +1516,7 @@ async function applyJobRecipe(jobId) {
   $("#retimeEnabled").checked = hasRetime;
   if (hasRetime) $("#retimeDuration").value = raw.retime_duration;
   $("#retimeDuration").disabled = !hasRetime;
+  $("#exportFrames").checked = raw.export_frames === true;
   $("#jobName").value = recipe.job?.name || raw.job_name || "";
   state.modePrompts ||= {};
   state.modePrompts[mode] = raw.prompt || "";
@@ -1735,6 +1739,7 @@ async function loadJobs(force = false) {
       const executionLabel = executionSeconds === null ? "生成耗時尚未記錄" : `${active ? "已執行" : "生成耗時"} ${formatExecutionTime(executionSeconds)}`;
       const batchLabel = job.batch_type === "replace_long" ? ` · 完整長片 ${job.segments?.length || 0} 段` : "";
       const hasRetime = Boolean(job.retimed && job.original_local_output);
+      const frameSequence = job.frame_sequence && job.frame_sequence.filename ? job.frame_sequence : null;
       const durationLabel = hasRetime
         ? `原始 ${Number(job.original_duration).toFixed(2)} 秒 → 節奏版 ${Number(job.duration).toFixed(2)} 秒`
         : `影片 ${Number(job.duration).toFixed(2)} 秒`;
@@ -1748,12 +1753,13 @@ async function loadJobs(force = false) {
             <span class="job-chevron">⌄</span>
           </summary>
           <div class="job-detail">
-            <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small><small>生成執行時間：${escapeHtml(executionLabel)}</small>${hasRetime ? `<small>節奏處理：原始 ${Number(job.original_duration).toFixed(2)} 秒，已調整為 ${Number(job.duration).toFixed(2)} 秒</small>` : ""}${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
+            <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small><small>生成執行時間：${escapeHtml(executionLabel)}</small>${hasRetime ? `<small>節奏處理：原始 ${Number(job.original_duration).toFixed(2)} 秒，已調整為 ${Number(job.duration).toFixed(2)} 秒</small>` : ""}${frameSequence ? `<small>連續圖：${Number(frameSequence.frame_count)} 張 PNG · ${Number(frameSequence.width)}×${Number(frameSequence.height)} · ${Number(frameSequence.fps).toFixed(2)} FPS</small>` : ""}${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
             <div class="job-actions">
               <button class="button ghost" data-job-show-prompt="${job.id}" type="button">查看生成提示詞</button>
               <button class="button secondary" data-job-apply="${job.id}" type="button">快速套用</button>
               <button class="button ghost" data-job-rename="${job.id}" data-job-name="${escapeHtml(job.name || "")}" type="button">重新命名</button>
               ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>${hasRetime ? "下載節奏版" : "下載"}</a>${hasRetime ? `<a class="button ghost" href="/api/jobs/${job.id}/video?original=1&download=1" download>下載原始版</a>` : ""}` : ""}
+              ${frameSequence ? `<a class="button secondary" href="/api/jobs/${job.id}/frames" download>下載連續圖 ZIP</a>` : ""}
               ${active ? `<button class="button ghost" data-job-cancel="${job.id}" type="button">取消</button>` : ""}
               ${job.batch_type === "replace_long" && ["failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button secondary" data-job-resume="${job.id}" type="button">從未完成片段接續</button>` : ""}
               ${["completed", "failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button danger" data-job-delete="${job.id}" type="button">刪除項目</button>` : ""}
@@ -1764,6 +1770,7 @@ async function loadJobs(force = false) {
             ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
             ${job.merge_error ? `<div class="job-error">${escapeHtml(job.merge_error)}</div>` : ""}
             ${job.retime_error ? `<div class="job-error">${escapeHtml(job.retime_error)}</div>` : ""}
+            ${job.frame_export_error ? `<div class="job-error">${escapeHtml(job.frame_export_error)}</div>` : ""}
             ${job.status === "completed" ? `${hasRetime ? '<div class="job-video-label">節奏預覽版</div>' : ""}<video class="job-video" controls preload="none" data-src="/api/jobs/${job.id}/video"></video>` : ""}
           </div>
         </details>
@@ -2116,6 +2123,7 @@ function renderShortFilmWorkspace() {
   $("#sfAspectRatio").value = project.aspect_ratio || "16:9";
   $("#sfMegapixels").value = String(project.megapixels ?? 0.4);
   $("#sfQuality").value = project.quality_mode || "native";
+  $("#sfExportFrames").checked = project.export_frames === true;
   $("#sfStyle").value = project.style || "";
   $("#sfSynopsis").value = project.synopsis || "";
   renderShortFilmAssets();
@@ -2361,6 +2369,12 @@ function bindEvents() {
     });
     $(`#${id}`).addEventListener("change", scheduleShortFilmSave);
   });
+  $("#sfExportFrames").addEventListener("change", event => {
+    const project = activeShortFilmProject();
+    if (!project) return;
+    project.export_frames = event.target.checked;
+    scheduleShortFilmSave();
+  });
   $$("[data-sf-add-asset]").forEach(button => button.addEventListener("click", () => {
     const project = activeShortFilmProject();
     if (!project) return;
@@ -2532,6 +2546,7 @@ function bindEvents() {
     updateSummary();
     if (event.target.checked) $("#retimeDuration").focus();
   });
+  $("#exportFrames").addEventListener("change", updateSummary);
   $("#duration").addEventListener("change", refreshPromptTemplateIfUntouched);
   $("#qualityMode").addEventListener("change", changeQualityMode);
   ["aspectRatio", "megapixels", "keyframeFit"].forEach(id => {

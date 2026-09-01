@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import io
 import json
 import math
 import mimetypes
@@ -10,6 +11,7 @@ from fractions import Fraction
 import re
 import uuid
 import webbrowser
+import zipfile
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1094,6 +1096,45 @@ def extract_continuation_frame(path: Path, assets: AssetStore) -> dict[str, Any]
     return metadata
 
 
+def export_png_sequence(source_path: Path, archive_path: Path, name_prefix: str) -> dict[str, Any]:
+    """Decode every video frame into a portable PNG sequence ZIP."""
+    info = probe_video(source_path)
+    safe_prefix = output_filename_stem(name_prefix) or "frame"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    frame_count = 0
+    with zipfile.ZipFile(archive_path, mode="w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        with av.open(str(source_path)) as source:
+            if not source.streams.video:
+                raise RequestError("影片沒有可匯出的畫面。")
+            for frame_count, frame in enumerate(source.decode(video=0), start=1):
+                buffer = io.BytesIO()
+                frame.to_image().save(buffer, format="PNG", compress_level=3)
+                archive.writestr(
+                    f"{safe_prefix}/{safe_prefix}_{frame_count:06d}.png",
+                    buffer.getvalue(),
+                )
+        if not frame_count:
+            raise RequestError("影片沒有可匯出的畫面。")
+        manifest = {
+            "format": "PNG",
+            "frame_count": frame_count,
+            "fps": round(float(info["fps"]), 3),
+            "width": int(info["width"]),
+            "height": int(info["height"]),
+            "duration": round(float(info["duration"]), 3),
+            "filename_pattern": f"{safe_prefix}_%06d.png",
+        }
+        archive.writestr(
+            f"{safe_prefix}/sequence.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+    return {
+        **manifest,
+        "filename": archive_path.name,
+        "size": archive_path.stat().st_size,
+    }
+
+
 class JobManager:
     def __init__(self, assets: AssetStore, comfy: ComfyClient):
         self.assets = assets
@@ -1161,6 +1202,7 @@ class JobManager:
             "height": compiled.height,
             "duration": compiled.actual_duration,
             "retime_target_duration": normalize_retime_duration(raw_request.get("retime_duration")),
+            "export_frames": raw_request.get("export_frames") is True,
             "continuation_source_job": compiled.continuation_source_job,
             "continuation_merge": compiled.continuation_merge,
             "created_at": utc_now(),
@@ -1198,6 +1240,7 @@ class JobManager:
             "height": compiled.height,
             "duration": source_info["duration"],
             "retime_target_duration": normalize_retime_duration(raw_request.get("retime_duration")),
+            "export_frames": raw_request.get("export_frames") is True,
             "source_info": source_info,
             "segments": [{**segment, "status": "waiting", "child_job_id": None} for segment in segments],
             "active_child_id": None,
@@ -1253,6 +1296,25 @@ class JobManager:
             "duration": actual,
             "retimed": True,
         }
+
+    async def apply_frame_export(self, job_id: str, source_path: Path, output_stem: str) -> dict[str, Any]:
+        self.update(job_id, status="preparing", progress=99, current_node="匯出 PNG 連續圖")
+        archive_path = OUTPUT_DIR / f"{job_id}_frames.zip"
+        temporary = OUTPUT_DIR / f"{job_id}_frames.part.zip"
+        temporary.unlink(missing_ok=True)
+        try:
+            metadata = await asyncio.to_thread(
+                export_png_sequence,
+                source_path,
+                temporary,
+                output_stem,
+            )
+            temporary.replace(archive_path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        metadata["filename"] = archive_path.name
+        return {"frame_sequence": metadata}
 
     async def cache_output(self, job_id: str, output: dict[str, str], suffix: str | None = None) -> Path:
         content, _ = await self.comfy.fetch_output(output)
@@ -1312,6 +1374,12 @@ class JobManager:
                 updates.update(await self.apply_retime(job_id, final_path, output_stem, final_duration))
             except Exception as retime_error:
                 updates["retime_error"] = f"原始影片已完成，但節奏版處理失敗：{retime_error}"
+        if job.get("export_frames"):
+            try:
+                playback_path = OUTPUT_DIR / str(updates.get("local_output") or final_path.name)
+                updates.update(await self.apply_frame_export(job_id, playback_path, output_stem))
+            except Exception as frame_error:
+                updates["frame_export_error"] = f"影片已完成，但連續圖匯出失敗：{frame_error}"
         self.update(job_id, **updates)
 
     def finish_timing(self, job_id: str) -> dict[str, Any]:
@@ -1488,6 +1556,7 @@ class JobManager:
         payload = copy.deepcopy(raw_request)
         payload["replacement_auto_split"] = False
         payload["retime_duration"] = None
+        payload["export_frames"] = False
         payload["duration"] = float(segment["input_duration"])
         payload["job_name"] = f"{parent.get('name') or '角色替換'}_片段{int(segment['index']):02}"
         payload["replacement_batch_segment"] = {
@@ -1677,6 +1746,14 @@ class JobManager:
                     )
                 except Exception as retime_error:
                     completion_updates["retime_error"] = f"原始影片已完成，但節奏版處理失敗：{retime_error}"
+            if parent.get("export_frames"):
+                try:
+                    playback_path = OUTPUT_DIR / str(completion_updates.get("local_output") or final_path.name)
+                    completion_updates.update(
+                        await self.apply_frame_export(parent_id, playback_path, output_stem)
+                    )
+                except Exception as frame_error:
+                    completion_updates["frame_export_error"] = f"影片已完成，但連續圖匯出失敗：{frame_error}"
             self.update(
                 parent_id,
                 status="completed",
@@ -2464,6 +2541,23 @@ def create_app() -> web.Application:
         except Exception as error:
             return json_response_error(error, 502)
 
+    async def job_frames(request: web.Request) -> web.StreamResponse:
+        job = jobs.jobs.get(request.match_info["job_id"])
+        sequence = job.get("frame_sequence") if job else None
+        if not job or not isinstance(sequence, dict) or not sequence.get("filename"):
+            return json_response_error(RequestError("這筆工作尚未匯出連續圖。"), 404)
+        output_root = OUTPUT_DIR.resolve()
+        path = (output_root / Path(str(sequence["filename"])).name).resolve()
+        if path.parent != output_root or not path.is_file():
+            return json_response_error(RequestError("連續圖壓縮檔不存在。"), 404)
+        filename = f"{output_filename_stem(job.get('name'))}_連續圖.zip"
+        headers = {
+            "Content-Disposition": (
+                f'attachment; filename="frames.zip"; filename*=UTF-8\'\'{quote(filename, safe="")}'
+            )
+        }
+        return web.FileResponse(path, headers=headers)
+
     async def job_preview(request: web.Request) -> web.Response:
         job = jobs.jobs.get(request.match_info["job_id"])
         preview_path = JOB_DIR / f"{request.match_info['job_id']}.preview"
@@ -2646,6 +2740,7 @@ def create_app() -> web.Application:
     app.router.add_get("/api/jobs/{job_id}/recipe", job_recipe)
     app.router.add_get("/api/jobs/{job_id}/preview", job_preview)
     app.router.add_get("/api/jobs/{job_id}/video", job_video)
+    app.router.add_get("/api/jobs/{job_id}/frames", job_frames)
     app.router.add_get("/api/music/status", music_status)
     app.router.add_post("/api/music/install", install_music_models)
     app.router.add_post("/api/music/install/cancel", cancel_music_install)

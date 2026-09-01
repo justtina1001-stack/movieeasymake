@@ -80,6 +80,7 @@ def new_project(title: Any = "未命名短片") -> dict[str, Any]:
         "aspect_ratio": "16:9",
         "megapixels": 0.4,
         "quality_mode": "native",
+        "export_frames": False,
         "target_duration": 30.0,
         "style": "cinematic visual storytelling, coherent lighting, stable character identity",
         "synopsis": "",
@@ -150,6 +151,7 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
     base["megapixels"] = _bounded_number(raw.get("megapixels"), 0.4, 0.2, 1.0)
     quality_mode = _text(raw.get("quality_mode"), limit=40) or "native"
     base["quality_mode"] = quality_mode if quality_mode in QUALITY_MODES else "native"
+    base["export_frames"] = raw.get("export_frames") is True
     base["target_duration"] = _bounded_number(raw.get("target_duration"), 30, 5, 3600)
     base["style"] = _text(raw.get("style"), limit=1000)
     base["synopsis"] = _text(raw.get("synopsis"), limit=5000)
@@ -376,6 +378,7 @@ def compile_shot_payload(
         "quality_mode": quality_mode,
         "duration": shot["duration"],
         "retime_duration": shot.get("retime_duration"),
+        "export_frames": project.get("export_frames") is True,
         "seed": shot["seed"],
         "steps": 20,
         "scheduler": "beta" if use_reference_mode else "simple",

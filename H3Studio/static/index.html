@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260901-retime">
+  <link rel="stylesheet" href="/static/styles.css?v=20260901-frame-export">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -122,6 +122,10 @@
             <label class="check-option"><input id="retimeEnabled" type="checkbox"><span><strong>產生節奏預覽版</strong><small>H3 仍生成至少 5 秒；完成後另外輸出指定秒數，原始影片會保留。</small></span></label>
             <label id="retimeDurationWrap">節奏版長度<div class="field-unit"><input id="retimeDuration" type="number" min="0.5" max="60" step="0.1" value="2" disabled><span>秒</span></div></label>
             <div><strong id="retimeSummary">目前不調整速度</strong><small>影像維持 24 FPS，聲音會同步快放或慢放。</small></div>
+          </div>
+          <div class="frame-export-selector">
+            <label class="check-option"><input id="exportFrames" type="checkbox"><span><strong>完成後自動匯出 PNG 連續圖</strong><small>以最終播放版本逐幀輸出並打包成 ZIP；啟用節奏預覽時會匯出節奏版畫面。</small></span></label>
+            <div><strong>PNG · 六位數序號 · ZIP</strong><small>例如：任務名稱_000001.png；高解析度或長影片會使用較多磁碟空間。</small></div>
           </div>
           <details class="advanced">
             <summary>進階採樣設定</summary>
@@ -389,6 +393,7 @@
                 <label>解析度<select id="sfMegapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">原生畫質 · 0.98MP</option></select></label>
                 <label>生成品質<select id="sfQuality"><option value="native">原生品質</option><option value="turbo">Turbo 穩定版</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1</option><option value="turbo_quality">Turbo 新高品質 · 8-step</option><option value="sparse_experimental">實驗性稀疏加速</option></select></label>
               </div>
+              <label class="check-option shortfilm-export-option"><input id="sfExportFrames" type="checkbox"><span><strong>每個鏡頭完成後自動匯出 PNG 連續圖</strong><small>依各鏡頭最終節奏版本打包 ZIP，可從生成工作下載。</small></span></label>
               <label class="shortfilm-wide-field">視覺風格<input id="sfStyle" placeholder="例如：cinematic realism, warm tungsten lighting, restrained camera motion"></label>
               <label class="shortfilm-wide-field">故事大綱<textarea id="sfSynopsis" rows="4" placeholder="描述故事起點、衝突、轉折與結局；這裡只保存企劃，不會直接整段送給影片模型。"></textarea></label>
             </section>
@@ -728,6 +733,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260901-retime"></script>
+  <script src="/static/app.js?v=20260901-frame-export"></script>
 </body>
 </html>

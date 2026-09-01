@@ -19,6 +19,7 @@ from shortfilm import (
 class ShortFilmTests(unittest.TestCase):
     def test_shot_can_store_a_shorter_retime_preview_duration(self):
         project = new_project("節奏測試")
+        project["export_frames"] = True
         project["scenes"] = [{"title": "場次 1", "shots": [{
             "duration": 5,
             "retime_duration": 2,
@@ -35,6 +36,7 @@ class ShortFilmTests(unittest.TestCase):
         )
         self.assertEqual(payload["duration"], 5)
         self.assertEqual(payload["retime_duration"], 2)
+        self.assertTrue(payload["export_frames"])
 
     def project_with_shot(self) -> tuple[dict, dict, dict]:
         project = new_project("雨夜月台")

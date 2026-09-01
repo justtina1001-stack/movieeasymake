@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import json
+import zipfile
 from fractions import Fraction
 from pathlib import Path
 
@@ -10,6 +12,7 @@ from app import (
     AssetStore,
     extract_continuation_frame,
     extract_replacement_segment,
+    export_png_sequence,
     merge_continuation,
     merge_replacement_segments,
     replacement_segment_plan,
@@ -52,6 +55,21 @@ def make_video(path: Path, colors: list[tuple[int, int, int]], with_audio: bool 
 
 
 class ContinuationTests(unittest.TestCase):
+    def test_exports_numbered_png_sequence_zip_with_manifest(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP) as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            archive = root / "frames.zip"
+            make_video(source, [(255, 0, 0), (0, 255, 0), (0, 0, 255)])
+            metadata = export_png_sequence(source, archive, "測試動畫")
+            with zipfile.ZipFile(archive) as sequence:
+                names = sequence.namelist()
+                manifest = json.loads(sequence.read("測試動畫/sequence.json"))
+            self.assertEqual(metadata["frame_count"], 3)
+            self.assertIn("測試動畫/測試動畫_000001.png", names)
+            self.assertIn("測試動畫/測試動畫_000003.png", names)
+            self.assertEqual(manifest["filename_pattern"], "測試動畫_%06d.png")
+
     def test_retimes_video_and_audio_to_exact_preview_duration(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP) as directory:
             root = Path(directory)
