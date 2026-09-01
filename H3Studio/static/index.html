@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260901-shortfilm-thumbs">
+  <link rel="stylesheet" href="/static/styles.css?v=20260901-retime">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -117,6 +117,11 @@
           <div class="quality-selector">
             <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 穩定版 · 自動適配</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1 768p</option><option value="turbo_quality">Turbo 新高品質 · 8-step 768p</option><option value="sparse_experimental">實驗性稀疏加速 · 4-step</option></select></label>
             <div><strong id="qualityModeTitle">原生品質模式</strong><span id="qualityModeHint">保留目前採樣設定，適合正式成品。</span></div>
+          </div>
+          <div class="retime-selector">
+            <label class="check-option"><input id="retimeEnabled" type="checkbox"><span><strong>產生節奏預覽版</strong><small>H3 仍生成至少 5 秒；完成後另外輸出指定秒數，原始影片會保留。</small></span></label>
+            <label id="retimeDurationWrap">節奏版長度<div class="field-unit"><input id="retimeDuration" type="number" min="0.5" max="60" step="0.1" value="2" disabled><span>秒</span></div></label>
+            <div><strong id="retimeSummary">目前不調整速度</strong><small>影像維持 24 FPS，聲音會同步快放或慢放。</small></div>
           </div>
           <details class="advanced">
             <summary>進階採樣設定</summary>
@@ -723,6 +728,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260901-shortfilm-thumbs"></script>
+  <script src="/static/app.js?v=20260901-retime"></script>
 </body>
 </html>

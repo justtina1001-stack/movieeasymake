@@ -119,6 +119,7 @@ def new_shot(index: int = 1) -> dict[str, Any]:
         "id": uuid.uuid4().hex,
         "title": f"鏡頭 {index}",
         "duration": 5.0,
+        "retime_duration": None,
         "shot_size": "medium",
         "camera": "static",
         "camera_detail": "",
@@ -203,6 +204,13 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
                 "id": _id(shot_raw.get("id")),
                 "title": _text(shot_raw.get("title"), limit=80) or shot["title"],
                 "duration": _bounded_number(shot_raw.get("duration"), 5, 5, 15),
+                "retime_duration": (
+                    _bounded_number(shot_raw.get("retime_duration"), 5, 0.5, 60)
+                    if shot_raw.get("retime_duration") is not None
+                    and shot_raw.get("retime_duration") != ""
+                    and shot_raw.get("retime_duration") is not False
+                    else None
+                ),
                 "shot_size": shot_raw.get("shot_size") if shot_raw.get("shot_size") in SHOT_SIZES else "medium",
                 "camera": shot_raw.get("camera") if shot_raw.get("camera") in CAMERAS else "static",
                 "camera_detail": _text(shot_raw.get("camera_detail"), limit=800),
@@ -237,12 +245,12 @@ def flatten_shots(project: dict[str, Any]) -> list[tuple[dict[str, Any], dict[st
 def project_warnings(project: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     shots = flatten_shots(project)
-    total = sum(float(shot.get("duration") or 0) for _, shot in shots)
+    total = sum(float(shot.get("retime_duration") or shot.get("duration") or 0) for _, shot in shots)
     target = float(project.get("target_duration") or 0)
     if not shots:
         warnings.append("尚未建立任何分鏡鏡頭。")
     elif abs(total - target) > 1.0:
-        warnings.append(f"分鏡合計 {total:.1f} 秒，與目標 {target:.1f} 秒相差 {abs(total - target):.1f} 秒。")
+        warnings.append(f"分鏡合計（成品節奏）{total:.1f} 秒，與目標 {target:.1f} 秒相差 {abs(total - target):.1f} 秒。")
     aliases = {asset["alias"] for asset in project.get("assets", [])}
     for shot_index, (scene, shot) in enumerate(shots):
         label = f"{scene['title']}／{shot['title']}"
@@ -367,6 +375,7 @@ def compile_shot_payload(
         "megapixels": project["megapixels"],
         "quality_mode": quality_mode,
         "duration": shot["duration"],
+        "retime_duration": shot.get("retime_duration"),
         "seed": shot["seed"],
         "steps": 20,
         "scheduler": "beta" if use_reference_mode else "simple",

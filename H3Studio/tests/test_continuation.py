@@ -13,6 +13,7 @@ from app import (
     merge_continuation,
     merge_replacement_segments,
     replacement_segment_plan,
+    retime_video,
 )
 
 TEST_TEMP = Path(__file__).resolve().parents[1] / "data" / "test-temp"
@@ -51,6 +52,20 @@ def make_video(path: Path, colors: list[tuple[int, int, int]], with_audio: bool 
 
 
 class ContinuationTests(unittest.TestCase):
+    def test_retimes_video_and_audio_to_exact_preview_duration(self):
+        with tempfile.TemporaryDirectory(dir=TEST_TEMP) as directory:
+            root = Path(directory)
+            source = root / "source.mp4"
+            retimed = root / "retimed.mp4"
+            make_video(source, [(20, 30, 40)] * (5 * 24), with_audio=True)
+            duration = retime_video(source, retimed, 2.0)
+            with av.open(str(retimed)) as container:
+                frames = list(container.decode(video=0))
+                has_audio = bool(container.streams.audio)
+            self.assertEqual(len(frames), 2 * 24)
+            self.assertTrue(has_audio)
+            self.assertAlmostEqual(duration, 2.0)
+
     def test_extracts_last_frame_and_metadata(self):
         with tempfile.TemporaryDirectory(dir=TEST_TEMP) as directory:
             root = Path(directory)

@@ -740,6 +740,7 @@ function currentSettings() {
     aspect_ratio: $("#aspectRatio").value,
     megapixels: Number($("#megapixels").value),
     duration: Number($("#duration").value),
+    retime_duration: $("#retimeEnabled").checked ? Number($("#retimeDuration").value) : null,
     seed: Number($("#seed").value),
     steps: Number($("#steps").value),
     scheduler: $("#scheduler").value,
@@ -781,6 +782,10 @@ function restoreForm() {
   })) {
     if (value !== undefined && $(`#${id}`)) $(`#${id}`).value = value;
   }
+  const hasRetime = Number.isFinite(Number(form.retime_duration)) && Number(form.retime_duration) > 0;
+  $("#retimeEnabled").checked = hasRetime;
+  if (hasRetime) $("#retimeDuration").value = form.retime_duration;
+  $("#retimeDuration").disabled = !hasRetime;
 }
 
 function dimensions() {
@@ -934,10 +939,17 @@ function updateSummary() {
   const longReplacement = state.mode === "replace" && state.replacement.autoSplit && Number(state.replacement.videoInfo?.duration) > 15;
   const displayDuration = longReplacement ? Number(state.replacement.videoInfo.duration) : actualDuration();
   const segmentSuffix = longReplacement ? ` · 自動 ${state.replacement.segmentPlan.length} 段` : "";
-  $("#dimensionPreview").textContent = `預計輸出 ${width} × ${height} · 24 FPS · 約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}`;
+  const retimeEnabled = $("#retimeEnabled").checked;
+  const retimeDuration = Number($("#retimeDuration").value);
+  const validRetime = retimeEnabled && Number.isFinite(retimeDuration) && retimeDuration >= 0.5 && retimeDuration <= 60;
+  const retimeSuffix = validRetime ? ` → 節奏版 ${retimeDuration.toFixed(2)} 秒` : "";
+  $("#dimensionPreview").textContent = `預計輸出 ${width} × ${height} · 24 FPS · 約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}${retimeSuffix}`;
   $("#summaryMode").textContent = modeLabels[state.mode];
   $("#summarySize").textContent = `${width} × ${height}`;
-  $("#summaryDuration").textContent = `約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}`;
+  $("#summaryDuration").textContent = validRetime ? `原始 ${displayDuration.toFixed(2)} 秒 → 節奏 ${retimeDuration.toFixed(2)} 秒` : `約 ${displayDuration.toFixed(2)} 秒${segmentSuffix}`;
+  $("#retimeSummary").textContent = validRetime
+    ? `${displayDuration.toFixed(2)} 秒 → ${retimeDuration.toFixed(2)} 秒 · ${retimeDuration < displayDuration ? "加速" : "慢放"} ${(displayDuration / retimeDuration).toFixed(2)}×`
+    : retimeEnabled ? "請輸入 0.5～60 秒" : "目前不調整速度";
   const motionProfile = $("#motionProfile").value;
   $("#summaryMotion").textContent = `${motionLabels[motionProfile]} · ${$("#motionIntensity").value}`;
   $("#motionPresetHint").textContent = motionHints[motionProfile];
@@ -1497,6 +1509,10 @@ async function applyJobRecipe(jobId) {
   for (const [elementId, requestKey] of Object.entries(formFields)) {
     if (raw[requestKey] !== undefined && $(`#${elementId}`)) $(`#${elementId}`).value = raw[requestKey];
   }
+  const hasRetime = Number.isFinite(Number(raw.retime_duration)) && Number(raw.retime_duration) > 0;
+  $("#retimeEnabled").checked = hasRetime;
+  if (hasRetime) $("#retimeDuration").value = raw.retime_duration;
+  $("#retimeDuration").disabled = !hasRetime;
   $("#jobName").value = recipe.job?.name || raw.job_name || "";
   state.modePrompts ||= {};
   state.modePrompts[mode] = raw.prompt || "";
@@ -1718,7 +1734,11 @@ async function loadJobs(force = false) {
       const executionSeconds = jobExecutionSeconds(job);
       const executionLabel = executionSeconds === null ? "生成耗時尚未記錄" : `${active ? "已執行" : "生成耗時"} ${formatExecutionTime(executionSeconds)}`;
       const batchLabel = job.batch_type === "replace_long" ? ` · 完整長片 ${job.segments?.length || 0} 段` : "";
-      const subtitle = job.name ? `${fallbackName}${batchLabel} · ${date} · 影片 ${Number(job.duration).toFixed(2)} 秒 · ${executionLabel} · ${job.id.slice(0, 8)}` : `${date}${batchLabel} · 影片 ${Number(job.duration).toFixed(2)} 秒 · ${executionLabel} · ${job.id.slice(0, 8)}`;
+      const hasRetime = Boolean(job.retimed && job.original_local_output);
+      const durationLabel = hasRetime
+        ? `原始 ${Number(job.original_duration).toFixed(2)} 秒 → 節奏版 ${Number(job.duration).toFixed(2)} 秒`
+        : `影片 ${Number(job.duration).toFixed(2)} 秒`;
+      const subtitle = job.name ? `${fallbackName}${batchLabel} · ${date} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}` : `${date}${batchLabel} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}`;
       const open = active || expandedJobIds.has(job.id);
       return `
         <details class="job-card ${job.favorite ? "favorite" : ""}" data-job-id="${job.id}" ${open ? "open" : ""}>
@@ -1728,12 +1748,12 @@ async function loadJobs(force = false) {
             <span class="job-chevron">⌄</span>
           </summary>
           <div class="job-detail">
-            <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small><small>生成執行時間：${escapeHtml(executionLabel)}</small>${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
+            <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small><small>生成執行時間：${escapeHtml(executionLabel)}</small>${hasRetime ? `<small>節奏處理：原始 ${Number(job.original_duration).toFixed(2)} 秒，已調整為 ${Number(job.duration).toFixed(2)} 秒</small>` : ""}${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
             <div class="job-actions">
               <button class="button ghost" data-job-show-prompt="${job.id}" type="button">查看生成提示詞</button>
               <button class="button secondary" data-job-apply="${job.id}" type="button">快速套用</button>
               <button class="button ghost" data-job-rename="${job.id}" data-job-name="${escapeHtml(job.name || "")}" type="button">重新命名</button>
-              ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>下載</a>` : ""}
+              ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>${hasRetime ? "下載節奏版" : "下載"}</a>${hasRetime ? `<a class="button ghost" href="/api/jobs/${job.id}/video?original=1&download=1" download>下載原始版</a>` : ""}` : ""}
               ${active ? `<button class="button ghost" data-job-cancel="${job.id}" type="button">取消</button>` : ""}
               ${job.batch_type === "replace_long" && ["failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button secondary" data-job-resume="${job.id}" type="button">從未完成片段接續</button>` : ""}
               ${["completed", "failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button danger" data-job-delete="${job.id}" type="button">刪除項目</button>` : ""}
@@ -1743,7 +1763,8 @@ async function loadJobs(force = false) {
             <div class="job-recipe hidden" data-job-recipe-panel="${job.id}"><div class="job-recipe-heading"><strong>實際送給 AI 的生成提示詞</strong><button class="text-button" data-job-copy-prompt="${job.id}" type="button">複製提示詞</button></div><pre data-job-compiled-prompt></pre></div>
             ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
             ${job.merge_error ? `<div class="job-error">${escapeHtml(job.merge_error)}</div>` : ""}
-            ${job.status === "completed" ? `<video class="job-video" controls preload="none" data-src="/api/jobs/${job.id}/video"></video>` : ""}
+            ${job.retime_error ? `<div class="job-error">${escapeHtml(job.retime_error)}</div>` : ""}
+            ${job.status === "completed" ? `${hasRetime ? '<div class="job-video-label">節奏預覽版</div>' : ""}<video class="job-video" controls preload="none" data-src="/api/jobs/${job.id}/video"></video>` : ""}
           </div>
         </details>
       `;
@@ -2064,9 +2085,9 @@ function shortFilmFlatten(project) {
 function shortFilmWarnings(project) {
   const warnings = [];
   const shots = shortFilmFlatten(project);
-  const total = shots.reduce((sum, item) => sum + Number(item.shot.duration || 0), 0);
+  const total = shots.reduce((sum, item) => sum + Number(item.shot.retime_duration || item.shot.duration || 0), 0);
   if (!shots.length) warnings.push("尚未建立任何分鏡鏡頭。");
-  else if (Math.abs(total - Number(project.target_duration || 0)) > 1) warnings.push(`分鏡合計 ${total.toFixed(1)} 秒，與目標 ${Number(project.target_duration || 0).toFixed(1)} 秒不一致。`);
+  else if (Math.abs(total - Number(project.target_duration || 0)) > 1) warnings.push(`分鏡合計（成品節奏）${total.toFixed(1)} 秒，與目標 ${Number(project.target_duration || 0).toFixed(1)} 秒不一致。`);
   const aliases = new Set((project.assets || []).map(asset => asset.alias));
   shots.forEach(({ scene, shot }, index) => {
     const label = `${scene.title}／${shot.title}`;
@@ -2145,8 +2166,9 @@ function renderShortFilmScenes() {
         : '<div class="shortfilm-storyboard-placeholder">＋ 分鏡圖</div>';
       return `<article class="shortfilm-shot-card" data-sf-shot-id="${shot.id}">
         <div class="shortfilm-shot-heading"><div><span>SHOT ${String(shotIndex + 1).padStart(2, "0")}</span><input data-sf-shot-field="title" value="${escapeHtml(shot.title)}"></div><div class="shortfilm-shot-status ${escapeHtml(shot.status || "draft")}">${escapeHtml(statusLabel(shot.status || "draft"))}</div><button class="delete-button" type="button" data-sf-delete-shot>×</button></div>
-        <div class="form-grid three">
+        <div class="form-grid four">
           <label>時長<div class="field-unit"><input data-sf-shot-field="duration" type="number" min="5" max="15" step="0.5" value="${escapeHtml(shot.duration)}"><span>秒</span></div></label>
+          <label>節奏預覽<div class="field-unit"><input data-sf-shot-field="retime_duration" type="number" min="0.5" max="60" step="0.1" value="${escapeHtml(shot.retime_duration ?? "")}" placeholder="不變速"><span>秒</span></div><small class="field-help">留空即使用原始時長</small></label>
           <label>景別<select data-sf-shot-field="shot_size">${shotSizeOptions}</select></label>
           <label>運鏡<select data-sf-shot-field="camera">${cameraOptions}</select></label>
         </div>
@@ -2181,10 +2203,11 @@ function renderShortFilmSummary(extraWarnings = null) {
   const project = activeShortFilmProject();
   if (!project) return;
   const shots = shortFilmFlatten(project);
-  const total = shots.reduce((sum, item) => sum + Number(item.shot.duration || 0), 0);
+  const generatedTotal = shots.reduce((sum, item) => sum + Number(item.shot.duration || 0), 0);
+  const total = shots.reduce((sum, item) => sum + Number(item.shot.retime_duration || item.shot.duration || 0), 0);
   $("#sfSceneCount").textContent = project.scenes.length;
   $("#sfShotCount").textContent = shots.length;
-  $("#sfTimelineDuration").textContent = `${total.toFixed(1)} 秒`;
+  $("#sfTimelineDuration").textContent = Math.abs(generatedTotal - total) > 0.01 ? `${total.toFixed(1)} 秒（H3 生成 ${generatedTotal.toFixed(1)} 秒）` : `${total.toFixed(1)} 秒`;
   $("#sfCompletedCount").textContent = shots.filter(item => item.shot.status === "completed").length;
   const warnings = extraWarnings || shortFilmWarnings(project);
   $("#shortfilmWarnings").innerHTML = warnings.length
@@ -2430,7 +2453,11 @@ function bindEvents() {
     if (event.target.dataset.sfShotField && shotCard) {
       const shot = scene.shots.find(item => item.id === shotCard.dataset.sfShotId);
       const field = event.target.dataset.sfShotField;
-      if (shot) shot[field] = event.target.type === "checkbox" ? event.target.checked : ["duration", "seed"].includes(field) ? Number(event.target.value) : event.target.value;
+      if (shot) {
+        if (event.target.type === "checkbox") shot[field] = event.target.checked;
+        else if (field === "retime_duration") shot[field] = event.target.value === "" ? null : Number(event.target.value);
+        else shot[field] = ["duration", "seed"].includes(field) ? Number(event.target.value) : event.target.value;
+      }
     }
     renderShortFilmSummary(); scheduleShortFilmSave();
   });
@@ -2459,7 +2486,7 @@ function bindEvents() {
       } else if (event.target.closest("[data-sf-add-shot]")) {
         const globalIndex = shortFilmFlatten(project).length + 1;
         scene.shots.push({
-          id: uid(), title: `鏡頭 ${globalIndex}`, duration: 5, shot_size: "medium", camera: "static", camera_detail: "", action: "",
+          id: uid(), title: `鏡頭 ${globalIndex}`, duration: 5, retime_duration: null, shot_size: "medium", camera: "static", camera_detail: "", action: "",
           ending: "The subjects settle into a readable final pose and the final composition remains stable.", speaker_alias: "", dialogue_language: "Chinese", dialogue: "",
           sound: "Natural room tone and synchronized physical action sounds.", music: "N/A", asset_ids: [], storyboard_asset_id: null,
           continue_previous: false, continuation_asset_id: null, seed: Math.floor(Math.random() * Number.MAX_SAFE_INTEGER), job_id: null, status: "draft",
@@ -2496,9 +2523,14 @@ function bindEvents() {
     const card = event.target.closest(".mode-card");
     if (card) setMode(card.dataset.mode);
   });
-  ["aspectRatio", "megapixels", "duration", "seed", "steps", "scheduler", "refImageSize", "keyframeFit", "motionProfile", "motionIntensity", "physicsStyle", "cameraResponse", "prompt", "jobName"].forEach(id => {
+  ["aspectRatio", "megapixels", "duration", "retimeDuration", "seed", "steps", "scheduler", "refImageSize", "keyframeFit", "motionProfile", "motionIntensity", "physicsStyle", "cameraResponse", "prompt", "jobName"].forEach(id => {
     $(`#${id}`).addEventListener("input", updateSummary);
     $(`#${id}`).addEventListener("change", updateSummary);
+  });
+  $("#retimeEnabled").addEventListener("change", event => {
+    $("#retimeDuration").disabled = !event.target.checked;
+    updateSummary();
+    if (event.target.checked) $("#retimeDuration").focus();
   });
   $("#duration").addEventListener("change", refreshPromptTemplateIfUntouched);
   $("#qualityMode").addEventListener("change", changeQualityMode);

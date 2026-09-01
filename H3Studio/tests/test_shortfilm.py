@@ -17,6 +17,25 @@ from shortfilm import (
 
 
 class ShortFilmTests(unittest.TestCase):
+    def test_shot_can_store_a_shorter_retime_preview_duration(self):
+        project = new_project("節奏測試")
+        project["scenes"] = [{"title": "場次 1", "shots": [{
+            "duration": 5,
+            "retime_duration": 2,
+            "action": "角色快速進場並停在畫面中央。",
+        }]}]
+        normalized = normalize_project(project)
+        shot = normalized["scenes"][0]["shots"][0]
+        self.assertEqual(shot["duration"], 5)
+        self.assertEqual(shot["retime_duration"], 2)
+        payload, _ = compile_shot_payload(
+            normalized,
+            normalized["scenes"][0]["id"],
+            shot["id"],
+        )
+        self.assertEqual(payload["duration"], 5)
+        self.assertEqual(payload["retime_duration"], 2)
+
     def project_with_shot(self) -> tuple[dict, dict, dict]:
         project = new_project("雨夜月台")
         project["target_duration"] = 5

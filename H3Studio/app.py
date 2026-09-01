@@ -69,6 +69,8 @@ REPLACEMENT_MAX_INPUT_FRAMES = 15 * VIDEO_FPS
 REPLACEMENT_MAX_CORE_FRAMES = 14 * VIDEO_FPS
 REPLACEMENT_MIN_CORE_FRAMES = 5 * VIDEO_FPS
 REPLACEMENT_OVERLAP_FRAMES = VIDEO_FPS // 2
+MIN_RETIME_DURATION = 0.5
+MAX_RETIME_DURATION = 60.0
 
 
 def utc_now() -> str:
@@ -96,6 +98,20 @@ def clean_job_name(value: Any) -> str:
     if len(name) > MAX_JOB_NAME_LENGTH:
         raise RequestError(f"任務名稱最多 {MAX_JOB_NAME_LENGTH} 個字。")
     return name
+
+
+def normalize_retime_duration(value: Any) -> float | None:
+    if value is None or value == "" or value is False:
+        return None
+    try:
+        duration = float(value)
+    except (TypeError, ValueError) as error:
+        raise RequestError("節奏預覽秒數格式錯誤。") from error
+    if not math.isfinite(duration) or not MIN_RETIME_DURATION <= duration <= MAX_RETIME_DURATION:
+        raise RequestError(
+            f"節奏預覽秒數請設定在 {MIN_RETIME_DURATION:g} 到 {MAX_RETIME_DURATION:g} 秒之間。"
+        )
+    return round(duration, 3)
 
 
 def paginate_job_records(records: list[dict[str, Any]], page: int, page_size: int, query: str = "") -> dict[str, Any]:
@@ -632,6 +648,129 @@ def _path_has_audio(path: Path) -> bool:
         return False
 
 
+def _atempo_factors(speed: float) -> list[float]:
+    """Split a tempo ratio into high-quality FFmpeg atempo stages."""
+    factors: list[float] = []
+    remaining = float(speed)
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    if not math.isclose(remaining, 1.0, rel_tol=1e-6, abs_tol=1e-6) or not factors:
+        factors.append(remaining)
+    return factors
+
+
+def _retimed_audio_arrays(path: Path, speed: float):
+    """Yield pitch-preserving, stereo 48 kHz audio after tempo adjustment."""
+    with av.open(str(path)) as source:
+        if not source.streams.audio:
+            return
+        input_stream = source.streams.audio[0]
+        graph = av.filter.Graph()
+        source_node = graph.add_abuffer(template=input_stream)
+        current = source_node
+        for factor in _atempo_factors(speed):
+            tempo = graph.add("atempo", f"{factor:.8f}")
+            current.link_to(tempo)
+            current = tempo
+        sink = graph.add("abuffersink")
+        current.link_to(sink)
+        graph.configure()
+        resampler = av.AudioResampler(format="fltp", layout="stereo", rate=48000)
+
+        def drain():
+            while True:
+                try:
+                    filtered = sink.pull()
+                except (BlockingIOError, EOFError):
+                    return
+                for converted in resampler.resample(filtered):
+                    values = converted.to_ndarray()
+                    if values.shape[1]:
+                        yield values
+
+        for frame in source.decode(audio=0):
+            source_node.push(frame)
+            yield from drain()
+        source_node.push(None)
+        yield from drain()
+        for converted in resampler.resample(None):
+            values = converted.to_ndarray()
+            if values.shape[1]:
+                yield values
+
+
+def retime_video(source_path: Path, output_path: Path, target_duration: float) -> float:
+    """Retime a complete clip to an exact 24 fps preview duration without altering the source."""
+    target_duration = normalize_retime_duration(target_duration)
+    if target_duration is None:
+        raise RequestError("尚未設定節奏預覽秒數。")
+    info = probe_video(source_path)
+    source_duration = float(info["duration"])
+    target_frames = max(1, round(target_duration * VIDEO_FPS))
+    actual_duration = target_frames / VIDEO_FPS
+    speed = source_duration / actual_duration
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with av.open(str(output_path), mode="w") as output:
+        video = output.add_stream("libx264", rate=VIDEO_FPS)
+        video.width = int(info["width"])
+        video.height = int(info["height"])
+        video.pix_fmt = "yuv420p"
+        video.options = {"crf": "20", "preset": "fast"}
+        audio = None
+        if info["has_audio"]:
+            audio = output.add_stream("aac", rate=48000)
+            audio.layout = "stereo"
+            audio.bit_rate = 192000
+
+        source_last_time = max(0.0, source_duration - 1 / max(float(info["fps"]), 1.0))
+        desired_times = [
+            (index / (target_frames - 1) * source_last_time) if target_frames > 1 else 0.0
+            for index in range(target_frames)
+        ]
+        target_index = 0
+        previous = None
+        previous_time = 0.0
+        decoded = 0
+        with av.open(str(source_path)) as source:
+            input_stream = source.streams.video[0]
+            source_rate = float(input_stream.average_rate or input_stream.base_rate or VIDEO_FPS)
+            for frame in source.decode(video=0):
+                frame_time = float(frame.time) if frame.time is not None else decoded / source_rate
+                decoded += 1
+                while target_index < target_frames and desired_times[target_index] <= frame_time:
+                    selected = frame
+                    if previous is not None and abs(desired_times[target_index] - previous_time) <= abs(frame_time - desired_times[target_index]):
+                        selected = previous
+                    _encode_video_frame(output, video, selected, target_index)
+                    target_index += 1
+                previous = frame
+                previous_time = frame_time
+            if previous is None:
+                raise RequestError("影片沒有可調整節奏的畫面。")
+            while target_index < target_frames:
+                _encode_video_frame(output, video, previous, target_index)
+                target_index += 1
+        for packet in video.encode():
+            output.mux(packet)
+
+        if audio is not None:
+            target_samples = round(actual_duration * 48000)
+            _write_audio_values(
+                output,
+                audio,
+                _retimed_audio_arrays(source_path, speed),
+                target_samples,
+            )
+            for packet in audio.encode():
+                output.mux(packet)
+    return round(actual_duration, 3)
+
+
 def _padded_audio_arrays(path: Path, skip_samples: int, target_samples: int):
     written = 0
     for values in _audio_arrays(path, skip_samples, target_samples):
@@ -1021,6 +1160,7 @@ class JobManager:
             "width": compiled.width,
             "height": compiled.height,
             "duration": compiled.actual_duration,
+            "retime_target_duration": normalize_retime_duration(raw_request.get("retime_duration")),
             "continuation_source_job": compiled.continuation_source_job,
             "continuation_merge": compiled.continuation_merge,
             "created_at": utc_now(),
@@ -1057,6 +1197,7 @@ class JobManager:
             "width": compiled.width,
             "height": compiled.height,
             "duration": source_info["duration"],
+            "retime_target_duration": normalize_retime_duration(raw_request.get("retime_duration")),
             "source_info": source_info,
             "segments": [{**segment, "status": "waiting", "child_job_id": None} for segment in segments],
             "active_child_id": None,
@@ -1070,8 +1211,8 @@ class JobManager:
         self.tasks[job_id] = asyncio.create_task(self._run_replacement_batch(job_id, raw_request))
         return job
 
-    def local_output_path(self, job: dict[str, Any]) -> Path | None:
-        value = str(job.get("local_output") or "").strip()
+    def local_output_path(self, job: dict[str, Any], field: str = "local_output") -> Path | None:
+        value = str(job.get(field) or "").strip()
         if not value:
             return None
         output_root = OUTPUT_DIR.resolve()
@@ -1079,6 +1220,39 @@ class JobManager:
         if output_root not in path.parents or not path.exists():
             return None
         return path
+
+    async def apply_retime(
+        self,
+        job_id: str,
+        source_path: Path,
+        output_stem: str,
+        source_duration: float | None = None,
+    ) -> dict[str, Any]:
+        target = normalize_retime_duration(self.jobs[job_id].get("retime_target_duration"))
+        if target is None:
+            return {}
+        self.update(job_id, status="preparing", progress=99, current_node=f"調整影片節奏至 {target:g} 秒")
+        retimed_path = OUTPUT_DIR / f"{job_id}_retimed.mp4"
+        temporary = OUTPUT_DIR / f"{job_id}_retimed.part.mp4"
+        temporary.unlink(missing_ok=True)
+        try:
+            actual = await asyncio.to_thread(retime_video, source_path, temporary, target)
+            temporary.replace(retimed_path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+        original_duration = source_duration
+        if original_duration is None:
+            original_duration = float((await asyncio.to_thread(probe_video, source_path))["duration"])
+        target_label = f"{target:g}".replace(".", "_")
+        return {
+            "original_local_output": source_path.name,
+            "original_duration": round(float(original_duration), 3),
+            "local_output": retimed_path.name,
+            "download_name": f"{output_stem}_節奏{target_label}秒.mp4",
+            "duration": actual,
+            "retimed": True,
+        }
 
     async def cache_output(self, job_id: str, output: dict[str, str], suffix: str | None = None) -> Path:
         content, _ = await self.comfy.fetch_output(output)
@@ -1099,6 +1273,8 @@ class JobManager:
         continuation_path = await self.cache_output(job_id, output)
         job = self.jobs[job_id]
         output_stem = str(job.get("output_stem") or output_filename_stem(job.get("name")))
+        final_path = continuation_path
+        final_duration: float | None = compiled.actual_duration
         updates: dict[str, Any] = {
             "status": "completed",
             "progress": 100,
@@ -1127,8 +1303,15 @@ class JobManager:
                 updates["local_output"] = merged_path.name
                 updates["download_name"] = merged_name
                 updates["duration"] = merged_duration
+                final_path = merged_path
+                final_duration = merged_duration
             except Exception as merge_error:
                 updates["merge_error"] = f"續集片段已完成，但自動串接失敗：{merge_error}"
+        if job.get("retime_target_duration") is not None:
+            try:
+                updates.update(await self.apply_retime(job_id, final_path, output_stem, final_duration))
+            except Exception as retime_error:
+                updates["retime_error"] = f"原始影片已完成，但節奏版處理失敗：{retime_error}"
         self.update(job_id, **updates)
 
     def finish_timing(self, job_id: str) -> dict[str, Any]:
@@ -1304,6 +1487,7 @@ class JobManager:
     ) -> dict[str, Any]:
         payload = copy.deepcopy(raw_request)
         payload["replacement_auto_split"] = False
+        payload["retime_duration"] = None
         payload["duration"] = float(segment["input_duration"])
         payload["job_name"] = f"{parent.get('name') or '角色替換'}_片段{int(segment['index']):02}"
         payload["replacement_batch_segment"] = {
@@ -1480,6 +1664,19 @@ class JobManager:
             except Exception:
                 temporary.unlink(missing_ok=True)
                 raise
+            completion_updates: dict[str, Any] = {
+                "local_output": final_path.name,
+                "download_name": f"{output_stem}_角色替換完整影片.mp4",
+                "output": {"filename": final_path.name, "subfolder": "", "type": "local"},
+                "duration": duration,
+            }
+            if parent.get("retime_target_duration") is not None:
+                try:
+                    completion_updates.update(
+                        await self.apply_retime(parent_id, final_path, output_stem, duration)
+                    )
+                except Exception as retime_error:
+                    completion_updates["retime_error"] = f"原始影片已完成，但節奏版處理失敗：{retime_error}"
             self.update(
                 parent_id,
                 status="completed",
@@ -1487,10 +1684,7 @@ class JobManager:
                 current_node=None,
                 error=None,
                 active_child_id=None,
-                local_output=final_path.name,
-                download_name=f"{output_stem}_角色替換完整影片.mp4",
-                output={"filename": final_path.name, "subfolder": "", "type": "local"},
-                duration=duration,
+                **completion_updates,
                 **self.finish_timing(parent_id),
             )
         except asyncio.CancelledError:
@@ -2245,7 +2439,9 @@ def create_app() -> web.Application:
         if not job or (not job.get("output") and not jobs.local_output_path(job)):
             return json_response_error(RequestError("影片尚未完成。"), 404)
         try:
-            cached = jobs.local_output_path(job)
+            original_requested = request.query.get("original") == "1"
+            cached = jobs.local_output_path(job, "original_local_output") if original_requested else None
+            cached = cached or jobs.local_output_path(job)
             if cached:
                 content = await asyncio.to_thread(cached.read_bytes)
                 content_type = mimetypes.guess_type(cached.name)[0] or "video/mp4"
@@ -2255,7 +2451,12 @@ def create_app() -> web.Application:
             if request.query.get("download") == "1":
                 stored_filename = Path(job.get("download_name") or job["output"]["filename"]).name
                 suffix = Path(stored_filename).suffix or ".mp4"
-                filename = f"{output_filename_stem(job.get('name'))}{suffix}" if job.get("name") else stored_filename
+                if original_requested and job.get("original_local_output"):
+                    filename = f"{output_filename_stem(job.get('name'))}_原始版{suffix}"
+                elif job.get("retimed"):
+                    filename = stored_filename
+                else:
+                    filename = f"{output_filename_stem(job.get('name'))}{suffix}" if job.get("name") else stored_filename
                 headers["Content-Disposition"] = (
                     f'attachment; filename="video{suffix}"; filename*=UTF-8\'\'{quote(filename, safe="")}'
                 )
