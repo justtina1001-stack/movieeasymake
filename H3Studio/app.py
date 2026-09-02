@@ -34,13 +34,22 @@ from music3 import (
     clean_name as clean_music_name,
     filename_stem as music_filename_stem,
 )
+from voice import (
+    VoiceError,
+    VoiceInstaller,
+    VoiceJobManager,
+    clean_name as clean_voice_name,
+    filename_stem as voice_filename_stem,
+)
 from shared_gateway import GatewayError, SharedComfyGateway
 from shortfilm import (
     ShortFilmError,
     ShortFilmStore,
+    changed_reference_aliases,
     compile_shot_payload,
     flatten_shots,
     new_project,
+    project_job_records,
     project_warnings,
 )
 from settings import ConnectionSettings, SettingsError, SettingsStore
@@ -1161,6 +1170,16 @@ class JobManager:
             job.setdefault("name", "")
             job.setdefault("favorite", False)
             job.setdefault("hidden", False)
+            if "workspace" not in job:
+                job["workspace"] = "shortfilm" if job.get("shortfilm_project_id") else "quick"
+                request_path = JOB_DIR / f"{job.get('id')}.request.json"
+                if request_path.exists():
+                    try:
+                        old_request = json.loads(request_path.read_text(encoding="utf-8"))
+                        if old_request.get("prompt_profile") == "shortfilm":
+                            job["workspace"] = "shortfilm"
+                    except (OSError, json.JSONDecodeError):
+                        pass
             self.jobs[job["id"]] = job
 
     def _persist(self, job: dict[str, Any]) -> None:
@@ -1205,6 +1224,12 @@ class JobManager:
             "export_frames": raw_request.get("export_frames") is True,
             "continuation_source_job": compiled.continuation_source_job,
             "continuation_merge": compiled.continuation_merge,
+            "workspace": "shortfilm" if raw_request.get("prompt_profile") == "shortfilm" else "quick",
+            "shortfilm_project_id": str(raw_request.get("shortfilm_project_id") or "") or None,
+            "shortfilm_scene_id": str(raw_request.get("shortfilm_scene_id") or "") or None,
+            "shortfilm_shot_id": str(raw_request.get("shortfilm_shot_id") or "") or None,
+            "shortfilm_scene_title": str(raw_request.get("shortfilm_scene_title") or "") or None,
+            "shortfilm_shot_title": str(raw_request.get("shortfilm_shot_title") or "") or None,
             "created_at": utc_now(),
             "updated_at": utc_now(),
         }
@@ -1229,6 +1254,7 @@ class JobManager:
             "favorite": False,
             "hidden": False,
             "mode": "replace",
+            "workspace": "quick",
             "batch_type": "replace_long",
             "status": "queued",
             "progress": 0,
@@ -1992,6 +2018,8 @@ def create_app() -> web.Application:
     jobs = JobManager(assets, comfy)
     music_installer = Music3Installer(comfy)
     music_jobs = MusicJobManager(comfy, DATA_DIR, jobs.gpu_lock, music_installer)
+    voice_installer = VoiceInstaller(DATA_DIR)
+    voice_jobs = VoiceJobManager(DATA_DIR, jobs.gpu_lock, voice_installer, assets.path_for)
     gateway = SharedComfyGateway(DATA_DIR)
     shortfilms = ShortFilmStore(DATA_DIR / "shortfilms")
 
@@ -2015,6 +2043,8 @@ def create_app() -> web.Application:
     app["model_updates"] = model_updates
     app["music_installer"] = music_installer
     app["music_jobs"] = music_jobs
+    app["voice_installer"] = voice_installer
+    app["voice_jobs"] = voice_jobs
     app["shared_gateway"] = gateway
     app["shortfilms"] = shortfilms
 
@@ -2042,8 +2072,8 @@ def create_app() -> web.Application:
         return web.json_response(settings.current.public_dict())
 
     async def update_connection(request: web.Request) -> web.Response:
-        if jobs.gpu_lock.locked() or comfy.is_starting or music_installer.public_status()["active"]:
-            return json_response_error(RequestError("目前有影片／音樂正在生成或 Music 3 模型正在下載，請完成後再切換引擎。"), 409)
+        if jobs.gpu_lock.locked() or comfy.is_starting or music_installer.public_status()["active"] or voice_installer.public_status()["active"]:
+            return json_response_error(RequestError("目前有影片、音樂或語音正在生成，或模型仍在下載，請完成後再切換引擎。"), 409)
         try:
             payload = await request.json()
             updated = settings.update(payload)
@@ -2084,8 +2114,8 @@ def create_app() -> web.Application:
         return web.json_response(installer.public_status())
 
     async def start_engine_installer(request: web.Request) -> web.Response:
-        if jobs.gpu_lock.locked() or music_installer.public_status()["active"]:
-            return json_response_error(RequestError("目前有影片／音樂正在生成或 Music 3 模型正在下載，請完成後再安裝本機引擎。"), 409)
+        if jobs.gpu_lock.locked() or music_installer.public_status()["active"] or voice_installer.public_status()["active"]:
+            return json_response_error(RequestError("目前有影片、音樂或語音正在生成，或模型仍在下載，請完成後再安裝本機引擎。"), 409)
         try:
             payload = await request.json()
             target = resolve_install_target(payload.get("comfy_dir"), APP_DIR)
@@ -2108,7 +2138,7 @@ def create_app() -> web.Application:
 
     async def start_model_update(_: web.Request) -> web.Response:
         installer_active = installer.public_status().get("status") in {"starting", "running", "cancelling"}
-        if jobs.gpu_lock.locked() or comfy.is_starting or installer_active or music_installer.public_status()["active"]:
+        if jobs.gpu_lock.locked() or comfy.is_starting or installer_active or music_installer.public_status()["active"] or voice_installer.public_status()["active"]:
             return json_response_error(
                 RequestError("目前有生成、引擎安裝或其他模型下載工作，請完成後再更新 H3 模型。"), 409
             )
@@ -2315,11 +2345,32 @@ def create_app() -> web.Application:
             if shot.get("continue_previous"):
                 if shot_index == 0:
                     raise ShortFilmError("第一個鏡頭無法沿用上一鏡尾幀。")
-                previous_shot = flattened[shot_index - 1][1]
+                previous_scene, previous_shot = flattened[shot_index - 1]
                 previous_job_id = previous_shot.get("job_id")
                 previous_job = jobs.jobs.get(previous_job_id) if previous_job_id else None
                 if not previous_job or previous_job.get("status") != "completed" or not previous_job.get("output"):
                     raise ShortFilmError("上一個鏡頭尚未完成，暫時無法擷取尾幀。")
+                previous_expected, _ = compile_shot_payload(
+                    project,
+                    previous_scene["id"],
+                    previous_shot["id"],
+                    continuation_asset_id=previous_shot.get("continuation_asset_id"),
+                )
+                previous_request_path = JOB_DIR / f"{previous_job_id}.request.json"
+                try:
+                    previous_request = json.loads(previous_request_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    previous_request = {}
+                changed_aliases = changed_reference_aliases(
+                    previous_expected.get("references"),
+                    previous_request.get("references"),
+                )
+                if changed_aliases:
+                    changed_labels = "、".join(f"「{alias}」" for alias in changed_aliases)
+                    raise ShortFilmError(
+                        f"上一鏡使用的是舊版或不同參考素材（{changed_labels}）。"
+                        "為避免開頭先出現舊 AI 畫面，請先重新生成上一鏡，再續接這一鏡。"
+                    )
                 valid_cached_asset = False
                 if continuation_asset_id:
                     try:
@@ -2342,6 +2393,13 @@ def create_app() -> web.Application:
                 shot_id,
                 continuation_asset_id=continuation_asset_id,
             )
+            raw_payload.update({
+                "shortfilm_project_id": project_id,
+                "shortfilm_scene_id": scene["id"],
+                "shortfilm_shot_id": shot_id,
+                "shortfilm_scene_title": scene.get("title") or "場次",
+                "shortfilm_shot_title": shot.get("title") or "鏡頭",
+            })
             compiled = compile_request(raw_payload)
             for asset_id in required_asset_ids(compiled):
                 assets.path_for(asset_id)
@@ -2354,7 +2412,8 @@ def create_app() -> web.Application:
                 "warnings": [*project_warnings(project), *warnings],
             })
         except (ShortFilmError, RequestError, json.JSONDecodeError, OSError, ValueError) as error:
-            return json_response_error(error, 409 if "尚未完成" in str(error) else 400)
+            conflict = "尚未完成" in str(error) or "重新生成上一鏡" in str(error)
+            return json_response_error(error, 409 if conflict else 400)
 
     async def compile_api(request: web.Request) -> web.Response:
         try:
@@ -2401,7 +2460,13 @@ def create_app() -> web.Application:
             return json_response_error(error)
 
     async def list_jobs(request: web.Request) -> web.Response:
-        ordered = sort_job_records(job for job in jobs.jobs.values() if not job.get("hidden"))
+        records = [job for job in jobs.jobs.values() if not job.get("hidden")]
+        if request.query.get("workspace") == "quick":
+            records = [
+                job for job in records
+                if job.get("workspace") != "shortfilm" and not job.get("shortfilm_project_id")
+            ]
+        ordered = sort_job_records(records)
         if not any(key in request.query for key in ("page", "page_size", "q")):
             return web.json_response(ordered[:50])
         try:
@@ -2410,6 +2475,23 @@ def create_app() -> web.Application:
         except ValueError:
             raise web.HTTPBadRequest(text=json.dumps({"error": "頁碼格式錯誤。"}, ensure_ascii=False), content_type="application/json")
         return web.json_response(paginate_job_records(ordered, page, page_size, request.query.get("q", "")))
+
+    async def list_shortfilm_jobs(request: web.Request) -> web.Response:
+        try:
+            project = shortfilms.get(request.match_info["project_id"])
+            page = max(1, int(request.query.get("page", "1")))
+            page_size = min(20, max(1, int(request.query.get("page_size", "20"))))
+            ordered = sort_job_records(
+                job for job in project_job_records(project, jobs.jobs.values())
+                if not job.get("hidden")
+            )
+            return web.json_response(
+                paginate_job_records(ordered, page, page_size, request.query.get("q", ""))
+            )
+        except ShortFilmError as error:
+            return json_response_error(error, 404)
+        except ValueError:
+            return json_response_error(ShortFilmError("頁碼格式錯誤。"), 400)
 
     async def job_options(_: web.Request) -> web.Response:
         ordered = sort_job_records(job for job in jobs.jobs.values() if not job.get("hidden"))
@@ -2653,6 +2735,83 @@ def create_app() -> web.Application:
             )
         return web.FileResponse(path, headers=headers)
 
+    async def voice_status(_: web.Request) -> web.Response:
+        return web.json_response(voice_installer.public_status())
+
+    async def install_voice_model(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            return web.json_response(await voice_installer.start(str(payload.get("mode") or "custom")), status=202)
+        except (VoiceError, json.JSONDecodeError) as error:
+            return json_response_error(error, 409)
+
+    async def cancel_voice_install(_: web.Request) -> web.Response:
+        return web.json_response(await voice_installer.cancel())
+
+    async def list_voice_jobs(request: web.Request) -> web.Response:
+        try:
+            page = max(1, int(request.query.get("page", "1")))
+            page_size = min(20, max(1, int(request.query.get("page_size", "20"))))
+        except ValueError:
+            return json_response_error(VoiceError("頁碼格式錯誤。"))
+        return web.json_response(voice_jobs.list_page(page, page_size))
+
+    async def create_voice_job(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            return web.json_response(voice_jobs.create(payload), status=202)
+        except (VoiceError, json.JSONDecodeError, OSError, ValueError) as error:
+            return json_response_error(error)
+
+    async def cancel_voice_job(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await voice_jobs.cancel(request.match_info["job_id"]))
+        except VoiceError as error:
+            return json_response_error(error, 404)
+
+    async def resume_voice_job(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(voice_jobs.resume(request.match_info["job_id"]), status=202)
+        except (VoiceError, OSError, json.JSONDecodeError) as error:
+            return json_response_error(error, 409)
+
+    async def rename_voice_job(request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        if job_id not in voice_jobs.jobs:
+            return json_response_error(VoiceError("找不到語音工作。"), 404)
+        try:
+            payload = await request.json()
+            voice_jobs.update(job_id, name=clean_voice_name(payload.get("name")))
+            return web.json_response(voice_jobs.jobs[job_id])
+        except (VoiceError, json.JSONDecodeError) as error:
+            return json_response_error(error)
+
+    async def favorite_voice_job(request: web.Request) -> web.Response:
+        job_id = request.match_info["job_id"]
+        if job_id not in voice_jobs.jobs:
+            return json_response_error(VoiceError("找不到語音工作。"), 404)
+        try:
+            payload = await request.json()
+            if not isinstance(payload.get("favorite"), bool):
+                raise VoiceError("我的最愛狀態格式錯誤。")
+            voice_jobs.update(job_id, favorite=payload["favorite"])
+            return web.json_response(voice_jobs.jobs[job_id])
+        except (VoiceError, json.JSONDecodeError) as error:
+            return json_response_error(error)
+
+    async def voice_audio(request: web.Request) -> web.Response:
+        job = voice_jobs.jobs.get(request.match_info["job_id"])
+        path = voice_jobs.local_output_path(job or {})
+        if not job or not path:
+            return json_response_error(VoiceError("語音尚未完成或檔案不存在。"), 404)
+        headers = {}
+        if request.query.get("download") == "1":
+            download_name = f"{voice_filename_stem(job.get('name'))}.wav"
+            headers["Content-Disposition"] = (
+                f'attachment; filename="voice.wav"; filename*=UTF-8\'\'{quote(download_name, safe="")}'
+            )
+        return web.FileResponse(path, headers=headers)
+
     def require_gateway_admin() -> None:
         if settings.current.studio_role != "host":
             raise web.HTTPForbidden(
@@ -2727,6 +2886,7 @@ def create_app() -> web.Application:
     app.router.add_put("/api/shortfilms/{project_id}", update_shortfilm)
     app.router.add_delete("/api/shortfilms/{project_id}", delete_shortfilm)
     app.router.add_post("/api/shortfilms/{project_id}/shots/{shot_id}/compile", compile_shortfilm_shot)
+    app.router.add_get("/api/shortfilms/{project_id}/jobs", list_shortfilm_jobs)
     app.router.add_post("/api/compile", compile_api)
     app.router.add_post("/api/render", render)
     app.router.add_get("/api/jobs", list_jobs)
@@ -2751,6 +2911,16 @@ def create_app() -> web.Application:
     app.router.add_post("/api/music/jobs/{job_id}/rename", rename_music_job)
     app.router.add_post("/api/music/jobs/{job_id}/favorite", favorite_music_job)
     app.router.add_get("/api/music/jobs/{job_id}/audio", music_audio)
+    app.router.add_get("/api/voice/status", voice_status)
+    app.router.add_post("/api/voice/install", install_voice_model)
+    app.router.add_post("/api/voice/install/cancel", cancel_voice_install)
+    app.router.add_get("/api/voice/jobs", list_voice_jobs)
+    app.router.add_post("/api/voice/jobs", create_voice_job)
+    app.router.add_post("/api/voice/jobs/{job_id}/cancel", cancel_voice_job)
+    app.router.add_post("/api/voice/jobs/{job_id}/resume", resume_voice_job)
+    app.router.add_post("/api/voice/jobs/{job_id}/rename", rename_voice_job)
+    app.router.add_post("/api/voice/jobs/{job_id}/favorite", favorite_voice_job)
+    app.router.add_get("/api/voice/jobs/{job_id}/audio", voice_audio)
     app.router.add_get("/api/gateway/status", gateway_status)
     app.router.add_post("/api/gateway/settings", update_gateway_settings)
     app.router.add_post("/api/gateway/users", create_gateway_user)
@@ -2777,9 +2947,14 @@ def create_app() -> web.Application:
     async def cleanup_gateway(_: web.Application) -> None:
         await gateway.stop()
 
+    async def cleanup_voice(_: web.Application) -> None:
+        await voice_jobs.shutdown()
+        await voice_installer.shutdown()
+
     app.on_startup.append(auto_start_engine)
     app.on_startup.append(auto_start_gateway)
     app.on_cleanup.append(cleanup_gateway)
+    app.on_cleanup.append(cleanup_voice)
     return app
 
 

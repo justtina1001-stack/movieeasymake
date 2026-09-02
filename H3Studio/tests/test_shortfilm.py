@@ -6,17 +6,37 @@ from pathlib import Path
 from domain import compile_request
 from shortfilm import (
     ShortFilmStore,
+    changed_reference_aliases,
     compile_shot_payload,
     new_asset,
     new_project,
     new_scene,
     new_shot,
     normalize_project,
+    project_job_records,
     project_warnings,
+    resolve_shot_asset_ids,
 )
 
 
 class ShortFilmTests(unittest.TestCase):
+    def test_project_job_records_keeps_history_and_legacy_link(self):
+        project = new_project("測試短片")
+        scene = new_scene()
+        shot = new_shot()
+        shot["job_id"] = "legacy-job"
+        scene["shots"] = [shot]
+        project["scenes"] = [scene]
+        records = [
+            {"id": "legacy-job"},
+            {"id": "history-job", "shortfilm_project_id": project["id"]},
+            {"id": "other-job", "shortfilm_project_id": "another-project"},
+        ]
+        self.assertEqual(
+            [job["id"] for job in project_job_records(project, records)],
+            ["legacy-job", "history-job"],
+        )
+
     def test_shot_can_store_a_shorter_retime_preview_duration(self):
         project = new_project("節奏測試")
         project["export_frames"] = True
@@ -90,6 +110,57 @@ class ShortFilmTests(unittest.TestCase):
         self.assertIn("(S1) says <d>[Chinese] 你真的回來了。</d>", compiled.prompt)
         self.assertIn("fully_preserved", compiled.prompt)
 
+    def test_named_assets_are_automatically_attached_from_story_text(self) -> None:
+        project, scene, shot = self.project_with_shot()
+        character = new_asset("character", "小雨")
+        character["image_asset_ids"] = ["1" * 32]
+        background = new_asset("background", "月台")
+        background["image_asset_ids"] = ["2" * 32]
+        extra = new_asset("object", "紅傘")
+        extra["image_asset_ids"] = ["3" * 32]
+        project["assets"] = [character, background, extra]
+
+        resolved = resolve_shot_asset_ids(project, scene, shot)
+        self.assertEqual(resolved, [character["id"], background["id"]])
+        payload, warnings = compile_shot_payload(project, scene["id"], shot["id"])
+        self.assertEqual(payload["mode"], "r2v")
+        self.assertEqual(
+            [item["alias"] for item in payload["references"]],
+            ["小雨", "月台"],
+        )
+        self.assertFalse(any("沒有選擇參考素材" in warning for warning in warnings))
+
+    def test_manual_asset_selection_supplements_automatic_matches(self) -> None:
+        project, scene, shot = self.project_with_shot()
+        character = new_asset("character", "小雨")
+        prop = new_asset("object", "紅傘")
+        project["assets"] = [character, prop]
+        shot["asset_ids"] = [prop["id"]]
+        self.assertEqual(
+            resolve_shot_asset_ids(project, scene, shot),
+            [character["id"], prop["id"]],
+        )
+
+    def test_changed_reference_aliases_detects_old_continuation_source(self) -> None:
+        expected = [{
+            "alias": "妮妮",
+            "image_asset_ids": ["1" * 32],
+            "audio_asset_id": None,
+            "voice_mode": "timbre",
+        }, {
+            "alias": "神社",
+            "image_asset_ids": ["2" * 32],
+            "audio_asset_id": None,
+            "voice_mode": "timbre",
+        }]
+        actual = [{
+            "alias": "妮妮",
+            "image_asset_ids": ["3" * 32],
+            "audio_asset_id": None,
+            "voice_mode": "timbre",
+        }]
+        self.assertEqual(changed_reference_aliases(expected, actual), ["妮妮", "神社"])
+
     def test_project_normalization_removes_unknown_asset_links(self) -> None:
         project, scene, shot = self.project_with_shot()
         shot["asset_ids"] = ["f" * 32]
@@ -124,6 +195,19 @@ class ShortFilmTests(unittest.TestCase):
         warnings = project_warnings(normalize_project(project))
         self.assertTrue(any("分鏡合計" in warning for warning in warnings))
         self.assertTrue(any("可見動作" in warning for warning in warnings))
+
+    def test_project_warnings_count_all_per_shot_reference_images(self) -> None:
+        project, scene, shot = self.project_with_shot()
+        first = new_asset("character", "角色")
+        first["image_asset_ids"] = [f"{number:032x}" for number in range(1, 7)]
+        second = new_asset("background", "背景")
+        second["image_asset_ids"] = [f"{number:032x}" for number in range(7, 10)]
+        project["assets"] = [first, second]
+        shot["asset_ids"] = [first["id"], second["id"]]
+        shot["storyboard_asset_id"] = "f" * 32
+        normalized = normalize_project(project)
+        warnings = project_warnings(normalized)
+        self.assertTrue(any("10 張參考圖片" in warning and "9 張上限" in warning for warning in warnings))
 
     def test_store_crud(self) -> None:
         directory = Path(__file__).resolve().parents[1] / "data" / "test-shortfilm-store"

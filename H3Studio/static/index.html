@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260901-frame-export">
+  <link rel="stylesheet" href="/static/styles.css?v=20260902-shortfilm-auto-assets">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -19,6 +19,7 @@
       <span id="statusText">檢查生成引擎...</span>
       <span id="studioRoleBadge" class="studio-role-badge client">一般使用者</span>
       <button id="openMusicStudio" class="button ghost small music-toolbar-button" type="button" aria-haspopup="dialog"><b>♫</b><span>Music 3</span></button>
+      <button id="openVoiceStudio" class="button ghost small voice-toolbar-button" type="button" aria-haspopup="dialog"><b>◉</b><span>語音</span></button>
       <button id="openPromptGuide" class="button ghost small guide-toolbar-button" type="button" aria-haspopup="dialog" aria-label="開啟提示詞指南"><b>✦</b><span class="guide-button-label">提示詞指南</span></button>
       <button id="startEngine" class="button ghost small" type="button">啟動引擎</button>
       <button id="openModelUpdates" class="button ghost small model-update-toolbar" type="button" aria-haspopup="dialog"><span id="modelUpdateToolbarDot" class="model-update-toolbar-dot hidden"></span><span id="modelUpdateToolbarText">模型版本</span></button>
@@ -441,6 +442,16 @@
             </div>
           </aside>
         </div>
+
+        <section class="jobs-section shortfilm-jobs-section">
+          <div class="section-heading jobs-heading">
+            <div><span class="step-number">04</span><div><h2>短片作品</h2><p>只顯示目前短片專案的鏡頭版本，不會混入快速生成作品</p></div></div>
+            <div class="job-toolbar"><input id="shortfilmJobSearch" type="search" placeholder="搜尋場次、鏡頭、任務名稱或編號"><button id="refreshShortfilmJobs" class="button ghost small" type="button">重新整理</button></div>
+          </div>
+          <div id="shortfilmJobList" class="job-list"></div>
+          <div id="shortfilmJobEmpty" class="empty-state"><span>□</span><strong>這個短片還沒有生成作品</strong><p>生成任一鏡頭後，影片與歷史版本會集中顯示在這裡。</p></div>
+          <div id="shortfilmJobPagination" class="job-pagination hidden"><button id="previousShortfilmJobPage" class="button ghost small" type="button">← 上一頁</button><span id="shortfilmJobPageLabel">第 1 / 1 頁</span><button id="nextShortfilmJobPage" class="button ghost small" type="button">下一頁 →</button></div>
+        </section>
       </div>
     </section>
   </main>
@@ -732,7 +743,69 @@ non_diegetic_music: ...</pre></div>
     </section>
   </div>
 
+  <div id="voiceModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="voiceTitle">
+    <div class="modal-backdrop" data-close-voice></div>
+    <section class="modal-card music-studio-card voice-studio-card">
+      <div class="modal-heading music-heading voice-heading">
+        <div><p class="eyebrow">LOCAL OPEN-WEIGHT VOICE</p><h2 id="voiceTitle">Qwen3-TTS 語音工作室</h2><p>中文台詞、聲線設計與參考聲線複製；完全本機執行，不使用付費 API。</p></div>
+        <button class="icon-button modal-close" type="button" data-close-voice aria-label="關閉語音工作室">×</button>
+      </div>
+
+      <div class="music-layout">
+        <div class="music-editor">
+          <section class="music-model-card voice-model-card">
+            <div><span class="music-status-dot" id="voiceStatusDot"></span><strong id="voiceModelTitle">檢查 Qwen3-TTS...</strong><small id="voiceModelDetail">Apache-2.0 開源模型；模型依模式分開安裝</small></div>
+            <div class="music-model-actions"><button id="installVoiceModel" class="button secondary" type="button">安裝目前語音模型</button><button id="cancelVoiceInstall" class="button ghost hidden" type="button">取消安裝</button></div>
+            <div id="voiceInstallProgress" class="voice-install-detail hidden"></div>
+          </section>
+
+          <div class="music-mode-switch voice-mode-switch" role="group" aria-label="語音模式">
+            <button class="active" type="button" data-voice-mode="custom"><strong>內建聲線</strong><small>最快開始，九種官方聲線</small></button>
+            <button type="button" data-voice-mode="design"><strong>設計新聲線</strong><small>用文字描述人物聲音</small></button>
+            <button type="button" data-voice-mode="clone"><strong>複製參考聲線</strong><small>上傳有權使用的參考音訊</small></button>
+          </div>
+
+          <div class="form-grid two music-core-fields">
+            <label>任務名稱<input id="voiceJobName" maxlength="80" placeholder="例如：財神角色開場台詞"></label>
+            <label>語言<select id="voiceLanguage"><option value="Chinese">中文</option><option value="Auto">自動判斷</option><option value="English">英文</option><option value="Japanese">日文</option><option value="Korean">韓文</option><option value="German">德文</option><option value="French">法文</option><option value="Spanish">西班牙文</option><option value="Italian">義大利文</option><option value="Portuguese">葡萄牙文</option><option value="Russian">俄文</option></select></label>
+          </div>
+
+          <label id="voiceSpeakerField" class="music-wide-field">內建聲線<select id="voiceSpeaker"><option value="Vivian">Vivian－明亮俐落的年輕中文女聲</option><option value="Serena">Serena－溫暖柔和的年輕中文女聲</option><option value="Uncle_Fu">Uncle Fu－成熟低沉的中文男聲</option><option value="Dylan">Dylan－自然清楚的北京男聲</option><option value="Eric">Eric－活潑略沙啞的成都男聲</option><option value="Ryan">Ryan－節奏感強的英文男聲</option><option value="Aiden">Aiden－陽光清楚的美式男聲</option><option value="Ono_Anna">Ono Anna－輕巧活潑的日文女聲</option><option value="Sohee">Sohee－溫暖富情緒的韓文女聲</option></select></label>
+
+          <section id="voiceCloneFields" class="voice-clone-fields hidden">
+            <div id="voiceReferenceDrop" class="voice-reference-drop" tabindex="0" role="button">
+              <div id="voiceReferenceEmpty"><strong>＋ 上傳或拖入參考音訊</strong><small>建議 3～15 秒、只有一人說話、環境乾淨；支援 WAV、MP3、FLAC、M4A、AAC、OGG</small></div>
+              <div id="voiceReferencePreview" class="hidden"><div><strong id="voiceReferenceName"></strong><button id="clearVoiceReference" class="icon-button" type="button" title="移除參考音訊">×</button></div><audio id="voiceReferenceAudio" controls preload="metadata"></audio></div>
+            </div>
+            <label class="music-wide-field">參考音訊逐字稿<textarea id="voiceReferenceText" rows="3" placeholder="請逐字填入參考音訊實際說的內容；有逐字稿時聲線相似度與韻律會更穩定。"></textarea></label>
+            <label class="check-row music-check"><input id="voiceXVectorOnly" type="checkbox"><span>沒有逐字稿，僅擷取音色（速度較快，但相似度與表現可能降低）</span></label>
+            <label class="check-row music-check voice-consent"><input id="voiceAuthorized" type="checkbox"><span>我確認已取得本人同意或合法授權，可使用這段聲音進行聲線複製。</span></label>
+          </section>
+
+          <label class="music-wide-field voice-script-field">要朗讀的台詞<textarea id="voiceText" rows="7" placeholder="例如：恭喜進入免費遊戲！好運才正要開始！"></textarea><small class="field-help">長篇內容建議按句子或段落拆開，後續剪輯比較容易控制節奏。</small></label>
+          <label id="voiceInstructField" class="music-wide-field">語氣與表演指令<textarea id="voiceInstruct" rows="4">使用充滿喜悅與期待的語氣，中文咬字清楚，節奏明快；第一句自然吸引注意，關鍵獎勵詞稍微加重，結尾俐落收住。</textarea><small id="voiceInstructHelp" class="field-help">可描述情緒、音高、節奏、力道、停頓與咬字方式。</small></label>
+
+          <details class="advanced music-advanced">
+            <summary>進階設定</summary>
+            <div class="form-grid two">
+              <label>Seed<div class="seed-row"><input id="voiceSeed" inputmode="numeric"><button id="randomVoiceSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div></label>
+              <div class="voice-license-note"><strong>模型授權</strong><span>Qwen3-TTS 程式與模型採 Apache-2.0；聲線素材本身的權利仍由使用者負責。</span></div>
+            </div>
+          </details>
+          <button id="generateVoice" class="button primary wide voice-generate" type="button">◉ 產生語音</button>
+          <p class="music-generation-note">語音、Music 3 與影片共用同一條 GPU 佇列；模型會在每次工作完成後釋放顯存。</p>
+        </div>
+
+        <aside class="music-history">
+          <div class="music-history-title"><div><span class="step-number">HISTORY</span><h3>語音項目</h3></div><button id="refreshVoiceJobs" class="button ghost small" type="button">重新整理</button></div>
+          <div id="voiceJobList" class="music-job-list"><div class="empty-state">尚無語音工作</div></div>
+          <div class="music-pagination"><button id="previousVoicePage" class="button ghost small" type="button">上一頁</button><span id="voicePageLabel">1 / 1</span><button id="nextVoicePage" class="button ghost small" type="button">下一頁</button></div>
+        </aside>
+      </div>
+    </section>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260901-frame-export"></script>
+  <script src="/static/app.js?v=20260902-separated-workspaces"></script>
 </body>
 </html>

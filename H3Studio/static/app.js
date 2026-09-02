@@ -91,12 +91,23 @@ let musicModelsInstalled = false;
 let musicPage = 1;
 let musicTotalPages = 1;
 let lastMusicJobsSignature = "";
+let voiceMode = "custom";
+let voiceReferenceAsset = null;
+let voiceStatusData = null;
+let voicePage = 1;
+let voiceTotalPages = 1;
+let lastVoiceJobsSignature = "";
 let studioWorkspace = localStorage.getItem("h3studio-workspace-v1") || "quick";
 let shortFilmProjects = [];
 let activeShortFilmId = localStorage.getItem("h3studio-shortfilm-active-v1") || "";
 let shortFilmSaveTimer;
 let shortFilmBatchRunning = false;
 let shortFilmStatusRefreshing = false;
+let shortFilmJobPage = 1;
+let shortFilmJobTotalPages = 1;
+let shortFilmJobSearch = "";
+let lastShortFilmJobsSignature = "";
+const expandedShortFilmJobIds = new Set();
 
 const modeLabels = { t2v: "文生影片", fl2va: "首尾圖片", r2v: "多模態參考", replace: "角色替換", symbol_loop: "圖騰循環", extend: "續接影片", popup_panel: "彈窗面板動畫", mg_animation: "MG 動畫" };
 const promptGuideModeAdvice = {
@@ -368,6 +379,172 @@ function openMusicStudio() {
 function closeMusicStudio() {
   $("#musicModal").classList.add("hidden");
   $$("#musicJobList audio").forEach(audio => audio.pause());
+}
+
+function randomVoiceSeed() {
+  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+}
+
+function voiceModeLabel(mode) {
+  return { custom: "內建聲線", design: "聲線設計", clone: "聲線複製" }[mode] || mode;
+}
+
+function setVoiceMode(mode) {
+  voiceMode = ["custom", "design", "clone"].includes(mode) ? mode : "custom";
+  $$('[data-voice-mode]').forEach(button => button.classList.toggle("active", button.dataset.voiceMode === voiceMode));
+  $("#voiceSpeakerField").classList.toggle("hidden", voiceMode !== "custom");
+  $("#voiceCloneFields").classList.toggle("hidden", voiceMode !== "clone");
+  $("#voiceInstructField").classList.toggle("hidden", voiceMode !== "design");
+  const label = $("#voiceInstructField").firstChild;
+  if (label?.nodeType === Node.TEXT_NODE) label.textContent = voiceMode === "design" ? "聲線設計描述" : "語氣與表演指令";
+  $("#voiceInstructHelp").textContent = "請具體描述性別／年齡感、音高、音色、情緒、節奏與人物氣質；這段描述會直接創造聲線。";
+  if (voiceMode === "design" && !$("#voiceInstruct").value.trim()) {
+    $("#voiceInstruct").value = "年輕而有親和力的中文女聲，音色明亮溫暖、音高中等；帶著期待與喜悅，咬字清楚，節奏明快但不急促，重要獎勵詞稍微加重。";
+  }
+  if (voiceStatusData) renderVoiceStatus(voiceStatusData);
+}
+
+function openVoiceStudio() {
+  $("#voiceModal").classList.remove("hidden");
+  if (!$("#voiceSeed").value) $("#voiceSeed").value = randomVoiceSeed();
+  loadVoiceStatus().catch(error => toast(error.message, true));
+  loadVoiceJobs(true).catch(error => toast(error.message, true));
+  requestAnimationFrame(() => $("#voiceJobName").focus());
+}
+
+function closeVoiceStudio() {
+  $("#voiceModal").classList.add("hidden");
+  $$("#voiceModal audio").forEach(audio => audio.pause());
+}
+
+function renderVoiceStatus(data) {
+  voiceStatusData = data;
+  const model = data.models?.[voiceMode] || {};
+  const active = Boolean(data.active);
+  const installed = Boolean(data.runtime_installed && model.installed);
+  const dot = $("#voiceStatusDot");
+  dot.className = `music-status-dot${installed ? " ready" : active ? " active" : data.error ? " error" : ""}`;
+  $("#voiceModelTitle").textContent = installed
+    ? `${model.label || voiceModeLabel(voiceMode)}已可使用`
+    : active ? data.current || "正在安裝語音模型" : `${model.label || voiceModeLabel(voiceMode)}尚未安裝`;
+  const installedCount = Object.values(data.models || {}).filter(item => item.installed).length;
+  $("#voiceModelDetail").textContent = data.error || (active
+    ? `${data.current || "安裝中"}；大型檔案會自動續傳`
+    : `${model.description || "Qwen3-TTS 本機模型"} · 已安裝 ${installedCount}/3 種`);
+  $("#voiceInstallProgress").classList.toggle("hidden", !active && !data.error);
+  $("#voiceInstallProgress").textContent = data.error || (active ? "安裝會在背景繼續；首次建立獨立環境與下載權重需要一些時間。" : "");
+  $("#installVoiceModel").classList.toggle("hidden", installed);
+  $("#installVoiceModel").disabled = active;
+  $("#installVoiceModel").textContent = data.runtime_installed ? `安裝${model.label || "目前模型"}` : `建立語音環境並安裝${model.label || "目前模型"}`;
+  $("#cancelVoiceInstall").classList.toggle("hidden", !active);
+  $("#generateVoice").disabled = !installed;
+}
+
+async function loadVoiceStatus() {
+  const data = await api("/api/voice/status");
+  renderVoiceStatus(data);
+  return data;
+}
+
+function renderVoiceReference() {
+  const hasReference = Boolean(voiceReferenceAsset);
+  $("#voiceReferenceEmpty").classList.toggle("hidden", hasReference);
+  $("#voiceReferencePreview").classList.toggle("hidden", !hasReference);
+  if (hasReference) {
+    $("#voiceReferenceName").textContent = voiceReferenceAsset.name || "參考音訊";
+    $("#voiceReferenceAudio").src = voiceReferenceAsset.url;
+  } else {
+    $("#voiceReferenceName").textContent = "";
+    $("#voiceReferenceAudio").removeAttribute("src");
+  }
+}
+
+async function selectVoiceReference(files) {
+  const audioExtensions = [".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg"];
+  const file = [...files].find(item => item.type.startsWith("audio/") || audioExtensions.includes(fileExtension(item)));
+  if (!file) throw new Error("請選擇 WAV、MP3、FLAC、M4A、AAC 或 OGG 音訊檔。");
+  voiceReferenceAsset = await uploadFile(file, "voice-clone-reference");
+  renderVoiceReference();
+}
+
+function collectVoicePayload() {
+  return {
+    job_name: $("#voiceJobName").value.trim(),
+    mode: voiceMode,
+    text: $("#voiceText").value.trim(),
+    language: $("#voiceLanguage").value,
+    speaker: $("#voiceSpeaker").value,
+    instruct: $("#voiceInstruct").value.trim(),
+    seed: $("#voiceSeed").value.trim(),
+    reference_asset_id: voiceReferenceAsset?.id || "",
+    reference_text: $("#voiceReferenceText").value.trim(),
+    x_vector_only: $("#voiceXVectorOnly").checked,
+    voice_authorized: $("#voiceAuthorized").checked,
+  };
+}
+
+async function generateVoice() {
+  const button = $("#generateVoice");
+  setButtonBusy(button, true);
+  button.textContent = "正在加入 GPU 佇列...";
+  try {
+    const job = await api("/api/voice/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectVoicePayload()),
+    });
+    toast(`語音工作 ${job.id.slice(0, 8)} 已加入佇列`);
+    $("#voiceSeed").value = randomVoiceSeed();
+    voicePage = 1;
+    await loadVoiceJobs(true);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setButtonBusy(button, false);
+    button.textContent = "◉ 產生語音";
+    renderVoiceStatus(voiceStatusData || { models: {} });
+  }
+}
+
+function voiceJobElapsed(job) {
+  if (Number.isFinite(Number(job.execution_seconds))) return formatExecutionTime(job.execution_seconds);
+  if (["preparing", "running"].includes(job.status) && job.generation_started_at) {
+    return formatExecutionTime((Date.now() - new Date(job.generation_started_at).getTime()) / 1000);
+  }
+  return voiceModeLabel(job.mode);
+}
+
+async function loadVoiceJobs(force = false) {
+  if ($("#voiceModal").classList.contains("hidden") && !force) return;
+  const data = await api(`/api/voice/jobs?page=${voicePage}&page_size=20`);
+  voicePage = data.page;
+  voiceTotalPages = data.total_pages;
+  const signature = JSON.stringify(data.items.map(job => [job.id, job.status, job.progress, job.updated_at, job.name, job.favorite]));
+  if (!force && signature === lastVoiceJobsSignature) return;
+  lastVoiceJobsSignature = signature;
+  $("#voicePageLabel").textContent = `${voicePage} / ${voiceTotalPages}`;
+  $("#previousVoicePage").disabled = voicePage <= 1;
+  $("#nextVoicePage").disabled = voicePage >= voiceTotalPages;
+  $("#voiceJobList").innerHTML = data.items.length ? data.items.map(job => {
+    const active = ["queued", "preparing", "running"].includes(job.status);
+    const created = job.created_at ? new Date(job.created_at).toLocaleString("zh-TW", { hour12: false }) : "";
+    const recipe = [`台詞：${job.text || ""}`, `語言：${job.language || "Auto"}`, job.mode === "custom" ? `聲線：${job.speaker || ""}` : "", job.instruct ? `聲線／表演指令：${job.instruct}` : "", job.reference_text ? `參考逐字稿：${job.reference_text}` : ""].filter(Boolean).join("\n\n");
+    return `<article class="music-job${job.favorite ? " favorite" : ""}" data-voice-job="${job.id}">
+      <div class="music-job-head"><div class="music-job-title"><strong>${escapeHtml(job.name || `未命名${voiceModeLabel(job.mode)}`)}</strong><small>${created} · ${escapeHtml(voiceModeLabel(job.mode))} · Seed ${escapeHtml(job.seed)}</small></div>
+      <div class="music-job-controls"><button type="button" data-voice-favorite="${job.id}" data-favorite="${Boolean(job.favorite)}" class="${job.favorite ? "active" : ""}" title="我的最愛">★</button><button type="button" data-voice-rename="${job.id}" data-name="${escapeHtml(job.name || "")}" title="重新命名">✎</button></div></div>
+      <div class="music-job-status"><b class="${escapeHtml(job.status)}">${escapeHtml(statusLabel(job.status))}</b><span>${escapeHtml(job.current_node || voiceJobElapsed(job))}${active ? ` · ${Math.round(Number(job.progress) || 0)}%` : ""}</span></div>
+      ${active ? `<div class="progress-track"><span style="width:${Math.max(2, Number(job.progress) || 2)}%"></span></div>` : ""}
+      ${job.status === "completed" ? `<audio controls preload="none" src="/api/voice/jobs/${job.id}/audio"></audio>` : ""}
+      ${job.error ? `<div class="music-job-error">${escapeHtml(job.error)}</div>` : ""}
+      <div class="music-job-actions">
+        ${job.status === "completed" ? `<a class="button secondary" href="/api/voice/jobs/${job.id}/audio?download=1" download>下載 WAV</a>` : ""}
+        ${active ? `<button class="button ghost" type="button" data-voice-cancel="${job.id}">取消</button>` : ""}
+        ${["failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button secondary" type="button" data-voice-resume="${job.id}">重新送出</button>` : ""}
+        <button class="button ghost" type="button" data-voice-recipe="${job.id}">查看台詞與設定</button>
+      </div>
+      <pre class="job-recipe hidden" data-voice-recipe-panel="${job.id}">${escapeHtml(recipe)}</pre>
+    </article>`;
+  }).join("") : '<div class="empty-state">尚無語音工作</div>';
 }
 
 function humanBytes(value) {
@@ -1697,7 +1874,7 @@ async function useContinuationFile(file) {
 async function loadJobs(force = false) {
   try {
     const query = encodeURIComponent(jobSearch);
-    const response = await api(`/api/jobs?page=${jobPage}&page_size=20&q=${query}`);
+    const response = await api(`/api/jobs?page=${jobPage}&page_size=20&q=${query}&workspace=quick`);
     let jobs;
     let meta;
     if (Array.isArray(response)) {
@@ -2051,6 +2228,8 @@ async function createShortFilmProject() {
   });
   shortFilmProjects.unshift(project);
   activeShortFilmId = project.id;
+  shortFilmJobPage = 1;
+  lastShortFilmJobsSignature = "";
   localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
   renderShortFilmWorkspace();
   setTimeout(() => { $("#sfTitle")?.focus(); $("#sfTitle")?.select(); }, 80);
@@ -2063,6 +2242,8 @@ async function deleteShortFilmProject() {
   await api(`/api/shortfilms/${project.id}`, { method: "DELETE" });
   shortFilmProjects = shortFilmProjects.filter(item => item.id !== project.id);
   activeShortFilmId = shortFilmProjects[0]?.id || "";
+  shortFilmJobPage = 1;
+  lastShortFilmJobsSignature = "";
   localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
   renderShortFilmWorkspace();
   toast("短片專案已刪除；已生成影片仍保留。")
@@ -2089,6 +2270,99 @@ function shortFilmFlatten(project) {
   return (project?.scenes || []).flatMap(scene => (scene.shots || []).map(shot => ({ scene, shot })));
 }
 
+function shortFilmAliasMentioned(text, alias) {
+  const normalizedText = String(text || "").toLocaleLowerCase();
+  const normalizedAlias = String(alias || "").trim().toLocaleLowerCase();
+  if (!normalizedAlias) return false;
+  if (/^[\x00-\x7f]+$/.test(normalizedAlias)) {
+    const escaped = normalizedAlias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^a-z0-9_])${escaped}(?=$|[^a-z0-9_])`, "i").test(normalizedText);
+  }
+  return normalizedText.includes(normalizedAlias);
+}
+
+function shortFilmShotAssetSelection(project, shot) {
+  const scene = (project?.scenes || []).find(item => (item.shots || []).some(value => value.id === shot?.id));
+  const referenceText = [
+    scene?.location, scene?.time_of_day, scene?.description,
+    shot?.camera_detail, shot?.action, shot?.ending, shot?.speaker_alias,
+    shot?.dialogue, shot?.sound, shot?.music,
+  ].filter(Boolean).join("\n");
+  const manualIds = new Set(shot?.asset_ids || []);
+  const automaticIds = new Set((project?.assets || [])
+    .filter(asset => shortFilmAliasMentioned(referenceText, asset.alias))
+    .map(asset => asset.id));
+  const selectedIds = new Set((project?.assets || [])
+    .filter(asset => manualIds.has(asset.id) || automaticIds.has(asset.id))
+    .map(asset => asset.id));
+  return { manualIds, automaticIds, selectedIds };
+}
+
+function shortFilmShotReferenceUsage(project, shot) {
+  const selection = shortFilmShotAssetSelection(project, shot);
+  const selected = (project?.assets || []).filter(asset => selection.selectedIds.has(asset.id));
+  const materialImages = selected.reduce((sum, asset) => sum + (asset.image_asset_ids || []).length, 0);
+  const storyboardImages = shot.storyboard_asset_id ? 1 : 0;
+  const continuationImages = shot.continue_previous ? 1 : 0;
+  const audioCount = selected.filter(asset => asset.audio_asset_id).length;
+  return {
+    assetCount: selected.length,
+    automaticAssetCount: selected.filter(asset => selection.automaticIds.has(asset.id)).length,
+    materialImages,
+    storyboardImages,
+    continuationImages,
+    imageCount: materialImages + storyboardImages + continuationImages,
+    audioCount,
+  };
+}
+
+function shortFilmUsageMarkup(usage) {
+  const over = usage.imageCount > 9 || usage.audioCount > 3;
+  const near = !over && (usage.imageCount >= 8 || usage.audioCount >= 3);
+  const statusClass = over ? " over" : near ? " near" : "";
+  const breakdown = [
+    usage.materialImages ? `素材圖片 ${usage.materialImages}` : "",
+    usage.storyboardImages ? "分鏡圖 1" : "",
+    usage.continuationImages ? "續接尾幀 1" : "",
+  ].filter(Boolean).join("＋") || "尚未使用圖片";
+  const selectionLabel = usage.automaticAssetCount
+    ? `已套用 ${usage.assetCount} 項（自動 ${usage.automaticAssetCount}）`
+    : `已選 ${usage.assetCount} 項`;
+  return {
+    badge: `<span class="shortfilm-reference-count${statusClass}">${selectionLabel} · 參考圖片 ${usage.imageCount}/9 · 聲音 ${usage.audioCount}/3</span>`,
+    note: `<small class="shortfilm-reference-note${over ? " over" : ""}">${breakdown}。分鏡文字提到名稱代號時會自動套用；其餘素材可手動勾選。每鏡頭圖片合計最多 9 張。</small>`,
+  };
+}
+
+function updateShortFilmShotUsage(shotCard, project, shot) {
+  if (!shotCard || !project || !shot) return;
+  const markup = shortFilmUsageMarkup(shortFilmShotReferenceUsage(project, shot));
+  const badge = shotCard.querySelector("[data-sf-reference-count]");
+  const note = shotCard.querySelector("[data-sf-reference-note]");
+  if (badge) badge.outerHTML = markup.badge.replace("class=", "data-sf-reference-count class=");
+  if (note) note.outerHTML = markup.note.replace("class=", "data-sf-reference-note class=");
+}
+
+function updateShortFilmShotAssetState(shotCard, project, shot) {
+  if (!shotCard || !project || !shot) return;
+  const selection = shortFilmShotAssetSelection(project, shot);
+  $$("[data-sf-shot-asset]", shotCard).forEach(input => {
+    const assetId = input.dataset.sfShotAsset;
+    const automatic = selection.automaticIds.has(assetId);
+    const selected = selection.selectedIds.has(assetId);
+    const chip = input.closest(".shortfilm-asset-chip");
+    input.checked = selected;
+    input.disabled = automatic;
+    chip?.classList.toggle("selected", selected);
+    chip?.classList.toggle("auto-selected", automatic);
+    const label = $("span", chip);
+    const marker = $("small", label);
+    if (automatic && !marker) label?.insertAdjacentHTML("beforeend", "<small>自動</small>");
+    if (!automatic && marker) marker.remove();
+  });
+  updateShortFilmShotUsage(shotCard, project, shot);
+}
+
 function shortFilmWarnings(project) {
   const warnings = [];
   const shots = shortFilmFlatten(project);
@@ -2102,6 +2376,9 @@ function shortFilmWarnings(project) {
     if (shot.dialogue?.trim() && !shot.speaker_alias) warnings.push(`${label} 有台詞但沒有指定說話角色。`);
     if (shot.speaker_alias && !aliases.has(shot.speaker_alias)) warnings.push(`${label} 的說話角色不存在。`);
     if (shot.continue_previous && index === 0) warnings.push(`${label} 是第一鏡，不能沿用上一鏡尾幀。`);
+    const usage = shortFilmShotReferenceUsage(project, shot);
+    if (usage.imageCount > 9) warnings.push(`${label} 使用 ${usage.imageCount} 張參考圖片，超過每鏡頭 9 張上限。`);
+    if (usage.audioCount > 3) warnings.push(`${label} 使用 ${usage.audioCount} 段參考聲音，超過每鏡頭 3 段上限。`);
   });
   return warnings;
 }
@@ -2129,6 +2406,7 @@ function renderShortFilmWorkspace() {
   renderShortFilmAssets();
   renderShortFilmScenes();
   renderShortFilmSummary();
+  loadShortFilmJobs(true).catch(error => console.warn("短片作品載入失敗：", error));
 }
 
 function renderShortFilmAssets() {
@@ -2165,7 +2443,13 @@ function renderShortFilmScenes() {
   $("#shortfilmSceneEmpty").classList.toggle("hidden", project.scenes.length > 0);
   $("#shortfilmSceneList").innerHTML = project.scenes.map((scene, sceneIndex) => {
     const shots = scene.shots.map((shot, shotIndex) => {
-      const assetChecks = project.assets.length ? project.assets.map(asset => `<label class="shortfilm-asset-chip ${shot.asset_ids.includes(asset.id) ? "selected" : ""}"><input type="checkbox" data-sf-shot-asset="${asset.id}" ${shot.asset_ids.includes(asset.id) ? "checked" : ""}><span>${escapeHtml(asset.alias)}</span></label>`).join("") : '<small class="asset-placeholder">請先建立角色或場景素材</small>';
+      const usageMarkup = shortFilmUsageMarkup(shortFilmShotReferenceUsage(project, shot));
+      const selection = shortFilmShotAssetSelection(project, shot);
+      const assetChecks = project.assets.length ? project.assets.map(asset => {
+        const automatic = selection.automaticIds.has(asset.id);
+        const selected = selection.selectedIds.has(asset.id);
+        return `<label class="shortfilm-asset-chip ${selected ? "selected" : ""} ${automatic ? "auto-selected" : ""}" title="${automatic ? "分鏡文字已提到此名稱，將自動套用" : "手動補充本鏡頭素材"}"><input type="checkbox" data-sf-shot-asset="${asset.id}" ${selected ? "checked" : ""} ${automatic ? "disabled" : ""}><span>${escapeHtml(asset.alias)}${automatic ? "<small>自動</small>" : ""}</span></label>`;
+      }).join("") : '<small class="asset-placeholder">請先建立角色或場景素材</small>';
       const speakerOptions = ['<option value="">無台詞／未指定</option>', ...project.assets.filter(asset => ["character", "creature"].includes(asset.type)).map(asset => `<option value="${escapeHtml(asset.alias)}" ${shot.speaker_alias === asset.alias ? "selected" : ""}>${escapeHtml(asset.alias)}</option>`)].join("");
       const shotSizeOptions = Object.entries(shortFilmShotSizeLabels).map(([value, label]) => `<option value="${value}" ${shot.shot_size === value ? "selected" : ""}>${label}</option>`).join("");
       const cameraOptions = Object.entries(shortFilmCameraLabels).map(([value, label]) => `<option value="${value}" ${shot.camera === value ? "selected" : ""}>${label}</option>`).join("");
@@ -2189,7 +2473,7 @@ function renderShortFilmScenes() {
           <label class="dialogue-text">精確台詞<input data-sf-shot-field="dialogue" value="${escapeHtml(shot.dialogue || "")}" placeholder="保留原文與標點，不要加引號"></label>
         </div>
         <div class="form-grid two"><label>環境與動作聲<input data-sf-shot-field="sound" value="${escapeHtml(shot.sound || "")}"></label><label>觀眾配樂<input data-sf-shot-field="music" value="${escapeHtml(shot.music || "N/A")}" placeholder="不需要配樂請填 N/A"></label></div>
-        <div class="shortfilm-shot-assets"><strong>本鏡頭使用素材</strong><div>${assetChecks}</div></div>
+        <div class="shortfilm-shot-assets"><div class="shortfilm-shot-assets-heading"><strong>本鏡頭使用素材</strong>${usageMarkup.badge.replace("class=", "data-sf-reference-count class=")}</div><div class="shortfilm-shot-asset-chips">${assetChecks}</div>${usageMarkup.note.replace("class=", "data-sf-reference-note class=")}</div>
         <div class="shortfilm-shot-footer">
           <label class="check-option"><input type="checkbox" data-sf-shot-field="continue_previous" ${shot.continue_previous ? "checked" : ""}><span><strong>沿用上一鏡尾幀</strong><small>上一鏡完成後自動擷取</small></span></label>
           <div class="shortfilm-storyboard-button" role="button" tabindex="0" data-sf-add-storyboard>${storyboard}</div>
@@ -2221,6 +2505,88 @@ function renderShortFilmSummary(extraWarnings = null) {
   $("#shortfilmWarnings").innerHTML = warnings.length
     ? `<strong>需要確認 ${warnings.length} 項</strong><ul>${warnings.slice(0, 8).map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
     : '<strong class="all-clear">規則檢查通過</strong><p>素材、台詞與鏡頭時長目前沒有明顯衝突。</p>';
+}
+
+function shortFilmJobContext(project, job) {
+  for (const scene of project?.scenes || []) {
+    for (const shot of scene.shots || []) {
+      if (shot.id === job.shortfilm_shot_id || shot.job_id === job.id) {
+        return { sceneTitle: scene.title || "場次", shotTitle: shot.title || "鏡頭" };
+      }
+    }
+  }
+  return {
+    sceneTitle: job.shortfilm_scene_title || "歷史場次",
+    shotTitle: job.shortfilm_shot_title || "歷史鏡頭",
+  };
+}
+
+async function loadShortFilmJobs(force = false) {
+  const project = activeShortFilmProject();
+  const list = $("#shortfilmJobList");
+  if (!list) return;
+  if (!project) {
+    list.innerHTML = "";
+    $("#shortfilmJobEmpty").classList.remove("hidden");
+    $("#shortfilmJobPagination").classList.add("hidden");
+    return;
+  }
+  const query = encodeURIComponent(shortFilmJobSearch);
+  const response = await api(`/api/shortfilms/${project.id}/jobs?page=${shortFilmJobPage}&page_size=20&q=${query}`);
+  const jobs = response.items || [];
+  shortFilmJobPage = response.page || 1;
+  shortFilmJobTotalPages = response.total_pages || 1;
+  $("#shortfilmJobEmpty").classList.toggle("hidden", jobs.length > 0);
+  $("#shortfilmJobPagination").classList.toggle("hidden", shortFilmJobTotalPages <= 1);
+  $("#shortfilmJobPageLabel").textContent = `第 ${shortFilmJobPage} / ${shortFilmJobTotalPages} 頁 · 共 ${response.total || 0} 筆`;
+  $("#previousShortfilmJobPage").disabled = shortFilmJobPage <= 1;
+  $("#nextShortfilmJobPage").disabled = shortFilmJobPage >= shortFilmJobTotalPages;
+  const hasActiveJob = jobs.some(job => ["queued", "preparing", "running"].includes(job.status));
+  const signature = JSON.stringify({ project: project.id, jobs, page: response.page, total: response.total, activeSecond: hasActiveJob ? Math.floor(Date.now() / 1000) : 0 });
+  if (!force && signature === lastShortFilmJobsSignature) return;
+  if (!force && $$(".shortfilm-job-video").some(video => !video.paused)) return;
+  lastShortFilmJobsSignature = signature;
+  list.innerHTML = jobs.map(job => {
+    const active = ["queued", "preparing", "running"].includes(job.status);
+    const context = shortFilmJobContext(project, job);
+    const date = new Date(job.created_at).toLocaleString("zh-TW", { hour12: false });
+    const contextLabel = `${context.sceneTitle}／${context.shotTitle}`;
+    const title = job.name || contextLabel;
+    const executionSeconds = jobExecutionSeconds(job);
+    const executionLabel = executionSeconds === null ? "生成耗時尚未記錄" : `${active ? "已執行" : "生成耗時"} ${formatExecutionTime(executionSeconds)}`;
+    const hasRetime = Boolean(job.retimed && job.original_local_output);
+    const frameSequence = job.frame_sequence?.filename ? job.frame_sequence : null;
+    const durationLabel = hasRetime
+      ? `原始 ${Number(job.original_duration).toFixed(2)} 秒 → 節奏版 ${Number(job.duration).toFixed(2)} 秒`
+      : `影片 ${Number(job.duration || 0).toFixed(2)} 秒`;
+    const subtitle = `${contextLabel} · ${job.width}×${job.height} · ${date} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}`;
+    const open = active || expandedShortFilmJobIds.has(job.id);
+    return `<details class="job-card shortfilm-job-card ${job.favorite ? "favorite" : ""}" data-shortfilm-job-id="${job.id}" ${open ? "open" : ""}>
+      <summary class="job-summary">
+        <div class="job-title"><button class="job-favorite ${job.favorite ? "active" : ""}" data-sf-job-favorite="${job.id}" data-favorite="${job.favorite ? "true" : "false"}" type="button" title="${job.favorite ? "取消我的最愛" : "加入我的最愛"}">★</button><span class="job-badge ${escapeHtml(job.status)}">${escapeHtml(statusLabel(job.status))}</span><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div></div>
+        <div class="job-progress"><div class="progress-track"><span style="width:${job.progress || 0}%"></span></div><small><span>${escapeHtml(job.current_node || statusLabel(job.status))}</span><span>${job.progress || 0}%</span></small></div>
+        <span class="job-chevron">⌄</span>
+      </summary>
+      <div class="job-detail">
+        <div class="job-detail-copy"><small>短片鏡頭：${escapeHtml(contextLabel)}</small><small>完整工作編號：${escapeHtml(job.id)}</small><small>生成執行時間：${escapeHtml(executionLabel)}</small>${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
+        <div class="job-actions">
+          <button class="button ghost" data-sf-job-show-prompt="${job.id}" type="button">查看生成提示詞</button>
+          <button class="button ghost" data-sf-job-rename="${job.id}" data-job-name="${escapeHtml(job.name || "")}" type="button">重新命名</button>
+          ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>${hasRetime ? "下載節奏版" : "下載影片"}</a>${hasRetime ? `<a class="button ghost" href="/api/jobs/${job.id}/video?original=1&download=1" download>下載原始版</a>` : ""}` : ""}
+          ${frameSequence ? `<a class="button secondary" href="/api/jobs/${job.id}/frames" download>下載連續圖 ZIP</a>` : ""}
+          ${active ? `<button class="button ghost" data-sf-job-cancel="${job.id}" type="button">取消</button>` : ""}
+          ${["completed", "failed", "cancelled", "interrupted"].includes(job.status) ? `<button class="button danger" data-sf-job-delete="${job.id}" type="button">刪除項目</button>` : ""}
+        </div>
+        ${job.preview_version ? `<div class="job-live-preview"><div><span>TAEH3 LIVE PREVIEW</span><strong>${active ? "生成中近似畫面" : "最後一張生成預覽"}</strong><small>細節與最終影片可能不同。</small></div><img src="/api/jobs/${job.id}/preview?v=${encodeURIComponent(job.preview_version)}" alt="${escapeHtml(title)}生成預覽"></div>` : ""}
+        <div class="job-recipe hidden" data-job-recipe-panel="${job.id}"><div class="job-recipe-heading"><strong>實際送給 AI 的生成提示詞</strong><button class="text-button" data-sf-job-copy-prompt="${job.id}" type="button">複製提示詞</button></div><pre data-job-compiled-prompt></pre></div>
+        ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
+        ${job.status === "completed" ? `<video class="job-video shortfilm-job-video" controls preload="none" data-src="/api/jobs/${job.id}/video"></video>` : ""}
+      </div>
+    </details>`;
+  }).join("");
+  $$(".shortfilm-job-card[open] .shortfilm-job-video").forEach(video => {
+    if (!video.src) video.src = video.dataset.src;
+  });
 }
 
 function findShortFilmShot(shotId) {
@@ -2262,6 +2628,7 @@ async function compileShortFilmShot(shotId, generate = false) {
   renderShortFilmScenes();
   renderShortFilmSummary();
   loadJobs(true);
+  loadShortFilmJobs(true).catch(error => console.warn("短片作品載入失敗：", error));
   toast(`${refreshed.scene.title}／${refreshed.shot.title} 已加入生成佇列。`);
   return job;
 }
@@ -2349,8 +2716,97 @@ function bindEvents() {
   $("#deleteShortfilmProject").addEventListener("click", () => deleteShortFilmProject().catch(error => toast(error.message, true)));
   $("#shortfilmProjectSelect").addEventListener("change", event => {
     activeShortFilmId = event.target.value;
+    shortFilmJobPage = 1;
+    lastShortFilmJobsSignature = "";
     localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
     renderShortFilmWorkspace();
+  });
+  $("#refreshShortfilmJobs").addEventListener("click", () => loadShortFilmJobs(true).catch(error => toast(error.message, true)));
+  let shortFilmSearchTimer;
+  $("#shortfilmJobSearch").addEventListener("input", event => {
+    clearTimeout(shortFilmSearchTimer);
+    shortFilmSearchTimer = setTimeout(() => {
+      shortFilmJobSearch = event.target.value.trim();
+      shortFilmJobPage = 1;
+      loadShortFilmJobs(true).catch(error => toast(error.message, true));
+    }, 250);
+  });
+  $("#previousShortfilmJobPage").addEventListener("click", () => {
+    if (shortFilmJobPage <= 1) return;
+    shortFilmJobPage--;
+    loadShortFilmJobs(true).catch(error => toast(error.message, true));
+    $(".shortfilm-jobs-section").scrollIntoView({ behavior: "smooth" });
+  });
+  $("#nextShortfilmJobPage").addEventListener("click", () => {
+    if (shortFilmJobPage >= shortFilmJobTotalPages) return;
+    shortFilmJobPage++;
+    loadShortFilmJobs(true).catch(error => toast(error.message, true));
+    $(".shortfilm-jobs-section").scrollIntoView({ behavior: "smooth" });
+  });
+  $("#shortfilmJobList").addEventListener("toggle", event => {
+    const card = event.target.closest("[data-shortfilm-job-id]");
+    if (!card) return;
+    const video = $(".shortfilm-job-video", card);
+    if (card.open) {
+      expandedShortFilmJobIds.add(card.dataset.shortfilmJobId);
+      if (video && !video.getAttribute("src")) video.src = video.dataset.src;
+    } else {
+      expandedShortFilmJobIds.delete(card.dataset.shortfilmJobId);
+      if (video) video.pause();
+    }
+  }, true);
+  $("#shortfilmJobList").addEventListener("click", async event => {
+    const favorite = event.target.closest("[data-sf-job-favorite]");
+    const showPrompt = event.target.closest("[data-sf-job-show-prompt]");
+    const copyPrompt = event.target.closest("[data-sf-job-copy-prompt]");
+    const rename = event.target.closest("[data-sf-job-rename]");
+    const cancel = event.target.closest("[data-sf-job-cancel]");
+    const deleteButton = event.target.closest("[data-sf-job-delete]");
+    try {
+      if (favorite) {
+        event.preventDefault(); event.stopPropagation();
+        const enabled = favorite.dataset.favorite !== "true";
+        await api(`/api/jobs/${favorite.dataset.sfJobFavorite}/favorite`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ favorite: enabled }),
+        });
+        shortFilmJobPage = 1;
+        toast(enabled ? "已加入我的最愛並置頂。" : "已從我的最愛移除。");
+      } else if (showPrompt) {
+        await showJobPrompt(showPrompt.dataset.sfJobShowPrompt);
+        return;
+      } else if (copyPrompt) {
+        const jobId = copyPrompt.dataset.sfJobCopyPrompt;
+        const panel = $(`[data-job-recipe-panel="${jobId}"]`);
+        if (panel?.dataset.loaded !== "true") await showJobPrompt(jobId);
+        await navigator.clipboard.writeText($("[data-job-compiled-prompt]", panel)?.textContent || "");
+        toast("已複製這次的生成提示詞。");
+        return;
+      } else if (rename) {
+        const name = prompt("輸入任務名稱（最多 80 個字）", rename.dataset.jobName || "");
+        if (name === null) return;
+        await api(`/api/jobs/${rename.dataset.sfJobRename}/rename`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+        });
+        toast("任務名稱已更新。");
+      } else if (cancel) {
+        await api(`/api/jobs/${cancel.dataset.sfJobCancel}/cancel`, { method: "POST" });
+        toast("已送出取消要求。");
+      } else if (deleteButton) {
+        if (!confirm("確定要刪除這筆短片作品紀錄嗎？\n\n任務紀錄、提示詞、預覽與面板快取影片會一併刪除；ComfyUI 原始輸出仍會保留。")) return;
+        const jobId = deleteButton.dataset.sfJobDelete;
+        await api(`/api/jobs/${jobId}`, { method: "DELETE" });
+        expandedShortFilmJobIds.delete(jobId);
+        const linked = shortFilmFlatten(activeShortFilmProject()).find(item => item.shot.job_id === jobId);
+        if (linked) {
+          linked.shot.job_id = null;
+          linked.shot.status = "draft";
+          await saveShortFilmProject();
+          renderShortFilmScenes(); renderShortFilmSummary();
+        }
+        toast("短片作品紀錄已刪除；ComfyUI 原始輸出仍保留。");
+      } else return;
+      await loadShortFilmJobs(true);
+    } catch (error) { toast(error.message, true); }
   });
   const shortFilmProjectFields = {
     sfTitle: "title", sfFormat: "format", sfTargetDuration: "target_duration", sfAspectRatio: "aspect_ratio",
@@ -2463,7 +2919,13 @@ function bindEvents() {
     const project = activeShortFilmProject();
     const scene = project?.scenes.find(item => item.id === sceneCard?.dataset.sfSceneId);
     if (!scene) return;
-    if (event.target.dataset.sfSceneField) scene[event.target.dataset.sfSceneField] = event.target.value;
+    if (event.target.dataset.sfSceneField) {
+      scene[event.target.dataset.sfSceneField] = event.target.value;
+      for (const shot of scene.shots) {
+        const card = $(`[data-sf-shot-id='${shot.id}']`, sceneCard);
+        updateShortFilmShotAssetState(card, project, shot);
+      }
+    }
     if (event.target.dataset.sfShotField && shotCard) {
       const shot = scene.shots.find(item => item.id === shotCard.dataset.sfShotId);
       const field = event.target.dataset.sfShotField;
@@ -2471,6 +2933,7 @@ function bindEvents() {
         if (event.target.type === "checkbox") shot[field] = event.target.checked;
         else if (field === "retime_duration") shot[field] = event.target.value === "" ? null : Number(event.target.value);
         else shot[field] = ["duration", "seed"].includes(field) ? Number(event.target.value) : event.target.value;
+        updateShortFilmShotAssetState(shotCard, project, shot);
       }
     }
     renderShortFilmSummary(); scheduleShortFilmSave();
@@ -2484,6 +2947,8 @@ function bindEvents() {
     if (event.target.checked && !found.shot.asset_ids.includes(assetId)) found.shot.asset_ids.push(assetId);
     if (!event.target.checked) found.shot.asset_ids = found.shot.asset_ids.filter(id => id !== assetId);
     event.target.closest(".shortfilm-asset-chip")?.classList.toggle("selected", event.target.checked);
+    updateShortFilmShotUsage(shotCard, activeShortFilmProject(), found.shot);
+    renderShortFilmSummary();
     scheduleShortFilmSave();
   });
   $("#shortfilmSceneList").addEventListener("click", async event => {
@@ -2585,6 +3050,7 @@ function bindEvents() {
   });
   $("#openPromptGuide").addEventListener("click", openPromptGuide);
   $("#openMusicStudio").addEventListener("click", openMusicStudio);
+  $("#openVoiceStudio").addEventListener("click", openVoiceStudio);
   $$('[data-close-music]').forEach(element => element.addEventListener("click", closeMusicStudio));
   $$('[data-music-mode]').forEach(button => button.addEventListener("click", () => setMusicMode(button.dataset.musicMode)));
   $("#randomMusicSeed").addEventListener("click", () => { $("#musicSeed").value = randomMusicSeed(); });
@@ -2633,6 +3099,74 @@ function bindEvents() {
       await loadMusicJobs(true);
     } catch (error) { toast(error.message, true); }
   });
+  $$('[data-close-voice]').forEach(element => element.addEventListener("click", closeVoiceStudio));
+  $$('[data-voice-mode]').forEach(button => button.addEventListener("click", () => setVoiceMode(button.dataset.voiceMode)));
+  $("#randomVoiceSeed").addEventListener("click", () => { $("#voiceSeed").value = randomVoiceSeed(); });
+  $("#generateVoice").addEventListener("click", generateVoice);
+  $("#installVoiceModel").addEventListener("click", async () => {
+    try {
+      renderVoiceStatus(await api("/api/voice/install", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: voiceMode }),
+      }));
+      toast("語音環境與模型開始在背景安裝；大型檔案支援續傳。");
+    } catch (error) { toast(error.message, true); }
+  });
+  $("#cancelVoiceInstall").addEventListener("click", async () => {
+    try { renderVoiceStatus(await api("/api/voice/install/cancel", { method: "POST" })); toast("正在取消安裝；已完成的檔案會保留。"); }
+    catch (error) { toast(error.message, true); }
+  });
+  $("#voiceReferenceDrop").addEventListener("click", async event => {
+    if (event.target.closest("button,audio")) return;
+    try { await selectVoiceReference(await chooseFiles("audio/*,.wav,.mp3,.flac,.m4a,.aac,.ogg")); }
+    catch (error) { toast(error.message, true); }
+  });
+  $("#voiceReferenceDrop").addEventListener("dragover", event => { event.preventDefault(); event.currentTarget.classList.add("dragging"); });
+  $("#voiceReferenceDrop").addEventListener("dragleave", event => event.currentTarget.classList.remove("dragging"));
+  $("#voiceReferenceDrop").addEventListener("drop", async event => {
+    event.preventDefault(); event.currentTarget.classList.remove("dragging");
+    try { await selectVoiceReference(event.dataTransfer.files); }
+    catch (error) { toast(error.message, true); }
+  });
+  $("#clearVoiceReference").addEventListener("click", event => {
+    event.stopPropagation(); voiceReferenceAsset = null; renderVoiceReference();
+  });
+  $("#voiceXVectorOnly").addEventListener("change", event => {
+    $("#voiceReferenceText").disabled = event.target.checked;
+    if (event.target.checked) $("#voiceReferenceText").value = "";
+  });
+  $("#refreshVoiceJobs").addEventListener("click", () => loadVoiceJobs(true).catch(error => toast(error.message, true)));
+  $("#previousVoicePage").addEventListener("click", () => { if (voicePage > 1) { voicePage--; loadVoiceJobs(true); } });
+  $("#nextVoicePage").addEventListener("click", () => { if (voicePage < voiceTotalPages) { voicePage++; loadVoiceJobs(true); } });
+  $("#voiceJobList").addEventListener("click", async event => {
+    const favorite = event.target.closest("[data-voice-favorite]");
+    const rename = event.target.closest("[data-voice-rename]");
+    const cancel = event.target.closest("[data-voice-cancel]");
+    const resume = event.target.closest("[data-voice-resume]");
+    const recipe = event.target.closest("[data-voice-recipe]");
+    try {
+      if (favorite) {
+        await api(`/api/voice/jobs/${favorite.dataset.voiceFavorite}/favorite`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ favorite: favorite.dataset.favorite !== "true" }),
+        });
+        voicePage = 1;
+      } else if (rename) {
+        const name = prompt("輸入語音任務名稱（最多 80 個字）", rename.dataset.name || "");
+        if (name === null) return;
+        await api(`/api/voice/jobs/${rename.dataset.voiceRename}/rename`, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+        });
+      } else if (cancel) {
+        await api(`/api/voice/jobs/${cancel.dataset.voiceCancel}/cancel`, { method: "POST" });
+      } else if (resume) {
+        await api(`/api/voice/jobs/${resume.dataset.voiceResume}/resume`, { method: "POST" });
+      } else if (recipe) {
+        $(`[data-voice-recipe-panel="${recipe.dataset.voiceRecipe}"]`).classList.toggle("hidden");
+        return;
+      } else return;
+      await loadVoiceJobs(true);
+    } catch (error) { toast(error.message, true); }
+  });
   $$('[data-close-prompt-guide]').forEach(element => element.addEventListener("click", closePromptGuide));
   $$(".prompt-guide-nav button").forEach(button => button.addEventListener("click", () => {
     $$(".prompt-guide-nav button").forEach(item => item.classList.toggle("active", item === button));
@@ -2648,7 +3182,8 @@ function bindEvents() {
   });
   document.addEventListener("keydown", event => {
     if (event.key !== "Escape") return;
-    if (!$("#musicModal").classList.contains("hidden")) closeMusicStudio();
+    if (!$("#voiceModal").classList.contains("hidden")) closeVoiceStudio();
+    else if (!$("#musicModal").classList.contains("hidden")) closeMusicStudio();
     else if (!$("#promptGuideModal").classList.contains("hidden")) closePromptGuide();
     else if (!$("#gatewayModal").classList.contains("hidden")) closeGatewaySettings();
     else if (!$("#modelUpdateModal").classList.contains("hidden")) closeModelUpdates();
@@ -3296,6 +3831,9 @@ function initialize() {
   loadShortFilmProjects(true).catch(error => console.warn("短片專案載入失敗：", error));
   setMusicMode("instrumental");
   $("#musicSeed").value = randomMusicSeed();
+  setVoiceMode("custom");
+  $("#voiceSeed").value = randomVoiceSeed();
+  renderVoiceReference();
   renderKeyframePreview("first", state.firstImage, "起始圖片", false);
   renderKeyframePreview("last", state.lastImage, "結束圖片", true);
   renderContinuation();
@@ -3316,11 +3854,19 @@ function initialize() {
   }, 2500);
   setInterval(() => engineStartingAt && showEngineStarting(), 1000);
   setInterval(loadJobs, 3000);
+  setInterval(() => {
+    if (studioWorkspace === "shortfilm") loadShortFilmJobs().catch(error => console.warn("短片作品更新失敗：", error));
+  }, 3000);
   setInterval(() => refreshShortFilmShotStatuses().catch(error => console.warn("短片工作狀態更新失敗：", error)), 5000);
   setInterval(() => {
     if ($("#musicModal").classList.contains("hidden")) return;
     loadMusicStatus().catch(error => console.warn(error));
     loadMusicJobs().catch(error => console.warn(error));
+  }, 2500);
+  setInterval(() => {
+    if ($("#voiceModal").classList.contains("hidden")) return;
+    loadVoiceStatus().catch(error => console.warn(error));
+    loadVoiceJobs().catch(error => console.warn(error));
   }, 2500);
 }
 

@@ -244,6 +244,88 @@ def flatten_shots(project: dict[str, Any]) -> list[tuple[dict[str, Any], dict[st
     return [(scene, shot) for scene in project.get("scenes", []) for shot in scene.get("shots", [])]
 
 
+def _alias_is_mentioned(text: str, alias: str) -> bool:
+    """Match a named asset in story text without confusing ASCII word fragments."""
+    folded_text = text.casefold()
+    folded_alias = alias.casefold().strip()
+    if not folded_alias:
+        return False
+    if folded_alias.isascii():
+        return bool(re.search(
+            rf"(?<![a-z0-9_]){re.escape(folded_alias)}(?![a-z0-9_])",
+            folded_text,
+        ))
+    return folded_alias in folded_text
+
+
+def resolve_shot_asset_ids(
+    project: dict[str, Any],
+    scene: dict[str, Any],
+    shot: dict[str, Any],
+) -> list[str]:
+    """Combine explicit selections with aliases named in this scene or shot."""
+    explicit_ids = set(shot.get("asset_ids") or [])
+    reference_text = "\n".join(_text(value) for value in (
+        scene.get("location"),
+        scene.get("time_of_day"),
+        scene.get("description"),
+        shot.get("camera_detail"),
+        shot.get("action"),
+        shot.get("ending"),
+        shot.get("speaker_alias"),
+        shot.get("dialogue"),
+        shot.get("sound"),
+        shot.get("music"),
+    ) if value)
+    return [
+        asset["id"] for asset in project.get("assets", [])
+        if asset["id"] in explicit_ids
+        or _alias_is_mentioned(reference_text, asset.get("alias") or "")
+    ]
+
+
+def changed_reference_aliases(expected: Any, actual: Any) -> list[str]:
+    """Return named references missing from or changed in a previous render request."""
+    actual_by_alias = {
+        _text(item.get("alias"), limit=60).casefold(): item
+        for item in list(actual or [])
+        if isinstance(item, dict) and _text(item.get("alias"), limit=60)
+    }
+    changed: list[str] = []
+    for item in list(expected or []):
+        if not isinstance(item, dict):
+            continue
+        alias = _text(item.get("alias"), limit=60)
+        previous = actual_by_alias.get(alias.casefold())
+        if not previous:
+            changed.append(alias)
+            continue
+        expected_images = tuple(item.get("image_asset_ids") or [])
+        previous_images = tuple(previous.get("image_asset_ids") or [])
+        if (
+            expected_images != previous_images
+            or item.get("audio_asset_id") != previous.get("audio_asset_id")
+            or item.get("voice_mode") != previous.get("voice_mode")
+        ):
+            changed.append(alias)
+    return changed
+
+
+def project_job_records(project: dict[str, Any], records: Any) -> list[dict[str, Any]]:
+    """Keep current and historical render jobs belonging to one project."""
+    project_id = str(project.get("id") or "")
+    linked_job_ids = {
+        str(shot.get("job_id") or "")
+        for _, shot in flatten_shots(project)
+        if shot.get("job_id")
+    }
+    return [
+        job for job in records
+        if str(job.get("shortfilm_project_id") or "") == project_id
+        or str(job.get("id") or "") in linked_job_ids
+    ]
+
+
 def project_warnings(project: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     shots = flatten_shots(project)
@@ -254,6 +336,7 @@ def project_warnings(project: dict[str, Any]) -> list[str]:
     elif abs(total - target) > 1.0:
         warnings.append(f"分鏡合計（成品節奏）{total:.1f} 秒，與目標 {target:.1f} 秒相差 {abs(total - target):.1f} 秒。")
     aliases = {asset["alias"] for asset in project.get("assets", [])}
+    asset_lookup = {asset["id"]: asset for asset in project.get("assets", [])}
     for shot_index, (scene, shot) in enumerate(shots):
         label = f"{scene['title']}／{shot['title']}"
         if not shot.get("action"):
@@ -265,6 +348,15 @@ def project_warnings(project: dict[str, Any]) -> list[str]:
             warnings.append(f"{label} 的說話角色「{speaker}」不在素材中心。")
         if shot.get("continue_previous") and shot_index == 0:
             warnings.append(f"{label} 是第一鏡，無法沿用上一鏡尾幀。")
+        selected = [asset_lookup[item_id] for item_id in resolve_shot_asset_ids(project, scene, shot) if item_id in asset_lookup]
+        image_count = sum(len(asset.get("image_asset_ids") or []) for asset in selected)
+        image_count += 1 if shot.get("storyboard_asset_id") else 0
+        image_count += 1 if shot.get("continue_previous") else 0
+        audio_count = sum(1 for asset in selected if asset.get("audio_asset_id"))
+        if image_count > 9:
+            warnings.append(f"{label} 使用 {image_count} 張參考圖片，超過每鏡頭 9 張上限。")
+        if audio_count > 3:
+            warnings.append(f"{label} 使用 {audio_count} 段參考聲音，超過每鏡頭 3 段上限。")
     return warnings[:80]
 
 
@@ -292,7 +384,7 @@ def compile_shot_payload(
         raise ShortFilmError("找不到指定鏡頭。")
 
     asset_lookup = {item["id"]: item for item in project["assets"]}
-    selected = [asset_lookup[item_id] for item_id in shot["asset_ids"] if item_id in asset_lookup]
+    selected = [asset_lookup[item_id] for item_id in resolve_shot_asset_ids(project, scene, shot) if item_id in asset_lookup]
     warnings: list[str] = []
     if not shot["action"]:
         raise ShortFilmError("請先填寫這個鏡頭的畫面與動作。")
@@ -338,12 +430,21 @@ def compile_shot_payload(
         else:
             warnings.append("已要求沿用上一鏡尾幀，但上一鏡尚未完成；生成前必須先完成上一鏡。")
 
+    reference_start_sentence = ""
+    if referenced:
+        named_assets = ", ".join(asset["alias"] for asset in referenced)
+        reference_start_sentence = (
+            f"From the very first visible frame, use the named references for {named_assets}; "
+            "do not begin with an invented substitute, placeholder subject, or unrelated environment before the references appear."
+        )
+
     narrative = " ".join(part.strip() for part in [
         f"[Shot 1] A {FORMAT_LABELS[project['format']]} in {style}.",
         f"The scene takes place in {location}. {scene['description']}".strip(),
         f"Use a {SHOT_SIZES[shot['shot_size']]} featuring {subjects}.",
         camera,
         continuity_sentence,
+        reference_start_sentence,
         storyboard_sentence,
         shot["action"],
         dialogue,
