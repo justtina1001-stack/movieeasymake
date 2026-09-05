@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from custom_loras import normalize_loras, active_loras
 from typing import Any
 
 
@@ -108,6 +109,7 @@ class CompiledRequest:
     continuation_merge: bool
     continuation_audio: str
     mapping: list[dict[str, Any]]
+    custom_loras: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _clean_text(value: Any) -> str:
@@ -325,6 +327,13 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     aspect_ratio = _clean_text(payload.get("aspect_ratio")) or "16:9"
     megapixels = _safe_float(payload.get("megapixels"), 0.4)
     width, height = compute_dimensions(aspect_ratio, megapixels)
+    try:
+        custom_loras = normalize_loras(payload.get("custom_loras"))
+    except ValueError as error:
+        raise RequestError(str(error)) from error
+    reserved_loras = {name for candidates in TURBO_LORA_CANDIDATES.values() for name in candidates}
+    if any(item["name"].split("/")[-1] in reserved_loras for item in custom_loras if item["enabled"]):
+        raise RequestError("內建 Turbo LoRA 請從生成品質選擇，避免重複載入或使用錯誤的取樣設定。")
     requested_duration = min(15.0, max(5.0, _safe_float(payload.get("duration"), 5.0)))
     length = aligned_frame_count(requested_duration)
     seed = _safe_int(payload.get("seed"), 1)
@@ -735,6 +744,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 width=width,
                 height=height,
                 length=length,
+                custom_loras=custom_loras,
                 requested_duration=requested_duration,
                 actual_duration=length / FPS,
                 seed=seed,
@@ -787,6 +797,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         width=width,
         height=height,
         length=length,
+        custom_loras=custom_loras,
         requested_duration=requested_duration,
         actual_duration=round(length / FPS, 3),
         seed=seed,
@@ -820,6 +831,7 @@ def build_workflow(
     uploaded_assets: dict[str, str],
     output_stem: str,
     turbo_lora_name: str | None = None,
+    custom_lora_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     workflow: dict[str, Any] = {}
     next_id = 1
@@ -868,6 +880,11 @@ def build_workflow(
                 "video_budget": 0.30,
                 "denser_early_late_steps": True,
             }, "H3 Sparse Attention · Experimental 30%")
+    family = "ref2va" if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"} else "fl2va"
+    for item in active_loras(compiled.custom_loras, family):
+        model = add("LoraLoaderModelOnly", {
+            "model": [model, 0], "lora_name": (custom_lora_names or {}).get(item["name"], item["name"]), "strength_model": item["strength"],
+        }, "自訂 LoRA · " + item["name"])
     clip = add("CLIPLoader", {
         "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
         "type": "minimax",

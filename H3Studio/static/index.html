@@ -136,6 +136,7 @@
               <label id="refSizeWrap" class="hidden">角色參考圖精度<select id="refImageSize"><option value="match">match · 較快／Turbo 建議</option><option value="max">max · 身份較準／較耗顯存</option></select><small class="field-help">只控制參考圖片的處理精度，不是角色強度；非 Ref2VA 模式不適用。</small></label>
             </div>
           </details>
+          <div id="quickLoraPanel"></div>
           <div class="motion-director">
             <div class="motion-director-copy">
               <span class="motion-kicker">MOTION DIRECTOR</span>
@@ -395,6 +396,7 @@
                 <label>生成品質<select id="sfQuality"><option value="native">原生品質</option><option value="turbo">Turbo 穩定版</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1</option><option value="turbo_quality">Turbo 新高品質 · 8-step</option><option value="sparse_experimental">實驗性稀疏加速</option></select></label>
               </div>
               <label class="check-option shortfilm-export-option"><input id="sfExportFrames" type="checkbox"><span><strong>每個鏡頭完成後自動匯出 PNG 連續圖</strong><small>依各鏡頭最終節奏版本打包 ZIP，可從生成工作下載。</small></span></label>
+              <div id="sfLoraPanel"></div>
               <label class="shortfilm-wide-field">視覺風格<input id="sfStyle" placeholder="例如：cinematic realism, warm tungsten lighting, restrained camera motion"></label>
               <label class="shortfilm-wide-field">故事大綱<textarea id="sfSynopsis" rows="4" placeholder="描述故事起點、衝突、轉折與結局；這裡只保存企劃，不會直接整段送給影片模型。"></textarea></label>
             </section>
@@ -806,6 +808,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260902-separated-workspaces"></script>
+  <script src="/static/app.js?v=20260905-custom-loras"></script>
 </body>
 </html>

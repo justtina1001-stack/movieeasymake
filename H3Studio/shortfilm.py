@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from custom_loras import normalize_loras
 
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -151,6 +152,10 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
     base["megapixels"] = _bounded_number(raw.get("megapixels"), 0.4, 0.2, 1.0)
     quality_mode = _text(raw.get("quality_mode"), limit=40) or "native"
     base["quality_mode"] = quality_mode if quality_mode in QUALITY_MODES else "native"
+    try:
+        base["custom_loras"] = normalize_loras(raw.get("custom_loras"))
+    except ValueError as error:
+        raise ShortFilmError(str(error)) from error
     base["export_frames"] = raw.get("export_frames") is True
     base["target_duration"] = _bounded_number(raw.get("target_duration"), 30, 5, 3600)
     base["style"] = _text(raw.get("style"), limit=1000)
@@ -477,6 +482,7 @@ def compile_shot_payload(
         "aspect_ratio": project["aspect_ratio"],
         "megapixels": project["megapixels"],
         "quality_mode": quality_mode,
+        "custom_loras": project.get("custom_loras", []),
         "duration": shot["duration"],
         "retime_duration": shot.get("retime_duration"),
         "export_frames": project.get("export_frames") is True,

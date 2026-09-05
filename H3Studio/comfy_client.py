@@ -171,6 +171,17 @@ class ComfyClient:
         self._model_cache = (time.monotonic() + 60, dict(result))
         return result
 
+    async def list_loras(self) -> list[str]:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{self.base_url}/object_info/LoraLoaderModelOnly", headers=self.auth_headers()) as response:
+                if response.status != 200:
+                    raise RuntimeError("讀取 LoRA 清單失敗，請確認引擎連線與遠端金鑰。")
+                payload = await response.json()
+        values = payload.get("LoraLoaderModelOnly", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
+        return sorted({name for name in values
+                       if isinstance(name, str) and name.lower().endswith(".safetensors")})
+
     async def resolve_turbo_lora(self, profile: str | None) -> str | None:
         if not profile or profile not in TURBO_LORA_CANDIDATES:
             return None

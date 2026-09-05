@@ -24,7 +24,8 @@ from aiohttp import web
 from PIL import Image, ImageOps
 
 from comfy_client import ComfyClient
-from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids
+from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES
+from custom_loras import active_loras
 from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
 from model_updates import ModelUpdateError, ModelUpdateManager
 from music3 import (
@@ -1850,6 +1851,14 @@ class JobManager:
                                 "實驗性稀疏加速需要 H3-Optimizations 節點。"
                                 "請先執行模型更新，並重新啟動 ComfyUI。"
                             )
+                family = "ref2va" if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"} else "fl2va"
+                selected_loras = active_loras(compiled.custom_loras, family)
+                custom_lora_names = {}
+                if selected_loras:
+                    custom_lora_names = {name.replace("\\", "/"): name for name in await self.comfy.list_loras()}
+                    missing = [item["name"] for item in selected_loras if item["name"] not in custom_lora_names]
+                    if missing:
+                        raise RequestError("目前運算引擎找不到自訂 LoRA：" + "、".join(missing) + "。請放入該引擎的 models/loras 後重新掃描。")
                 uploaded: dict[str, str] = {}
                 asset_ids = required_asset_ids(compiled)
                 for index, asset_id in enumerate(asset_ids, start=1):
@@ -1866,7 +1875,7 @@ class JobManager:
                     generation_started_at=generation_started_at.isoformat(),
                     output_stem=output_stem,
                 )
-                workflow = build_workflow(compiled, uploaded, output_stem, turbo_lora_name)
+                workflow = build_workflow(compiled, uploaded, output_stem, turbo_lora_name, custom_lora_names)
                 (JOB_DIR / f"{job_id}.workflow.json").write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
                 (JOB_DIR / f"{job_id}.prompt.txt").write_text(compiled.prompt, encoding="utf-8")
                 node_titles = {node_id: node.get("_meta", {}).get("title", node["class_type"]) for node_id, node in workflow.items()}
@@ -2050,6 +2059,18 @@ def create_app() -> web.Application:
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
+
+    async def lora_catalog(_: web.Request) -> web.Response:
+        try:
+            names = await comfy.list_loras()
+            reserved = {name for candidates in TURBO_LORA_CANDIDATES.values() for name in candidates}
+            return web.json_response({
+                "names": [name.replace("\\", "/") for name in names if name.replace("\\", "/").split("/")[-1] not in reserved],
+                "mode": comfy.mode,
+                "folder": str(comfy.comfy_dir / "models" / "loras" / "h3studio_custom") if comfy.mode == "local" else "遠端 ComfyUI / models / loras / h3studio_custom",
+            })
+        except (RuntimeError, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            return json_response_error(RuntimeError(f"無法掃描 LoRA，請先啟動或連線引擎。{error}"), 503)
 
     async def status(_: web.Request) -> web.Response:
         stats = await comfy.system_stats()
@@ -2862,6 +2883,7 @@ def create_app() -> web.Application:
 
     app.router.add_get("/", index)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/loras", lora_catalog)
     app.router.add_get("/api/connection", connection)
     app.router.add_post("/api/connection", update_connection)
     app.router.add_post("/api/connection/test", test_connection)
