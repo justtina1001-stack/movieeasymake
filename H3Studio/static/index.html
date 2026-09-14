@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260910-continuous-segments">
+  <link rel="stylesheet" href="/static/styles.css?v=20260914-shared-queue">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -29,6 +29,23 @@
   </header>
 
   <main class="page-shell">
+    <section id="sharedQueue" class="shared-queue" aria-labelledby="sharedQueueTitle" aria-busy="true">
+      <div class="shared-queue-heading">
+        <div><p class="eyebrow">SHARED ENGINE</p><h2 id="sharedQueueTitle">共享生成佇列</h2></div>
+        <div class="shared-queue-tools"><span id="queueUpdatedAt">正在讀取...</span><button id="refreshSharedQueue" class="button ghost small" type="button" aria-label="重新整理共享生成佇列">重新整理</button></div>
+      </div>
+      <div class="shared-queue-stats" aria-label="目前排隊數量">
+        <div class="queue-stat queue-stat-running"><span><i></i>引擎執行</span><strong id="queueRunningCount">—</strong><small>已進入生成引擎</small></div>
+        <div class="queue-stat"><span>引擎排隊</span><strong id="queuePendingCount">—</strong><small>已送達，等待輪到</small></div>
+        <div class="queue-stat queue-stat-local"><span>本機待送出</span><strong id="queueLocalCount">—</strong><small>這個 Studio 的等待工作</small></div>
+      </div>
+      <p id="queueStatusMessage" class="queue-status-message" role="status" aria-live="polite">正在確認引擎排隊狀態...</p>
+      <details class="queue-details">
+        <summary>查看工作清單<span aria-hidden="true">⌄</span></summary>
+        <div id="queueWorkList" class="queue-work-list"><p class="queue-empty">正在讀取...</p></div>
+        <p class="queue-scope-note">引擎數量包含共用同一引擎的工作；本機待送出另列，其他同事電腦尚未送出的工作不在此清單。順序會隨新增、完成與取消更新。</p>
+      </details>
+    </section>
     <nav class="workspace-switch" aria-label="工作模式">
       <button class="active" type="button" data-workspace="quick">
         <span>QUICK</span><strong>快速生成</strong><small>老虎機示意影片與單段 H3 工作</small>
@@ -309,6 +326,7 @@
           <div id="mgPromptInfo" class="info-strip mg-prompt-info hidden"><strong>會自動整合</strong><span>角色、轉輪帶、背景與鏡頭的設定會由工具自動整理成一份官方 Ref2VA 提示詞，再一次送給 AI 生成。這裡不用重複填寫，只需補充跨圖層互動、整體故事、聲音或特殊時間安排。</span></div>
           <textarea id="prompt" rows="10" placeholder="例如：小明走進神殿，看見金色佛像後停下腳步。攝影機從背後緩慢推進，小明轉頭說：「有人在這裡嗎？」背景只有微弱風聲與遠處鐘聲。"></textarea>
           <div class="prompt-footer"><span id="promptCount">0 字</span><button id="insertPromptTemplate" class="text-button" type="button">插入提示詞範本</button></div>
+          <p class="render-note">對白請明確寫成「小明說：『你好。』」或「旁白：『故事開始了。』」。預覽與送出時會自動補上台詞標籤，保留原文；已加標籤的台詞不會重複處理。</p>
           <div id="promptTemplateHelp" class="prompt-template-help hidden">
             <div><strong>快速替換關鍵字</strong><span id="promptKeywordStatus">點一下標籤，即可選取提示詞中的對應內容</span></div>
             <div id="promptKeywordList" class="prompt-keyword-list"></div>
@@ -429,6 +447,7 @@
                 <p class="render-note">共用資產庫，不會將所有素材一律送入模型。分鏡詞提及名稱會自動引用；下方勾選的素材則每段都使用，加入分鏡後可逐段調整。</p>
                 <div id="sfSegmentAssets" class="shortfilm-shot-asset-chips"></div>
                 <p class="render-note">每段最多 9 項素材，且圖片合計最多 9 張。續接尾幀占 1 張，多圖角色逐張計算；另有分鏡圖也要計入。聲音最多 3 段。</p>
+                <p class="render-note">分鏡詞中的對白請加上「小明說：」或「旁白：」並用引號包住台詞，預覽與送出時會自動加上台詞標籤。招牌、字幕等畫面文字不會只因加了引號就當成對白。</p>
                 <div id="sfSegmentRows" class="sf-segment-rows"></div>
                 <p id="sfSegmentSummary" class="render-note" role="status" aria-live="polite"></p>
                 <button id="sfAppendSegments" class="button secondary wide" type="button">加入連續分鏡（尚不生成）</button>
@@ -661,6 +680,8 @@ non_diegetic_music: ...</pre></div>
           <section id="guideTimeline" class="guide-section">
             <span class="guide-kicker">SHOT & CAMERA</span><h3>鏡頭、時間與動作路徑</h3>
             <ul class="guide-rules">
+              <li>預覽與送出時，工具會為「小明說：『你好。』」、「旁白：『故事開始了。』」等明確對白自動加上台詞標籤；中文台詞使用 <code>&lt;d&gt;[Chinese] 原文&lt;/d&gt;</code>，已加標籤的內容會保留。</li>
+              <li>不確定能否辨識的寫法，或其他語言台詞，可直接填寫 <code>&lt;d&gt;[Language] 原文&lt;/d&gt;</code>，並把 <code>Language</code> 換成語言名稱，例如 <code>English</code>。招牌、字幕等畫面文字不會只因加了引號就當成對白。</li>
               <li>第一個鏡頭只寫 <code>[Shot 1]</code>，不要附時間。</li>
               <li>後續剪接使用遞增時間，例如 <code>[Shot 2] At 00:03.500, the camera cuts to...</code></li>
               <li>小幅改變角度或距離時優先使用運鏡，不需要為每個變化都切鏡。</li>
@@ -827,6 +848,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260910-continuous-segments"></script>
+  <script src="/static/app.js?v=20260914-shared-queue"></script>
 </body>
 </html>

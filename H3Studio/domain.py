@@ -4,6 +4,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from custom_loras import normalize_loras, active_loras
+from dialogue import format_dialogue, map_outside_dialogue
 from typing import Any
 
 
@@ -200,10 +201,13 @@ def aligned_frame_count(seconds: float) -> int:
 
 
 def _rewrite_aliases(text: str, aliases: dict[str, str]) -> str:
-    for alias in sorted(aliases, key=len, reverse=True):
-        if alias:
-            text = text.replace(alias, aliases[alias])
-    return text
+    def rewrite(part: str) -> str:
+        for alias in sorted(aliases, key=len, reverse=True):
+            if alias:
+                part = part.replace(alias, aliases[alias])
+        return part
+
+    return map_outside_dialogue(text, rewrite)
 
 
 def _motion_direction(payload: dict[str, Any]) -> str:
@@ -225,6 +229,7 @@ def _motion_direction(payload: dict[str, Any]) -> str:
 def _storyboard_text(
     storyboards: list[dict[str, Any]],
     aliases: dict[str, str],
+    speakers: tuple[str, ...] = (),
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     lines: list[str] = []
     image_assets: list[str] = []
@@ -235,9 +240,13 @@ def _storyboard_text(
         start = cursor
         end = cursor + duration
         cursor = end
-        description = _rewrite_aliases(_clean_text(shot.get("description")), aliases)
+        description = _rewrite_aliases(
+            format_dialogue(_clean_text(shot.get("description")), speakers=speakers), aliases,
+        )
         camera = _clean_text(shot.get("camera"))
-        dialogue = _rewrite_aliases(_clean_text(shot.get("dialogue")), aliases)
+        dialogue = _rewrite_aliases(
+            format_dialogue(_clean_text(shot.get("dialogue")), speakers=speakers, dialogue_field=True), aliases,
+        )
         sound = _clean_text(shot.get("sound"))
         motion_beats = _rewrite_aliases(_clean_text(shot.get("motion_beats")), aliases)
         effects = _rewrite_aliases(_clean_text(shot.get("effects")), aliases)
@@ -507,6 +516,11 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             raise RequestError("角色替換模式需要至少一張新角色圖片。")
         if not (_clean_text(replacement.get("video_asset_id")) or replacement.get("video_asset_ids")):
             raise RequestError("角色替換模式需要一支原始表演影片。")
+    speakers = tuple(
+        _clean_text(item.get("alias")) for item in references
+        if item.get("type") in {"character", "creature"}
+    )
+    base_prompt = format_dialogue(base_prompt, speakers=speakers)
     storyboards = payload.get("storyboards") or []
     storyboard_duration = sum(min(15.0, max(0.5, _safe_float(shot.get("duration"), 2.0))) for shot in storyboards)
     if storyboard_duration > (length / FPS) + 0.05:
@@ -637,7 +651,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 "audio_tag": audio_tag,
             })
 
-        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, aliases)
+        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, aliases, speakers)
         guides.extend(storyboard_guides)
         for shot_index, image_id in enumerate(storyboard_images, start=1):
             picture_index += 1
@@ -781,7 +795,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 sections.append("retention_rules:\n嚴格保持每個已命名角色的身份、臉部、服裝與聲音歸屬；不要把背景、風格或其他角色的特徵互相混合；動作參考只控制動態與時序，不得覆蓋角色身份；保持肢體結構、重心轉移、接觸和反作用力連續。")
             final_prompt = "\n\n".join(sections)
     else:
-        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, {})
+        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, {}, speakers)
         guides.extend(storyboard_guides)
         if storyboard_images:
             raise RequestError("中間分鏡圖片需要使用多模態參考模式；此模式仍可使用純文字分鏡。")

@@ -81,6 +81,8 @@ let engineStartingAt = 0;
 let keyframePrepareVersion = 0;
 let connectionSettings = null;
 let sharedGatewayStatus = null;
+let sharedQueueData = null;
+let sharedQueueLoading = false;
 let installerPreflightData = null;
 let lastInstallerStatus = "idle";
 let modelUpdateData = null;
@@ -533,8 +535,8 @@ async function loadVoiceJobs(force = false) {
     return `<article class="music-job${job.favorite ? " favorite" : ""}" data-voice-job="${job.id}">
       <div class="music-job-head"><div class="music-job-title"><strong>${escapeHtml(job.name || `未命名${voiceModeLabel(job.mode)}`)}</strong><small>${created} · ${escapeHtml(voiceModeLabel(job.mode))} · Seed ${escapeHtml(job.seed)}</small></div>
       <div class="music-job-controls"><button type="button" data-voice-favorite="${job.id}" data-favorite="${Boolean(job.favorite)}" class="${job.favorite ? "active" : ""}" title="我的最愛">★</button><button type="button" data-voice-rename="${job.id}" data-name="${escapeHtml(job.name || "")}" title="重新命名">✎</button></div></div>
-      <div class="music-job-status"><b class="${escapeHtml(job.status)}">${escapeHtml(statusLabel(job.status))}</b><span>${escapeHtml(job.current_node || voiceJobElapsed(job))}${active ? ` · ${Math.round(Number(job.progress) || 0)}%` : ""}</span></div>
-      ${active ? `<div class="progress-track"><span style="width:${Math.max(2, Number(job.progress) || 2)}%"></span></div>` : ""}
+      <div class="music-job-status">${queueJobBadgeHtml(job)}<span>${escapeHtml(active ? "" : job.current_node || voiceJobElapsed(job))}</span></div>
+      ${active ? queueJobProgressHtml(job) : ""}
       ${job.status === "completed" ? `<audio controls preload="none" src="/api/voice/jobs/${job.id}/audio"></audio>` : ""}
       ${job.error ? `<div class="music-job-error">${escapeHtml(job.error)}</div>` : ""}
       <div class="music-job-actions">
@@ -652,8 +654,8 @@ async function loadMusicJobs(force = false) {
     return `<article class="music-job${job.favorite ? " favorite" : ""}" data-music-job="${job.id}">
       <div class="music-job-head"><div class="music-job-title"><strong>${escapeHtml(job.name || (job.mode === "song" ? "未命名歌曲" : "未命名純音樂"))}</strong><small>${created} · ${escapeHtml(job.format || "mp3").toUpperCase()} · Seed ${escapeHtml(job.seed)}</small></div>
       <div class="music-job-controls"><button type="button" data-music-favorite="${job.id}" data-favorite="${Boolean(job.favorite)}" class="${job.favorite ? "active" : ""}" title="我的最愛">★</button><button type="button" data-music-rename="${job.id}" data-name="${escapeHtml(job.name || "")}" title="重新命名">✎</button></div></div>
-      <div class="music-job-status"><b class="${escapeHtml(job.status)}">${escapeHtml(statusLabel(job.status))}</b><span>${escapeHtml(job.current_node || musicJobElapsed(job))}${active ? ` · ${Math.round(Number(job.progress) || 0)}%` : ""}</span></div>
-      ${active ? `<div class="progress-track"><span style="width:${Math.max(2, Number(job.progress) || 2)}%"></span></div>` : ""}
+      <div class="music-job-status">${queueJobBadgeHtml(job)}<span>${escapeHtml(active ? "" : job.current_node || musicJobElapsed(job))}</span></div>
+      ${active ? queueJobProgressHtml(job) : ""}
       ${job.status === "completed" ? `<audio controls preload="none" src="/api/music/jobs/${job.id}/audio"></audio>` : ""}
       ${job.error ? `<div class="music-job-error">${escapeHtml(job.error)}</div>` : ""}
       <div class="music-job-actions">
@@ -1576,7 +1578,7 @@ function renderStoryboards() {
         <div class="shot-fields">
           <label>秒數<input data-shot-field="duration" type="number" min="0.5" max="15" step="0.5" value="${escapeHtml(shot.duration)}"></label>
           <label>鏡頭與運鏡<input data-shot-field="camera" value="${escapeHtml(shot.camera)}" placeholder="低角度緩慢推進"></label>
-          <label>台詞<input data-shot-field="dialogue" value="${escapeHtml(shot.dialogue)}" placeholder="小明說：「……」"></label>
+          <label>台詞<input data-shot-field="dialogue" value="${escapeHtml(shot.dialogue)}" placeholder="小明說：「你好。」"><small class="field-help">預覽與送出時自動加上台詞標籤</small></label>
           <label class="wide-field">畫面與動作<textarea data-shot-field="description" rows="2" placeholder="描述這個鏡頭發生的動作">${escapeHtml(shot.description)}</textarea></label>
           <label class="wide-field">動態節拍<input data-shot-field="motionBeats" value="${escapeHtml(shot.motionBeats)}" placeholder="例如：蓄力 → 快速揮擊 → 接觸停頓 → 回彈收勢"></label>
           <label class="wide-field">特效時序<input data-shot-field="effects" value="${escapeHtml(shot.effects)}" placeholder="例如：接觸點閃光 → 衝擊波擴散 → 火花拖尾消散"></label>
@@ -1720,6 +1722,128 @@ function statusLabel(status) {
   return ({ waiting: "等待中", queued: "等待中", preparing: "準備素材", running: "生成中", completed: "已完成", failed: "失敗", cancelled: "已取消", interrupted: "已中斷" })[status] || status;
 }
 
+function queueJobPresentation(job, queue = sharedQueueData) {
+  const active = ["queued", "preparing", "running"].includes(job.status);
+  const percent = value => value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Math.max(0, Math.min(100, Math.round(Number(value))));
+  if (!active) return { label: statusLabel(job.status), detail: job.current_node || statusLabel(job.status), progress: percent(job.progress), waiting: false };
+  const row = queue?.jobs?.[job.id];
+  const phase = row?.phase;
+  if (phase === "engine_waiting" && queue.available) {
+    const position = Number.isInteger(row.position) && row.position > 0 ? row.position : null;
+    const ahead = Number.isInteger(row.ahead_count) && row.ahead_count >= 0 ? row.ahead_count : null;
+    return { label: position ? `排隊第 ${position} 位` : "引擎排隊", detail: ahead !== null ? `前方 ${ahead} 筆工作${position === 1 ? " · 下一個輪到" : ""}` : "已送達引擎，等待輪到", progress: null, waiting: true };
+  }
+  if (phase === "engine_running" && queue.available) return { label: "引擎生成中", detail: job.current_node || "正在生成", progress: percent(row.progress ?? job.progress), waiting: false };
+  if (phase === "local_waiting") return { label: "本機待送出", detail: queue.stale ? "上次狀態：等待本機工作完成後送出" : "等待本機工作完成後送出 · 尚無引擎順位", progress: null, waiting: true };
+  if (phase === "preparing" || (!row && job.status === "preparing")) return { label: "準備素材", detail: "正在準備或上傳素材", progress: null, waiting: false };
+  if (phase === "finishing") return { label: "完成後處理", detail: "正在下載、轉檔或整理輸出", progress: null, waiting: false };
+  if (phase === "local_processing") return { label: "本機處理中", detail: "由本機工作程序執行", progress: null, waiting: false };
+  return { label: queue && !queue.available ? "狀態暫無法確認" : "確認狀態中", detail: queue && !queue.available ? "排隊資訊暫時無法取得，工作可能仍在進行" : "正在同步引擎狀態與排隊位置", progress: null, waiting: true };
+}
+
+function queueJobAttributes(job) {
+  if (!["queued", "preparing", "running"].includes(job.status)) return "";
+  return ` data-queue-job="${escapeHtml(job.id)}" data-queue-status="${escapeHtml(job.status)}" data-queue-progress="${escapeHtml(job.progress ?? "")}" data-queue-node="${escapeHtml(job.current_node || "")}"`;
+}
+
+function queueJobBadgeHtml(job, className = "job-badge") {
+  return `<span class="${className} ${escapeHtml(job.status || "draft")}"${queueJobAttributes(job)} data-queue-badge>${escapeHtml(queueJobPresentation(job).label)}</span>`;
+}
+
+function queueProgressContent(presentation) {
+  const known = presentation.progress !== null;
+  return `<div class="progress-track${known ? "" : " queue-progress-unmeasured"}"><span style="width:${known ? presentation.progress : 0}%"></span></div><small><span>${escapeHtml(presentation.detail)}</span><span>${known ? `${presentation.progress}%` : ""}</span></small>`;
+}
+
+function queueJobProgressHtml(job) {
+  return `<div class="job-progress${queueJobPresentation(job).waiting ? " queue-job-waiting" : ""}"${queueJobAttributes(job)} data-queue-progress-panel>${queueProgressContent(queueJobPresentation(job))}</div>`;
+}
+
+function refreshQueueJobAnnotations() {
+  $$('[data-queue-job]').forEach(element => {
+    const job = { id: element.dataset.queueJob, status: element.dataset.queueStatus, progress: element.dataset.queueProgress, current_node: element.dataset.queueNode };
+    const presentation = queueJobPresentation(job);
+    if (element.hasAttribute("data-queue-badge")) {
+      element.textContent = presentation.label;
+      element.title = presentation.detail;
+    } else if (element.hasAttribute("data-queue-progress-panel")) {
+      element.classList.toggle("queue-job-waiting", presentation.waiting);
+      element.innerHTML = queueProgressContent(presentation);
+    }
+  });
+}
+
+function queueRowsHtml(rows, group) {
+  const kinds = { video: "影片", music: "音樂", voice: "語音", unknown: "其他工作" };
+  return rows.map(row => {
+    const rank = Number.isInteger(row.position) && row.position > 0 ? `第 ${row.position} 位` : "等待中";
+    const phaseLabel = { engine_running: "執行中", engine_waiting: rank, local_waiting: "待送出", preparing: "準備素材", finishing: "完成後處理", local_processing: "本機處理", unknown: "同步狀態中" }[row.phase] || "同步狀態中";
+    const progress = row.phase === "engine_running" && row.progress !== null && row.progress !== undefined && Number.isFinite(Number(row.progress)) ? ` · ${Math.max(0, Math.min(100, Math.round(Number(row.progress))))}%` : "";
+    const ahead = row.phase === "engine_waiting" && Number.isInteger(row.ahead_count) && row.ahead_count >= 0 ? ` · 前方 ${row.ahead_count} 筆` : "";
+    return `<li class="queue-work-row ${group}"><span class="queue-row-position">${escapeHtml(phaseLabel)}</span><div><strong>${escapeHtml(row.title || "未命名工作")}</strong><small>${escapeHtml(kinds[row.kind] || kinds.unknown)}${row.owner ? ` · ${escapeHtml(row.owner)}` : ""}${escapeHtml(ahead)}${escapeHtml(progress)}</small></div></li>`;
+  }).join("");
+}
+
+function renderSharedQueue() {
+  const panel = $("#sharedQueue");
+  if (!panel) return;
+  const data = sharedQueueData;
+  const available = data?.available === true;
+  const count = value => Number.isInteger(value) && value >= 0 ? String(value) : "—";
+  $("#queueRunningCount").textContent = available ? count(data.running_count) : "—";
+  $("#queuePendingCount").textContent = available ? count(data.pending_count) : "—";
+  $("#queueLocalCount").textContent = count(data?.local_waiting_count);
+  panel.classList.toggle("queue-unavailable", !available && Boolean(data));
+  const date = data?.updated_at ? new Date(data.updated_at) : null;
+  $("#queueUpdatedAt").textContent = date && !Number.isNaN(date.getTime()) ? `${data.stale ? "上次取得" : "更新於"} ${date.toLocaleTimeString("zh-TW", { hour12: false })}` : "尚未取得狀態";
+  const localActive = Array.isArray(data?.local_active) ? data.local_active : [];
+  let message = "正在確認引擎排隊狀態...";
+  if (data && !available) message = data.error || "目前無法取得引擎佇列，無法確認是否仍有工作執行。";
+  else if (available && data.running_count > 0) message = `引擎正在執行 ${data.running_count} 筆工作${data.pending_count > 0 ? `，另有 ${data.pending_count} 筆等待輪到。` : "。"}`;
+  else if (available && data.pending_count > 0) message = `引擎已收到 ${data.pending_count} 筆等待工作，正在同步執行狀態。`;
+  else if (available) message = "引擎目前沒有已接收的執行或排隊工作。";
+  const localProcessing = localActive.filter(row => row.phase !== "unknown").length;
+  const unknown = localActive.length - localProcessing;
+  if (localProcessing) message += ` 本機另有 ${localProcessing} 筆正在準備或處理，詳見清單。`;
+  if (unknown) message += ` 另有 ${unknown} 筆工作正在確認引擎狀態。`;
+  if (data?.stale) message += " 本機資訊為上次取得的狀態。";
+  const messageElement = $("#queueStatusMessage");
+  if (messageElement.textContent !== message) messageElement.textContent = message;
+  const groups = [
+    ["引擎執行", available ? data.running : [], "running"],
+    ["引擎排隊", available ? data.pending : [], "pending"],
+    ["本機待送出", data?.local_waiting, "local"],
+    ["本機工作狀態", localActive, "local"],
+  ].filter(([, rows]) => Array.isArray(rows) && rows.length);
+  $("#queueWorkList").innerHTML = groups.length ? groups.map(([label, rows, group]) => `<section class="queue-work-group"><h3>${label}<span>${rows.length}</span></h3><ol>${queueRowsHtml(rows, group)}</ol></section>`).join("") : `<p class="queue-empty">${available ? "目前沒有待顯示的工作" : "引擎工作清單暫時無法取得"}</p>`;
+}
+
+async function loadSharedQueue() {
+  if (sharedQueueLoading) return;
+  sharedQueueLoading = true;
+  const button = $("#refreshSharedQueue");
+  if (button) button.disabled = true;
+  $("#sharedQueue")?.setAttribute("aria-busy", "true");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const data = await api("/api/queue", { signal: controller.signal });
+    if (typeof data.available !== "boolean" || !data.jobs || typeof data.jobs !== "object") throw new Error("無法辨識排隊資訊，請更新並重新啟動 Studio。");
+    if (data.available && ![data.running_count, data.pending_count].every(value => Number.isInteger(value) && value >= 0)) throw new Error("引擎排隊數量尚未提供。");
+    sharedQueueData = { ...data, stale: false };
+  } catch (error) {
+    const localJobs = Object.fromEntries(Object.entries(sharedQueueData?.jobs || {}).filter(([, row]) => ["local_waiting", "preparing", "finishing", "local_processing"].includes(row.phase)));
+    sharedQueueData = { ...sharedQueueData, available: false, running_count: null, pending_count: null, running: [], pending: [], jobs: localJobs, stale: Boolean(sharedQueueData?.updated_at), error: /HTTP 404/.test(error.message) ? "此 Studio 尚未提供排隊資訊，請更新並重新啟動 Studio。" : "排隊資訊暫時無法取得，請確認引擎連線；工作可能仍在進行。" };
+  } finally {
+    clearTimeout(timeout);
+    sharedQueueLoading = false;
+    if (button) button.disabled = false;
+    $("#sharedQueue")?.setAttribute("aria-busy", "false");
+    renderSharedQueue();
+    refreshQueueJobAnnotations();
+  }
+}
+
 function formatExecutionTime(seconds) {
   if (!Number.isFinite(Number(seconds))) return "尚未記錄";
   const total = Math.max(0, Math.round(Number(seconds)));
@@ -1738,8 +1862,9 @@ function batchSegmentsHtml(job) {
     <div class="batch-segments-heading"><strong>完整長片替換進度</strong><span>${completed} / ${job.segments.length} 段完成</span></div>
     ${job.segments.map(segment => {
       const progress = Number(segment.progress) || (segment.status === "completed" ? 100 : 0);
+      const child = { id: segment.child_job_id, status: segment.status || "waiting", progress };
       const range = `${Number(segment.core_start).toFixed(2)}–${Number(segment.core_end).toFixed(2)} 秒`;
-      return `<div class="batch-segment"><strong>第 ${segment.index} 段</strong><div><div class="progress-track"><span style="width:${progress}%"></span></div><small>${range}</small></div><span class="batch-segment-status">${escapeHtml(statusLabel(segment.status || "waiting"))}${progress ? ` · ${Math.round(progress)}%` : ""}</span></div>`;
+      return `<div class="batch-segment"><strong>第 ${segment.index} 段</strong><div>${queueJobProgressHtml(child)}<small>${range}</small></div>${queueJobBadgeHtml(child, "batch-segment-status")}</div>`;
     }).join("")}
   </div>`;
 }
@@ -1750,6 +1875,15 @@ function jobExecutionSeconds(job) {
     return Math.max(0, (Date.now() - new Date(job.generation_started_at).getTime()) / 1000);
   }
   return null;
+}
+
+function jobExecutionLabel(job) {
+  if (["queued", "preparing", "running"].includes(job.status)) {
+    const created = job.created_at ? new Date(job.created_at).getTime() : NaN;
+    return Number.isFinite(created) ? `工作經過 ${formatExecutionTime(Math.max(0, (Date.now() - created) / 1000))}（含等待與處理）` : "等待與處理時間尚未記錄";
+  }
+  const seconds = jobExecutionSeconds(job);
+  return seconds === null ? "生成耗時尚未記錄" : `生成耗時 ${formatExecutionTime(seconds)}`;
 }
 
 function recipeAsset(assetId, assets) {
@@ -2051,8 +2185,7 @@ async function loadJobs(force = false) {
       const date = new Date(job.created_at).toLocaleString("zh-TW", { hour12: false });
       const fallbackName = `${modeLabels[job.mode] || job.mode} · ${job.width}×${job.height}`;
       const title = job.name || fallbackName;
-      const executionSeconds = jobExecutionSeconds(job);
-      const executionLabel = executionSeconds === null ? "生成耗時尚未記錄" : `${active ? "已執行" : "生成耗時"} ${formatExecutionTime(executionSeconds)}`;
+      const executionLabel = jobExecutionLabel(job);
       const batchLabel = job.batch_type === "replace_long" ? ` · 完整長片 ${job.segments?.length || 0} 段` : "";
       const hasRetime = Boolean(job.retimed && job.original_local_output);
       const frameSequence = job.frame_sequence && job.frame_sequence.filename ? job.frame_sequence : null;
@@ -2064,12 +2197,12 @@ async function loadJobs(force = false) {
       return `
         <details class="job-card ${job.favorite ? "favorite" : ""}" data-job-id="${job.id}" ${open ? "open" : ""}>
           <summary class="job-summary">
-            <div class="job-title"><button class="job-favorite ${job.favorite ? "active" : ""}" data-job-favorite="${job.id}" data-favorite="${job.favorite ? "true" : "false"}" type="button" title="${job.favorite ? "取消我的最愛" : "加入我的最愛"}">★</button><span class="job-badge ${job.status}">${statusLabel(job.status)}</span><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div></div>
-            <div class="job-progress"><div class="progress-track"><span style="width:${job.progress || 0}%"></span></div><small><span>${escapeHtml(job.current_node || statusLabel(job.status))}</span><span>${job.progress || 0}%</span></small></div>
+            <div class="job-title"><button class="job-favorite ${job.favorite ? "active" : ""}" data-job-favorite="${job.id}" data-favorite="${job.favorite ? "true" : "false"}" type="button" title="${job.favorite ? "取消我的最愛" : "加入我的最愛"}">★</button>${queueJobBadgeHtml(job)}<div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div></div>
+            ${queueJobProgressHtml(job)}
             <span class="job-chevron">⌄</span>
           </summary>
           <div class="job-detail">
-            <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small><small>生成執行時間：${escapeHtml(executionLabel)}</small>${hasRetime ? `<small>節奏處理：原始 ${Number(job.original_duration).toFixed(2)} 秒，已調整為 ${Number(job.duration).toFixed(2)} 秒</small>` : ""}${frameSequence ? `<small>連續圖：${Number(frameSequence.frame_count)} 張 PNG · ${Number(frameSequence.width)}×${Number(frameSequence.height)} · ${Number(frameSequence.fps).toFixed(2)} FPS</small>` : ""}${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
+            <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small><small>工作時間：${escapeHtml(executionLabel)}</small>${hasRetime ? `<small>節奏處理：原始 ${Number(job.original_duration).toFixed(2)} 秒，已調整為 ${Number(job.duration).toFixed(2)} 秒</small>` : ""}${frameSequence ? `<small>連續圖：${Number(frameSequence.frame_count)} 張 PNG · ${Number(frameSequence.width)}×${Number(frameSequence.height)} · ${Number(frameSequence.fps).toFixed(2)} FPS</small>` : ""}${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
             <div class="job-actions">
               <button class="button ghost" data-job-show-prompt="${job.id}" type="button">查看生成提示詞</button>
               <button class="button secondary" data-job-apply="${job.id}" type="button">快速套用</button>
@@ -2456,7 +2589,7 @@ function renderShortFilmSegmentBuilder() {
   $("#sfSegmentTarget").value = draft.target_duration;
   $("#sfSegmentDuration").value = draft.duration;
   $("#sfSegmentAssets").innerHTML = project.assets.map(asset => `<label class="shortfilm-asset-chip"><input type="checkbox" data-sf-segment-asset="${asset.id}" ${draft.asset_ids.includes(asset.id) ? "checked" : ""}><span>${escapeHtml(asset.alias)} (${(asset.image_asset_ids || []).length} 張)</span></label>`).join("") || '<small>先在上方素材庫加入角色、場景或道具。</small>';
-  $("#sfSegmentRows").innerHTML = draft.prompts.map((prompt, index) => `<label class="sf-segment-row"><strong>第 ${index + 1} 段 · ${index * draft.duration}–${(index + 1) * draft.duration} 秒${index ? " · 接上一段尾幀" : " · 新的開頭"}</strong><textarea data-sf-segment-prompt="${index}" rows="3" maxlength="5000" placeholder="使用素材名稱描述本段可見動作、鏡頭與結尾狀態；時間以這一段的 0 秒起算。">${escapeHtml(prompt)}</textarea><span data-sf-segment-usage="${index}"></span></label>`).join("");
+  $("#sfSegmentRows").innerHTML = draft.prompts.map((prompt, index) => `<label class="sf-segment-row"><strong>第 ${index + 1} 段 · ${index * draft.duration}–${(index + 1) * draft.duration} 秒${index ? " · 接上一段尾幀" : " · 新的開頭"}</strong><textarea data-sf-segment-prompt="${index}" rows="3" maxlength="5000" placeholder="使用素材名稱描述本段可見動作、鏡頭與結尾狀態；時間以這一段的 0 秒起算。對白例如：小明說：「你好。」">${escapeHtml(prompt)}</textarea><span data-sf-segment-usage="${index}"></span></label>`).join("");
   updateShortFilmSegmentUsage();
 }
 
@@ -2736,7 +2869,7 @@ function renderShortFilmScenes() {
         ? `<div class="shortfilm-storyboard-preview" style="background-image:url('/api/assets/${shot.storyboard_asset_id}')"><button type="button" data-sf-remove-storyboard>×</button></div>`
         : '<div class="shortfilm-storyboard-placeholder">＋ 分鏡圖</div>';
       return `<article class="shortfilm-shot-card" data-sf-shot-id="${shot.id}">
-        <div class="shortfilm-shot-heading"><div><span>SHOT ${String(shotIndex + 1).padStart(2, "0")}</span><input data-sf-shot-field="title" value="${escapeHtml(shot.title)}"></div><div class="shortfilm-shot-status ${escapeHtml(shot.status || "draft")}">${escapeHtml(statusLabel(shot.status || "draft"))}</div><button class="delete-button" type="button" data-sf-delete-shot>×</button></div>
+        <div class="shortfilm-shot-heading"><div><span>SHOT ${String(shotIndex + 1).padStart(2, "0")}</span><input data-sf-shot-field="title" value="${escapeHtml(shot.title)}"></div>${queueJobBadgeHtml({ id: shot.job_id, status: shot.status || "draft" }, "shortfilm-shot-status")}<button class="delete-button" type="button" data-sf-delete-shot>×</button></div>
         <div class="form-grid four">
           <label>時長<div class="field-unit"><input data-sf-shot-field="duration" type="number" min="5" max="15" step="0.5" value="${escapeHtml(shot.duration)}"><span>秒</span></div></label>
           <label>節奏預覽<div class="field-unit"><input data-sf-shot-field="retime_duration" type="number" min="0.5" max="60" step="0.1" value="${escapeHtml(shot.retime_duration ?? "")}" placeholder="不變速"><span>秒</span></div><small class="field-help">留空即使用原始時長</small></label>
@@ -2749,7 +2882,7 @@ function renderShortFilmScenes() {
         <div class="shortfilm-dialogue-grid">
           <label>說話角色<select data-sf-shot-field="speaker_alias">${speakerOptions}</select></label>
           <label>語言<input data-sf-shot-field="dialogue_language" value="${escapeHtml(shot.dialogue_language || "Chinese")}"></label>
-          <label class="dialogue-text">精確台詞<input data-sf-shot-field="dialogue" value="${escapeHtml(shot.dialogue || "")}" placeholder="保留原文與標點，不要加引號"></label>
+          <label class="dialogue-text">精確台詞<input data-sf-shot-field="dialogue" value="${escapeHtml(shot.dialogue || "")}" placeholder="保留原文與標點，不要加引號"><small class="field-help">依所選語言自動加上台詞標籤</small></label>
         </div>
         <div class="form-grid two"><label>環境與動作聲<input data-sf-shot-field="sound" value="${escapeHtml(shot.sound || "")}"></label><label>觀眾配樂<input data-sf-shot-field="music" value="${escapeHtml(shot.music || "N/A")}" placeholder="不需要配樂請填 N/A"></label></div>
         <div class="shortfilm-shot-assets"><div class="shortfilm-shot-assets-heading"><strong>本鏡頭使用素材</strong>${usageMarkup.badge.replace("class=", "data-sf-reference-count class=")}</div><div class="shortfilm-shot-asset-chips">${assetChecks}</div>${usageMarkup.note.replace("class=", "data-sf-reference-note class=")}</div>
@@ -2832,8 +2965,7 @@ async function loadShortFilmJobs(force = false) {
     const date = new Date(job.created_at).toLocaleString("zh-TW", { hour12: false });
     const contextLabel = `${context.sceneTitle}／${context.shotTitle}`;
     const title = job.name || contextLabel;
-    const executionSeconds = jobExecutionSeconds(job);
-    const executionLabel = executionSeconds === null ? "生成耗時尚未記錄" : `${active ? "已執行" : "生成耗時"} ${formatExecutionTime(executionSeconds)}`;
+    const executionLabel = jobExecutionLabel(job);
     const hasRetime = Boolean(job.retimed && job.original_local_output);
     const frameSequence = job.frame_sequence?.filename ? job.frame_sequence : null;
     const durationLabel = hasRetime
@@ -2843,8 +2975,8 @@ async function loadShortFilmJobs(force = false) {
     const open = active || expandedShortFilmJobIds.has(job.id);
     return `<details class="job-card shortfilm-job-card ${job.favorite ? "favorite" : ""}" data-shortfilm-job-id="${job.id}" ${open ? "open" : ""}>
       <summary class="job-summary">
-        <div class="job-title"><button class="job-favorite ${job.favorite ? "active" : ""}" data-sf-job-favorite="${job.id}" data-favorite="${job.favorite ? "true" : "false"}" type="button" title="${job.favorite ? "取消我的最愛" : "加入我的最愛"}">★</button><span class="job-badge ${escapeHtml(job.status)}">${escapeHtml(statusLabel(job.status))}</span><div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div></div>
-        <div class="job-progress"><div class="progress-track"><span style="width:${job.progress || 0}%"></span></div><small><span>${escapeHtml(job.current_node || statusLabel(job.status))}</span><span>${job.progress || 0}%</span></small></div>
+        <div class="job-title"><button class="job-favorite ${job.favorite ? "active" : ""}" data-sf-job-favorite="${job.id}" data-favorite="${job.favorite ? "true" : "false"}" type="button" title="${job.favorite ? "取消我的最愛" : "加入我的最愛"}">★</button>${queueJobBadgeHtml(job)}<div><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></div></div>
+        ${queueJobProgressHtml(job)}
         <span class="job-chevron">⌄</span>
       </summary>
       <div class="job-detail">
@@ -3007,6 +3139,7 @@ async function runShortFilmBatch() {
 
 function bindEvents() {
   bindLoraPanels();
+  $("#refreshSharedQueue")?.addEventListener("click", loadSharedQueue);
   $("#sfBuildSegmentRows").addEventListener("click", buildShortFilmSegmentRows);
   $("#sfAppendSegments").addEventListener("click", appendShortFilmSegments);
   $("#sfSegmentBuilder").addEventListener("input", event => {
@@ -4169,7 +4302,9 @@ function initialize() {
   loadConnectionSettings().catch(error => console.warn(error));
   loadModelUpdateStatus(true).catch(error => console.warn("模型版本檢查失敗：", error));
   checkStatus();
+  loadSharedQueue();
   loadJobs(true);
+  setInterval(loadSharedQueue, 3000);
   setInterval(checkStatus, 10000);
   setInterval(() => loadInstallerStatus().catch(error => console.warn(error)), 2500);
   setInterval(() => {

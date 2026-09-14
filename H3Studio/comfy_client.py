@@ -17,6 +17,8 @@ from domain import TURBO_LORA_CANDIDATES
 
 from settings import ConnectionSettings
 from runtime_env import inspect_python_candidates
+from queue_snapshot import fetch_queue_snapshot
+from queue_cancel import cancel_queue_prompt
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -78,6 +80,9 @@ class ComfyClient:
                     return await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError):
             return None
+
+    async def queue_status(self) -> dict[str, Any]:
+        return await fetch_queue_snapshot(self.base_url, headers=self.auth_headers())
 
     async def ensure_running(self) -> None:
         async with self.start_lock:
@@ -293,7 +298,7 @@ class ComfyClient:
             reconnect_delay = 1.0
             while True:
                 if cancel_event.is_set():
-                    await session.post(f"{self.base_url}/interrupt", headers=self.auth_headers(prompt_id))
+                    await self.interrupt(prompt_id)
                     raise asyncio.CancelledError
 
                 history = await self.get_history(prompt_id, session)
@@ -311,7 +316,7 @@ class ComfyClient:
                         last_history_check = time.monotonic()
                         while True:
                             if cancel_event.is_set():
-                                await session.post(f"{self.base_url}/interrupt", headers=self.auth_headers(prompt_id))
+                                await self.interrupt(prompt_id)
                                 raise asyncio.CancelledError
                             try:
                                 message = await asyncio.wait_for(ws.receive(), timeout=2)
@@ -380,12 +385,8 @@ class ComfyClient:
             return data[image_start:], str(metadata.get("image_type") or "image/jpeg")
         return None
 
-    async def interrupt(self, prompt_id: str | None = None) -> None:
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                await session.post(f"{self.base_url}/interrupt", headers=self.auth_headers(prompt_id))
-        except aiohttp.ClientError:
-            return
+    async def interrupt(self, prompt_id: str | None = None) -> bool:
+        return await cancel_queue_prompt(self.base_url, prompt_id, headers=self.auth_headers(prompt_id))
 
     async def fetch_output(self, output: dict[str, str]) -> tuple[bytes, str]:
         query = urlencode({

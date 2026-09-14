@@ -630,8 +630,11 @@ class MusicJobManager:
             raise Music3Error("找不到音樂工作。")
         if job.get("status") not in {"queued", "preparing", "running"}:
             return job
+        if job.get("status") == "running" and job.get("prompt_id"):
+            await self.comfy.interrupt(str(job["prompt_id"]))
         self.cancel_events.setdefault(job_id, asyncio.Event()).set()
-        self.update(job_id, current_node="正在取消")
+        if job.get("status") in {"queued", "preparing", "running"}:
+            self.update(job_id, status="cancelled", current_node=None, error="音樂工作已取消。")
         return self.jobs[job_id]
 
     def resume(self, job_id: str) -> dict[str, Any]:

@@ -15,6 +15,9 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
+from queue_snapshot import fetch_queue_snapshot
+from queue_cancel import QueueCancelError, cancel_queue_prompt
+
 
 SAFE_NAME = re.compile(r"[^\w\-\u4e00-\u9fff]+", re.UNICODE)
 ACTIVE_QUEUE_KEYS = {"queue_running", "queue_pending"}
@@ -259,12 +262,14 @@ class SharedComfyGateway:
     def create_app(self) -> web.Application:
         app = web.Application(client_max_size=3 * 1024**3)
         app.router.add_get("/system_stats", self.proxy_system_stats)
+        app.router.add_get("/queue", self.proxy_queue)
         app.router.add_get("/object_info/{tail:.*}", self.proxy_object_info)
         app.router.add_post("/upload/image", self.proxy_upload)
         app.router.add_post("/prompt", self.proxy_prompt)
         app.router.add_get("/history/{prompt_id}", self.proxy_history)
         app.router.add_get("/view", self.proxy_view)
         app.router.add_post("/interrupt", self.proxy_interrupt)
+        app.router.add_post("/api/jobs/{prompt_id}/cancel", self.proxy_interrupt)
         app.router.add_get("/ws", self.proxy_websocket)
         return app
 
@@ -295,6 +300,15 @@ class SharedComfyGateway:
 
     async def proxy_system_stats(self, request: web.Request) -> web.Response:
         return await self._forward_json_get(request, "/system_stats")
+
+    async def proxy_queue(self, request: web.Request) -> web.Response:
+        user = self._authenticated_user(request)
+        snapshot = await fetch_queue_snapshot(self.upstream_url, timeout=2.5)
+        for key in ("running", "pending"):
+            for row in snapshot[key]:
+                if not self.store.owns_prompt(row["prompt_id"], str(user["id"])):
+                    row["prompt_id"] = None
+        return web.json_response(snapshot)
 
     async def proxy_object_info(self, request: web.Request) -> web.Response:
         tail = request.match_info.get("tail", "").strip("/")
@@ -426,21 +440,14 @@ class SharedComfyGateway:
 
     async def proxy_interrupt(self, request: web.Request) -> web.Response:
         user = self._authenticated_user(request)
-        prompt_id = request.headers.get("X-H3-Prompt-ID", "").strip()
+        prompt_id = request.match_info.get("prompt_id") or request.headers.get("X-H3-Prompt-ID", "").strip()
         if not prompt_id or not self.store.owns_prompt(prompt_id, str(user["id"])):
             raise web.HTTPNotFound(text='{"error":"找不到這筆工作。"}', content_type="application/json")
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-            async with session.get(f"{self.upstream_url}/queue") as response:
-                queue = await response.json()
-            serialized_running = json.dumps(queue.get("queue_running", []))
-            serialized_pending = json.dumps(queue.get("queue_pending", []))
-            if prompt_id in serialized_running:
-                async with session.post(f"{self.upstream_url}/interrupt") as response:
-                    return web.Response(body=await response.read(), status=response.status, content_type=response.content_type)
-            if prompt_id in serialized_pending:
-                async with session.post(f"{self.upstream_url}/queue", json={"delete": [prompt_id]}) as response:
-                    return web.Response(body=await response.read(), status=response.status, content_type=response.content_type)
-        raise web.HTTPConflict(text='{"error":"這筆工作目前不在 ComfyUI 佇列。"}', content_type="application/json")
+        try:
+            cancelled = await cancel_queue_prompt(self.upstream_url, prompt_id)
+        except QueueCancelError as error:
+            return web.json_response({"error": str(error)}, status=error.status)
+        return web.json_response({"cancelled": cancelled})
 
     async def proxy_websocket(self, request: web.Request) -> web.WebSocketResponse:
         user = self._authenticated_user(request)

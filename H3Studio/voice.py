@@ -475,7 +475,10 @@ class VoiceJobManager:
         process = self.processes.get(job_id)
         if process and process.returncode is None:
             process.terminate()
-        self.update(job_id, current_node="正在取消")
+        if job.get("status") == "queued":
+            self.update(job_id, status="cancelled", current_node=None, error="語音工作已取消。")
+        else:
+            self.update(job_id, current_node="正在取消")
         return self.jobs[job_id]
 
     async def shutdown(self) -> None:

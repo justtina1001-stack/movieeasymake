@@ -44,6 +44,8 @@ from voice import (
     filename_stem as voice_filename_stem,
 )
 from shared_gateway import GatewayError, SharedComfyGateway
+from queue_presentation import build_queue_view
+from queue_cancel import QueueCancelError
 from shortfilm import (
     ShortFilmError,
     ShortFilmStore,
@@ -1912,12 +1914,13 @@ class JobManager:
     async def cancel(self, job_id: str) -> None:
         if job_id not in self.jobs:
             raise RequestError("找不到工作。")
-        self.cancel_events.setdefault(job_id, asyncio.Event()).set()
         active_child = str(self.jobs[job_id].get("active_child_id") or "")
         if active_child and active_child in self.jobs:
             await self.cancel(active_child)
-        if self.jobs[job_id].get("status") == "running":
-            await self.comfy.interrupt(str(self.jobs[job_id].get("prompt_id") or "") or None)
+        prompt_id = str(self.jobs[job_id].get("prompt_id") or "")
+        if self.jobs[job_id].get("status") == "running" and prompt_id:
+            await self.comfy.interrupt(prompt_id)
+        self.cancel_events.setdefault(job_id, asyncio.Event()).set()
         if self.jobs[job_id].get("status") in {"queued", "preparing", "running", "interrupted"}:
             self.update(
                 job_id,
@@ -2091,6 +2094,22 @@ def create_app() -> web.Application:
             "can_start": comfy.can_start,
             "studio_role": settings.current.studio_role,
         })
+
+    async def queue_status(_: web.Request) -> web.Response:
+        snapshot = await comfy.queue_status()
+        colleagues: dict[str, str] = {}
+        if (settings.current.studio_role == "host" and comfy.mode == "local"
+                and comfy.base_url.rstrip("/") == gateway.upstream_url):
+            users = {item["id"]: item["name"] for item in gateway.store.list_users()}
+            owners = gateway.store.state.get("prompt_owners", {})
+            for row in [*snapshot.get("running", []), *snapshot.get("pending", [])]:
+                prompt_id = row.get("prompt_id")
+                entry = owners.get(prompt_id) or {}
+                name = users.get(entry.get("user_id"))
+                if name:
+                    colleagues[prompt_id] = name
+        result = build_queue_view(snapshot, jobs.jobs, music_jobs.jobs, voice_jobs.jobs, colleague_names=colleagues)
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def connection(_: web.Request) -> web.Response:
         return web.json_response(settings.current.public_dict())
@@ -2565,6 +2584,8 @@ def create_app() -> web.Application:
             return web.json_response(jobs.jobs[request.match_info["job_id"]])
         except RequestError as error:
             return json_response_error(error, 404)
+        except QueueCancelError as error:
+            return json_response_error(error, error.status)
 
     async def resume_job(request: web.Request) -> web.Response:
         try:
@@ -2744,6 +2765,8 @@ def create_app() -> web.Application:
             return web.json_response(await music_jobs.cancel(request.match_info["job_id"]))
         except Music3Error as error:
             return json_response_error(error, 404)
+        except QueueCancelError as error:
+            return json_response_error(error, error.status)
 
     async def resume_music_job(request: web.Request) -> web.Response:
         try:
@@ -2916,6 +2939,7 @@ def create_app() -> web.Application:
 
     app.router.add_get("/", index)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/queue", queue_status)
     app.router.add_get("/api/loras", lora_catalog)
     app.router.add_get("/api/connection", connection)
     app.router.add_post("/api/connection", update_connection)
