@@ -10,6 +10,15 @@ MiniMax H3 Studio 是 ComfyUI MiniMax H3 工作流的中文操作面板。專案
 4. 雙擊 `start_h3_studio.bat`，開啟 <http://127.0.0.1:8787>。
 5. 點右上角「引擎設定」，選擇本機或遠端模式。
 
+若看到 `No runtime installed that matches 3.12`，代表 Python Install Manager 找不到 Python 3.12 執行環境；只安裝管理員並不代表已安裝這個版本。請在命令提示字元依序執行：
+
+```bat
+py install 3.12
+py -3.12 --version
+```
+
+確認顯示 `Python 3.12.x` 後，重新執行 `setup_h3_studio.bat`，完成後再執行 `start_h3_studio.bat`。啟動器只接受 Python 探測成功的結果；缺少執行環境時會顯示安裝指引，不會再誤判為可建立環境。
+
 ### 直接複製完整資料夾到另一台電腦
 
 Windows 的 `.venv` 會記住原電腦 Python 的絕對路徑，因此不能直接跨電腦使用。新版 `start_h3_studio.bat` 會實際執行環境健康檢查，不再只判斷 `python.exe` 是否存在：
