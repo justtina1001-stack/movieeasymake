@@ -134,8 +134,8 @@ class ComfyClient:
                 await asyncio.sleep(1)
             raise RuntimeError("等待 ComfyUI 啟動逾時。")
 
-    async def model_inventory(self) -> dict[str, bool]:
-        if self._model_cache and self._model_cache[0] > time.monotonic():
+    async def model_inventory(self, *, refresh: bool = False) -> dict[str, bool]:
+        if not refresh and self._model_cache and self._model_cache[0] > time.monotonic():
             return dict(self._model_cache[1])
         expected = {
             "fl2va": ("UNETLoader", "unet_name", "minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
@@ -145,6 +145,9 @@ class ComfyClient:
             "audio_vae": ("VAELoader", "vae_name", "minimax_h3_audio_vae_fp32.safetensors"),
         }
         result = {name: False for name in expected}
+        result.update({f"turbo_{profile}": False for profile in TURBO_LORA_CANDIDATES})
+        result.update({"h3_memory_optimization": False, "h3_optimizations": False,
+                       "h3_sla_attention": False, "h3_sigma_shift": False})
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -161,11 +164,23 @@ class ComfyClient:
                         available_loras = payload.get("LoraLoaderModelOnly", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
                         for profile, candidates in TURBO_LORA_CANDIDATES.items():
                             result[f"turbo_{profile}"] = any(candidate in available_loras for candidate in candidates)
-                optimizer_nodes = []
-                for node in ("H3MemoryOptimization", "H3SparseAttention"):
+                node_schemas = {}
+                for node in ("H3MemoryOptimization", "H3SparseAttention", "BlockSparseAttention", "MiniMaxH3SigmaShift"):
                     async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
-                        optimizer_nodes.append(response.status == 200)
-                result["h3_optimizations"] = all(optimizer_nodes)
+                        if response.status == 200:
+                            payload = await response.json()
+                            node_schemas[node] = payload.get(node, {})
+                result["h3_memory_optimization"] = bool(node_schemas.get("H3MemoryOptimization"))
+                result["h3_optimizations"] = result["h3_memory_optimization"] and bool(node_schemas.get("H3SparseAttention"))
+                result["h3_sigma_shift"] = bool(node_schemas.get("MiniMaxH3SigmaShift"))
+                sparse_inputs = node_schemas.get("BlockSparseAttention", {}).get("input", {}).get("required", {})
+                selection = sparse_inputs.get("selection", [])
+                options = selection[1].get("options", []) if len(selection) > 1 and isinstance(selection[1], dict) else []
+                result["h3_sla_attention"] = any(
+                    isinstance(option, dict) and option.get("key") == "sla"
+                    and "keep_percent" in option.get("inputs", {}).get("required", {})
+                    for option in options
+                )
         except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
             pass
         self._model_cache = (time.monotonic() + 60, dict(result))

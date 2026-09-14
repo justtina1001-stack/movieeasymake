@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260902-shortfilm-auto-assets">
+  <link rel="stylesheet" href="/static/styles.css?v=20260910-continuous-segments">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -116,9 +116,10 @@
             <label>Seed<div class="seed-row"><input id="seed" type="number" min="0" value="1"><button id="randomSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div></label>
           </div>
           <div class="quality-selector">
-            <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 穩定版 · 自動適配</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1 768p</option><option value="turbo_quality">Turbo 新高品質 · 8-step 768p</option><option value="sparse_experimental">實驗性稀疏加速 · 4-step</option></select></label>
+            <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 穩定版 · 自動適配</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1 768p</option><option value="turbo_quality">Turbo 新高品質 · 8-step 768p</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2 768p</option><option value="turbo_ref_quality">Ref Turbo 品質比較 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速 · 4-step（原版）</option></select></label>
             <div><strong id="qualityModeTitle">原生品質模式</strong><span id="qualityModeHint">保留目前採樣設定，適合正式成品。</span></div>
           </div>
+          <label class="check-option shortfilm-export-option"><input id="memoryOptimization" type="checkbox" checked aria-describedby="memoryOptimizationHint"><span><strong>省顯存 · H3 記憶體最佳化</strong><small id="memoryOptimizationHint">獨立於生成品質，減少運算暫存峰值；不保證更快，也不保證高解析長影片不會記憶體不足。</small></span></label>
           <div class="retime-selector">
             <label class="check-option"><input id="retimeEnabled" type="checkbox"><span><strong>產生節奏預覽版</strong><small>H3 仍生成至少 5 秒；完成後另外輸出指定秒數，原始影片會保留。</small></span></label>
             <label id="retimeDurationWrap">節奏版長度<div class="field-unit"><input id="retimeDuration" type="number" min="0.5" max="60" step="0.1" value="2" disabled><span>秒</span></div></label>
@@ -393,8 +394,10 @@
               <div class="form-grid three">
                 <label>畫面比例<select id="sfAspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label>
                 <label>解析度<select id="sfMegapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">原生畫質 · 0.98MP</option></select></label>
-                <label>生成品質<select id="sfQuality"><option value="native">原生品質</option><option value="turbo">Turbo 穩定版</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1</option><option value="turbo_quality">Turbo 新高品質 · 8-step</option><option value="sparse_experimental">實驗性稀疏加速</option></select></label>
+                <label>生成品質<select id="sfQuality" aria-describedby="sfQualityHint"><option value="native">原生品質</option><option value="turbo">Turbo 穩定版</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1</option><option value="turbo_quality">Turbo 新高品質 · 8-step</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2</option><option value="turbo_ref_quality">Ref Turbo 品質比較 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速（原版）</option></select></label>
               </div>
+              <p id="sfQualityHint" class="field-help"></p>
+              <label class="check-option shortfilm-export-option"><input id="sfMemoryOptimization" type="checkbox" checked aria-describedby="sfMemoryOptimizationHint"><span><strong>全片省顯存 · H3 記憶體最佳化</strong><small id="sfMemoryOptimizationHint">每個鏡頭共用；減少運算暫存峰值，不保證更快，也不保證完全避免記憶體不足。</small></span></label>
               <label class="check-option shortfilm-export-option"><input id="sfExportFrames" type="checkbox"><span><strong>每個鏡頭完成後自動匯出 PNG 連續圖</strong><small>依各鏡頭最終節奏版本打包 ZIP，可從生成工作下載。</small></span></label>
               <div id="sfLoraPanel"></div>
               <label class="shortfilm-wide-field">視覺風格<input id="sfStyle" placeholder="例如：cinematic realism, warm tungsten lighting, restrained camera motion"></label>
@@ -415,6 +418,22 @@
                 <div><span class="step-number">03</span><div><h2>場次與分鏡</h2><p>每個鏡頭獨立生成 5～15 秒；可選擇沿用上一鏡尾幀</p></div></div>
                 <button id="addShortfilmScene" class="button secondary" type="button">＋ 新增場次</button>
               </div>
+              <details id="sfSegmentBuilder" class="sf-segment-builder">
+                <summary>連續分段編排 · 一次填好整部短片</summary>
+                <p class="render-note">例如 60 秒 ÷ 每段 5 秒 = 12 段。先建立輸入欄、填寫每段表演，再加入分鏡。只新增場次，不覆蓋原分鏡；第二段起自動接上一段尾幀。</p>
+                <div class="shortfilm-dialogue-grid">
+                  <label>本組目標秒數<input id="sfSegmentTarget" type="number" min="5" max="3600" step="5" value="60"></label>
+                  <label>每段生成秒數<select id="sfSegmentDuration"><option value="5">5 秒 · 低負載</option><option value="10">10 秒</option><option value="15">15 秒</option></select></label>
+                  <button id="sfBuildSegmentRows" class="button secondary" type="button">建立／調整輸入欄</button>
+                </div>
+                <p class="render-note">共用資產庫，不會將所有素材一律送入模型。分鏡詞提及名稱會自動引用；下方勾選的素材則每段都使用，加入分鏡後可逐段調整。</p>
+                <div id="sfSegmentAssets" class="shortfilm-shot-asset-chips"></div>
+                <p class="render-note">每段最多 9 項素材，且圖片合計最多 9 張。續接尾幀占 1 張，多圖角色逐張計算；另有分鏡圖也要計入。聲音最多 3 段。</p>
+                <div id="sfSegmentRows" class="sf-segment-rows"></div>
+                <p id="sfSegmentSummary" class="render-note" role="status" aria-live="polite"></p>
+                <button id="sfAppendSegments" class="button secondary wide" type="button">加入連續分鏡（尚不生成）</button>
+                <p class="render-note">加入後按右側「依序生成未完成鏡頭」。請保持此瀏覽器分頁與 Studio／引擎開啟；失敗會停止後續送出，修正後可接續未完成段落。5 秒為模型請求時長，實際片長可能因幀數略有差異；此功能不會自動合併成單一影片。</p>
+              </details>
               <div id="shortfilmSceneList" class="shortfilm-scene-list"></div>
               <div id="shortfilmSceneEmpty" class="empty-state compact"><span>⌁</span><strong>尚未建立場次</strong><p>新增場次後，再安排其中的鏡頭。</p></div>
             </section>
@@ -808,6 +827,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260905-custom-loras"></script>
+  <script src="/static/app.js?v=20260910-continuous-segments"></script>
 </body>
 </html>

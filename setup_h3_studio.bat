@@ -51,7 +51,7 @@ if not errorlevel 1 (
 if not defined SYSTEM_PYTHON (
   where python >nul 2>&1
   if not errorlevel 1 (
-    python -c "import sys; assert (3, 11) ^<= sys.version_info[:2] ^<= (3, 13)" >nul 2>&1
+    python -c "import sys; assert (3, 11) <= sys.version_info[:2] <= (3, 13)" >nul 2>&1
     if not errorlevel 1 set "SYSTEM_PYTHON=python"
   )
 )

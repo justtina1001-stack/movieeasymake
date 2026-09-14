@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from custom_loras import normalize_loras
+from domain import FL_ONLY_QUALITY_MODES, QUALITY_MODES
 
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
 ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
 ASSET_TYPES = {"character", "creature", "object", "background", "style", "motion", "effect"}
 FORMATS = {"narrative", "dialogue", "commercial", "montage"}
-QUALITY_MODES = {"native", "turbo", "turbo_fast", "turbo_quality", "sparse_experimental"}
 SHOT_SIZES = {
     "wide": "wide establishing shot",
     "full": "full shot",
@@ -81,6 +81,7 @@ def new_project(title: Any = "未命名短片") -> dict[str, Any]:
         "aspect_ratio": "16:9",
         "megapixels": 0.4,
         "quality_mode": "native",
+        "memory_optimization": False,
         "export_frames": False,
         "target_duration": 30.0,
         "style": "cinematic visual storytelling, coherent lighting, stable character identity",
@@ -136,6 +137,7 @@ def new_shot(index: int = 1) -> dict[str, Any]:
         "storyboard_asset_id": None,
         "continue_previous": False,
         "continuation_asset_id": None,
+        "continuation_job_id": None,
         "seed": 1,
         "job_id": None,
         "status": "draft",
@@ -152,6 +154,7 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
     base["megapixels"] = _bounded_number(raw.get("megapixels"), 0.4, 0.2, 1.0)
     quality_mode = _text(raw.get("quality_mode"), limit=40) or "native"
     base["quality_mode"] = quality_mode if quality_mode in QUALITY_MODES else "native"
+    base["memory_optimization"] = raw.get("memory_optimization") is True
     try:
         base["custom_loras"] = normalize_loras(raw.get("custom_loras"))
     except ValueError as error:
@@ -188,6 +191,14 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
         })
     base["assets"] = assets
     valid_asset_ids = {item["id"] for item in assets}
+    draft = raw.get("segment_draft")
+    if isinstance(draft, dict):
+        base["segment_draft"] = {
+            "duration": draft.get("duration") if draft.get("duration") in (5, 10, 15) else 5,
+            "target_duration": _bounded_number(draft.get("target_duration"), 60, 5, 3600),
+            "prompts": [_text(value, limit=5000) for value in (draft.get("prompts") or [])[:500]],
+            "asset_ids": list(dict.fromkeys(value for value in (draft.get("asset_ids") or []) if value in valid_asset_ids)),
+        }
 
     scenes: list[dict[str, Any]] = []
     shot_count = 0
@@ -232,6 +243,7 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
                 "storyboard_asset_id": _asset_id(shot_raw.get("storyboard_asset_id")),
                 "continue_previous": bool(shot_raw.get("continue_previous")),
                 "continuation_asset_id": _asset_id(shot_raw.get("continuation_asset_id")),
+                "continuation_job_id": _asset_id(shot_raw.get("continuation_job_id")),
                 "seed": max(0, int(_bounded_number(shot_raw.get("seed"), 1, 0, 2**53 - 1))),
                 "job_id": _asset_id(shot_raw.get("job_id")),
                 "status": shot_raw.get("status") if shot_raw.get("status") in {
@@ -354,6 +366,8 @@ def project_warnings(project: dict[str, Any]) -> list[str]:
         if shot.get("continue_previous") and shot_index == 0:
             warnings.append(f"{label} 是第一鏡，無法沿用上一鏡尾幀。")
         selected = [asset_lookup[item_id] for item_id in resolve_shot_asset_ids(project, scene, shot) if item_id in asset_lookup]
+        if len(selected) > 9:
+            warnings.append(f"{label} 引用 {len(selected)} 項素材，超過每鏡頭 9 項上限。")
         image_count = sum(len(asset.get("image_asset_ids") or []) for asset in selected)
         image_count += 1 if shot.get("storyboard_asset_id") else 0
         image_count += 1 if shot.get("continue_previous") else 0
@@ -363,6 +377,65 @@ def project_warnings(project: dict[str, Any]) -> list[str]:
         if audio_count > 3:
             warnings.append(f"{label} 使用 {audio_count} 段參考聲音，超過每鏡頭 3 段上限。")
     return warnings[:80]
+
+
+def validate_shot_references(project: dict[str, Any], scene: dict[str, Any], shot: dict[str, Any]) -> None:
+    """Reserve the continuation slot before a preceding render even exists."""
+    selected_ids = set(resolve_shot_asset_ids(project, scene, shot))
+    selected = [asset for asset in project.get("assets", []) if asset["id"] in selected_ids]
+    label = f"{scene['title']}／{shot['title']}"
+    if len(selected) > 9:
+        raise ShortFilmError(f"{label} 引用 {len(selected)} 項素材，超過每鏡頭 9 項上限。")
+    images = sum(len(asset.get("image_asset_ids") or []) for asset in selected)
+    images += int(bool(shot.get("continue_previous"))) + int(bool(shot.get("storyboard_asset_id")))
+    if images > 9:
+        raise ShortFilmError(f"{label} 使用 {images} 張參考圖片，超過每鏡頭 9 張上限（含續接尾幀、分鏡圖；多圖角色逐張計算）。")
+    audios = sum(bool(asset.get("audio_asset_id")) for asset in selected)
+    if audios > 3:
+        raise ShortFilmError(f"{label} 使用 {audios} 段參考聲音，超過每鏡頭 3 段上限。")
+
+
+def append_continuous_scene(project: dict[str, Any], plan: Any) -> dict[str, Any]:
+    """Append a whole validated chain without touching existing scenes or jobs."""
+    if not isinstance(plan, dict):
+        raise ShortFilmError("連續分段格式錯誤。")
+    duration = plan.get("duration", 5)
+    prompts = plan.get("prompts")
+    if duration not in (5, 10, 15):
+        raise ShortFilmError("每段時長請選擇 5、10 或 15 秒。")
+    if not isinstance(prompts, list) or not 1 <= len(prompts) <= 500:
+        raise ShortFilmError("請輸入 1～500 段分鏡詞。")
+    if any(not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 5000 for prompt in prompts):
+        raise ShortFilmError("每段都需填寫分鏡詞，且不得超過 5000 字。")
+    result = normalize_project(project, existing_id=project.get("id"))
+    existing_shots = flatten_shots(result)
+    if len(result["scenes"]) >= 100 or len(existing_shots) + len(prompts) > 500:
+        raise ShortFilmError("此專案加入後將超過 100 場次或 500 鏡頭上限。")
+    selected = plan.get("asset_ids") or []
+    known = {asset["id"] for asset in result["assets"]}
+    if not isinstance(selected, list) or any(not isinstance(value, str) or value not in known for value in selected):
+        raise ShortFilmError("共用素材已不存在，請重新選擇。")
+    scene = new_scene(len(result["scenes"]) + 1)
+    scene["title"] = f"連續分段 {len(result['scenes']) + 1}（{len(prompts) * duration:g} 秒）"
+    for index, prompt in enumerate(prompts):
+        shot = new_shot(len(existing_shots) + index + 1)
+        shot.update({
+            "title": f"第 {index + 1:02d} 段 · {index * duration:g}–{(index + 1) * duration:g} 秒",
+            "duration": duration,
+            "action": prompt.strip(),
+            "asset_ids": list(dict.fromkeys(selected)),
+            "continue_previous": index > 0,
+            "seed": uuid.uuid4().int % (2**53),
+        })
+        if index < len(prompts) - 1:
+            shot["ending"] = "Maintain the established identities, spatial layout, lighting and ongoing motion at the end so the next segment can continue naturally. Do not fade out, cut away or reset the scene."
+        scene["shots"].append(shot)
+    result["scenes"].append(scene)
+    for shot in scene["shots"]:
+        validate_shot_references(result, scene, shot)
+    result["target_duration"] = sum(float(shot.get("retime_duration") or shot["duration"]) for _, shot in flatten_shots(result))
+    result["segment_draft"] = {"duration": duration, "target_duration": len(prompts) * duration, "prompts": [], "asset_ids": list(dict.fromkeys(selected))}
+    return result
 
 
 def _speaker_ids(project: dict[str, Any]) -> dict[str, str]:
@@ -387,6 +460,8 @@ def compile_shot_payload(
     shot = next((item for item in scene["shots"] if item["id"] == shot_id), None)
     if not shot:
         raise ShortFilmError("找不到指定鏡頭。")
+
+    validate_shot_references(project, scene, shot)
 
     asset_lookup = {item["id"]: item for item in project["assets"]}
     selected = [asset_lookup[item_id] for item_id in resolve_shot_asset_ids(project, scene, shot) if item_id in asset_lookup]
@@ -468,9 +543,12 @@ def compile_shot_payload(
     } for asset in referenced]
     use_reference_mode = bool(references or shot["storyboard_asset_id"] or prepared_continuation)
     quality_mode = project["quality_mode"]
-    if use_reference_mode and quality_mode in {"turbo_fast", "turbo_quality", "sparse_experimental"}:
+    if use_reference_mode and quality_mode in FL_ONLY_QUALITY_MODES:
         quality_mode = "turbo"
         warnings.append("這個鏡頭使用 Ref2VA 素材，已自動改用相容的 Turbo 穩定模式。")
+    elif not use_reference_mode and quality_mode == "turbo_ref_quality":
+        quality_mode = "turbo"
+        warnings.append("這個鏡頭沒有 Ref2VA 素材，已自動改用相容的 FL2VA Turbo 穩定模式。")
     payload: dict[str, Any] = {
         "mode": "r2v" if use_reference_mode else "t2v",
         "prompt_profile": "shortfilm",
@@ -482,6 +560,7 @@ def compile_shot_payload(
         "aspect_ratio": project["aspect_ratio"],
         "megapixels": project["megapixels"],
         "quality_mode": quality_mode,
+        "memory_optimization": project.get("memory_optimization") is True,
         "custom_loras": project.get("custom_loras", []),
         "duration": shot["duration"],
         "retime_duration": shot.get("retime_duration"),

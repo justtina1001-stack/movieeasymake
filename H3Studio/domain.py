@@ -19,7 +19,11 @@ TURBO_PROFILE_FL_768 = "fl2v_768"
 TURBO_PROFILE_FL_768_FAST_V11 = "fl2v_768_fast_v11"
 TURBO_PROFILE_FL_768_QUALITY_V10 = "fl2v_768_quality_v10"
 TURBO_PROFILE_REF_544 = "ref2v_544"
-QUALITY_MODES = {"native", "turbo", "turbo_fast", "turbo_quality", "sparse_experimental"}
+TURBO_PROFILE_FL_768_SLA = "fl2v_768_sla"
+TURBO_PROFILE_FL_768_AUDIO_V12 = "fl2v_768_audio_v12"
+TURBO_PROFILE_REF_768_QUALITY_V10 = "ref2v_768_quality_v10"
+FL_ONLY_QUALITY_MODES = {"turbo_fast", "turbo_quality", "sparse_experimental", "turbo_sla", "turbo_audio"}
+QUALITY_MODES = {"native", "turbo", "turbo_ref_quality"} | FL_ONLY_QUALITY_MODES
 TURBO_LORA_CANDIDATES: dict[str, tuple[str, ...]] = {
     TURBO_PROFILE_FL_544: (
         "minimax_h3_fl2v_lightx2v_turbo_8step_v1.0_resized_avg_rank_24_bf16.safetensors",
@@ -38,6 +42,15 @@ TURBO_LORA_CANDIDATES: dict[str, tuple[str, ...]] = {
     TURBO_PROFILE_REF_544: (
         "minimax_h3_ref2v_lightx2v_turbo_4step_v0.1_resized_avg_rank_20_bf16.safetensors",
         "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+    ),
+    TURBO_PROFILE_FL_768_SLA: (
+        "minimax_h3_fl2v_turbo_4step_v0.1_768p_sla_comfyui_bf16.safetensors",
+    ),
+    TURBO_PROFILE_FL_768_AUDIO_V12: (
+        "minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+    ),
+    TURBO_PROFILE_REF_768_QUALITY_V10: (
+        "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
     ),
 }
 
@@ -110,6 +123,29 @@ class CompiledRequest:
     continuation_audio: str
     mapping: list[dict[str, Any]]
     custom_loras: list[dict[str, Any]] = field(default_factory=list)
+    memory_optimization: bool = False
+
+
+def validate_runtime_inventory(compiled: CompiledRequest, inventory: dict[str, bool]) -> None:
+    """Fail before asset upload when the selected engine cannot run this recipe."""
+    family = "ref2va" if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"} else "fl2va"
+    required_models = {
+        family: "H3 Ref2VA 主模型" if family == "ref2va" else "H3 FL2VA 主模型",
+        "text_encoder": "H3 文字編碼器",
+        "video_vae": "H3 影片 VAE",
+        "audio_vae": "H3 聲音 VAE",
+    }
+    missing = [label for key, label in required_models.items() if not inventory.get(key)]
+    if missing:
+        raise RequestError("目前運算引擎找不到必要模型：" + "、".join(missing) + "。請在該引擎補齊模型後重新整理。")
+    if compiled.quality_mode != "native" and not inventory.get("h3_sigma_shift"):
+        raise RequestError("所選 Turbo 模式需要 MiniMaxH3SigmaShift 節點，請更新目前運算引擎的 ComfyUI 核心並重啟。")
+    if compiled.memory_optimization and not inventory.get("h3_memory_optimization"):
+        raise RequestError("獨立省顯存需要 H3MemoryOptimization 節點。請先更新 H3-Optimizations 並重啟目前運算引擎，或關閉省顯存選項。")
+    if compiled.quality_mode == "sparse_experimental" and not inventory.get("h3_optimizations"):
+        raise RequestError("實驗性稀疏加速需要 H3-Optimizations 的省顯存及稀疏節點。請先執行模型更新，並重新啟動目前運算引擎。")
+    if compiled.quality_mode == "turbo_sla" and not inventory.get("h3_sla_attention"):
+        raise RequestError("Turbo-SLA 需要 ComfyUI 0.35.0 以上的 BlockSparseAttention（sla）節點。請更新目前運算引擎的核心與配套依賴並重啟，或改選一般 Turbo。")
 
 
 def _clean_text(value: Any) -> str:
@@ -348,8 +384,13 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     quality_mode = _clean_text(payload.get("quality_mode")) or "native"
     if quality_mode not in QUALITY_MODES:
         quality_mode = "native"
-    if reference_mode and quality_mode in {"turbo_fast", "turbo_quality", "sparse_experimental"}:
-        raise RequestError("這個新版加速模式目前只支援文生、首尾、續接與圖騰循環；多模態參考請改用 Turbo 穩定模式。")
+    if reference_mode and quality_mode in FL_ONLY_QUALITY_MODES:
+        raise RequestError("這個新版加速模式目前只支援文生、首尾、續接與圖騰循環；多模態參考請改用 Turbo 穩定或 Ref 8 步品質模式。")
+    if not reference_mode and quality_mode == "turbo_ref_quality":
+        raise RequestError("Ref 8 步品質模式只支援多模態參考、角色替換、彈窗面板與 MG 動畫；文生與首尾請改用 FL2VA 品質模式。")
+    memory_optimization = payload.get("memory_optimization") is True
+    if quality_mode == "turbo_sla" and memory_optimization:
+        raise RequestError("SLA 已內建分塊 QKV，請關閉額外省顯存以避免節點衝突。")
     sampler_name = "res_multistep"
     turbo_profile = None
     turbo_lora = None
@@ -378,6 +419,20 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             steps = 4
             turbo_profile = TURBO_PROFILE_FL_768_FAST_V11
             shift_video = 6.0
+        elif quality_mode == "turbo_sla":
+            steps = 4
+            turbo_profile = TURBO_PROFILE_FL_768_SLA
+            turbo_lora_strength = 1.0
+            shift_video = 6.0
+        elif quality_mode == "turbo_audio":
+            steps = 4
+            turbo_profile = TURBO_PROFILE_FL_768_AUDIO_V12
+            shift_video = 6.0
+        elif quality_mode == "turbo_ref_quality":
+            steps = 8
+            ref_image_size = "match"
+            turbo_profile = TURBO_PROFILE_REF_768_QUALITY_V10
+            shift_video = 12.0
         else:
             steps = 8
             turbo_profile = TURBO_PROFILE_FL_768_QUALITY_V10
@@ -745,6 +800,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 height=height,
                 length=length,
                 custom_loras=custom_loras,
+                memory_optimization=memory_optimization,
                 requested_duration=requested_duration,
                 actual_duration=length / FPS,
                 seed=seed,
@@ -798,6 +854,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         height=height,
         length=length,
         custom_loras=custom_loras,
+        memory_optimization=memory_optimization,
         requested_duration=requested_duration,
         actual_duration=round(length / FPS, 3),
         seed=seed,
@@ -863,23 +920,42 @@ def build_workflow(
             "shift_video": compiled.shift_video,
             "shift_audio": compiled.shift_audio,
         }, "H3 Turbo Sigma Shift")
-        if compiled.quality_mode == "sparse_experimental":
-            model = add("H3MemoryOptimization", {
-                "model": [model, 0],
-                "fused_qkv": "auto",
-                "mlp_memory": "auto",
-                "chunk_rows": 4096,
-                "preserve_precision": True,
-                "precision_mode": "Auto",
-                "qkv_streaming_mode": "Auto",
-                "embedding_memory_mode": "Auto",
-                "kitchen_v_memory_mode": "Standard",
-            }, "H3 Memory Optimization")
-            model = add("H3SparseAttention", {
-                "model": [model, 0],
-                "video_budget": 0.30,
-                "denser_early_late_steps": True,
-            }, "H3 Sparse Attention · Experimental 30%")
+    if compiled.quality_mode == "turbo_sla" and compiled.memory_optimization:
+        raise RequestError("SLA 已內建分塊 QKV，請關閉額外省顯存以避免節點衝突。")
+    if compiled.memory_optimization or compiled.quality_mode == "sparse_experimental":
+        model = add("H3MemoryOptimization", {
+            "model": [model, 0],
+            "fused_qkv": "auto",
+            "mlp_memory": "auto",
+            "chunk_rows": 4096,
+            "preserve_precision": True,
+            "precision_mode": "Auto",
+            "qkv_streaming_mode": "Auto",
+            "embedding_memory_mode": "Auto",
+            "kitchen_v_memory_mode": "Standard",
+        }, "H3 Memory Optimization")
+    if compiled.quality_mode == "sparse_experimental":
+        model = add("H3SparseAttention", {
+            "model": [model, 0],
+            "video_budget": 0.30,
+            "denser_early_late_steps": True,
+        }, "H3 Sparse Attention · Experimental 30%")
+    elif compiled.quality_mode == "turbo_sla":
+        # ComfyUI 0.35 supplies its own H3 chunked QKV producer. H3-Optimizations
+        # currently replaces block.forward without the required attention kwarg,
+        # so neither its memory patch nor H3SparseAttention may be stacked here.
+        model = add("BlockSparseAttention", {
+            "model": [model, 0],
+            "selection": "sla",
+            "selection.keep_percent": 15.0,
+            "start_percent": 0.0,
+            "end_percent": 1.0,
+            "dense_blocks": "",
+            "min_tokens": 0,
+            "extra_tokens": 0,
+            "sink_conditioning": "exact_kv_and_rows",
+            "verbose": True,
+        }, "H3 Turbo-SLA · Experimental 15%")
     family = "ref2va" if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"} else "fl2va"
     for item in active_loras(compiled.custom_loras, family):
         model = add("LoraLoaderModelOnly", {

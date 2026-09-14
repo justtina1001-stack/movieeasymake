@@ -645,6 +645,14 @@ input:disabled, select:disabled { opacity: .62; cursor: not-allowed; }
 .shortfilm-wide-field { display: block; margin-top: 15px; }
 .shortfilm-add-menu { display: flex; gap: 7px; }
 .shortfilm-asset-list,.shortfilm-scene-list,.shortfilm-shot-list { display: grid; gap: 13px; }
+.sf-segment-builder { border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 20px; }
+.sf-segment-builder summary { cursor: pointer; color: var(--text); font-weight: 700; }
+.sf-segment-builder .shortfilm-dialogue-grid { margin: 14px 0; align-items: end; }
+.sf-segment-rows { display: grid; gap: 16px; max-height: 580px; overflow-y: auto; margin: 16px 0; padding-right: 6px; }
+.sf-segment-row { display: grid; gap: 8px; }
+.sf-segment-row textarea { width: 100%; min-height: 90px; resize: vertical; }
+.sf-segment-row .shortfilm-reference-count { white-space: normal; }
+.shortfilm-main-column[inert] { opacity: .65; }
 .shortfilm-asset-card { padding: 17px; border: 1px solid var(--line); border-radius: 15px; background: rgba(11,14,19,.48); }
 .shortfilm-asset-head,.shortfilm-scene-heading,.shortfilm-shot-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
 .shortfilm-asset-head > span,.shortfilm-scene-heading > span,.shortfilm-shot-heading > div > span { color: var(--accent-2); font-size: 9px; font-weight: 750; letter-spacing: .13em; }

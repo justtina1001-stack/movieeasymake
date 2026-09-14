@@ -18,13 +18,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import aiohttp
 import av
 import numpy as np
 from aiohttp import web
 from PIL import Image, ImageOps
 
 from comfy_client import ComfyClient
-from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES
+from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, validate_runtime_inventory
 from custom_loras import active_loras
 from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
 from model_updates import ModelUpdateError, ModelUpdateManager
@@ -46,12 +47,14 @@ from shared_gateway import GatewayError, SharedComfyGateway
 from shortfilm import (
     ShortFilmError,
     ShortFilmStore,
+    append_continuous_scene,
     changed_reference_aliases,
     compile_shot_payload,
     flatten_shots,
     new_project,
     project_job_records,
     project_warnings,
+    validate_shot_references,
 )
 from settings import ConnectionSettings, SettingsError, SettingsStore
 
@@ -1210,6 +1213,8 @@ class JobManager:
             "parent_job_id": parent_job_id,
             "segment_index": segment_index,
             "mode": compiled.mode,
+            "quality_mode": compiled.quality_mode,
+            "memory_optimization": compiled.memory_optimization,
             "status": "queued",
             "progress": 0,
             "current_node": None,
@@ -1255,6 +1260,8 @@ class JobManager:
             "favorite": False,
             "hidden": False,
             "mode": "replace",
+            "quality_mode": compiled.quality_mode,
+            "memory_optimization": compiled.memory_optimization,
             "workspace": "quick",
             "batch_type": "replace_long",
             "status": "queued",
@@ -1836,21 +1843,17 @@ class JobManager:
                     raise asyncio.CancelledError
                 self.update(job_id, status="preparing", progress=0)
                 await self.comfy.ensure_running()
+                inventory = await self.comfy.model_inventory(refresh=True)
+                validate_runtime_inventory(compiled, inventory)
                 turbo_lora_name = None
                 if compiled.quality_mode != "native":
                     turbo_lora_name = await self.comfy.resolve_turbo_lora(compiled.turbo_profile)
                     if not turbo_lora_name:
                         raise RuntimeError(
                             "所選生成品質需要對應的 H3 Turbo LoRA。"
-                            "請在本機引擎安裝器補齊 Turbo 模型，或在遠端 ComfyUI 的 models/loras 安裝相容 LoRA。"
+                            f"目前引擎找不到 {compiled.turbo_lora}。"
+                            "請在本機引擎安裝器補齊 Turbo 模型，或在遠端 ComfyUI 的 models/loras 安裝相容 LoRA，再重啟引擎。"
                         )
-                    if compiled.quality_mode == "sparse_experimental":
-                        inventory = await self.comfy.model_inventory()
-                        if not inventory.get("h3_optimizations"):
-                            raise RuntimeError(
-                                "實驗性稀疏加速需要 H3-Optimizations 節點。"
-                                "請先執行模型更新，並重新啟動 ComfyUI。"
-                            )
                 family = "ref2va" if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"} else "fl2va"
                 selected_loras = active_loras(compiled.custom_loras, family)
                 custom_lora_names = {}
@@ -2351,6 +2354,15 @@ def create_app() -> web.Application:
         except ShortFilmError as error:
             return json_response_error(error, 404)
 
+    async def append_shortfilm_segments(request: web.Request) -> web.Response:
+        try:
+            project_id = request.match_info["project_id"]
+            plan = await request.json()
+            project = append_continuous_scene(shortfilms.get(project_id), plan)
+            return web.json_response(shortfilms.update(project_id, project), status=201)
+        except (ShortFilmError, ValueError) as error:
+            return json_response_error(error, 400)
+
     async def compile_shortfilm_shot(request: web.Request) -> web.Response:
         try:
             request_payload = await request.json()
@@ -2362,6 +2374,7 @@ def create_app() -> web.Application:
             if shot_index is None:
                 raise ShortFilmError("找不到指定鏡頭。")
             scene, shot = flattened[shot_index]
+            validate_shot_references(project, scene, shot)
             continuation_asset_id = shot.get("continuation_asset_id")
             if shot.get("continue_previous"):
                 if shot_index == 0:
@@ -2393,7 +2406,9 @@ def create_app() -> web.Application:
                         "為避免開頭先出現舊 AI 畫面，請先重新生成上一鏡，再續接這一鏡。"
                     )
                 valid_cached_asset = False
-                if continuation_asset_id:
+                if shot.get("continuation_job_id") != previous_job_id:
+                    continuation_asset_id = None
+                if continuation_asset_id and shot.get("continuation_job_id") == previous_job_id:
                     try:
                         assets.path_for(continuation_asset_id)
                         valid_cached_asset = True
@@ -2404,6 +2419,7 @@ def create_app() -> web.Application:
                     frame = await asyncio.to_thread(extract_continuation_frame, source_path, assets)
                     continuation_asset_id = frame["id"]
                     shot["continuation_asset_id"] = continuation_asset_id
+                    shot["continuation_job_id"] = previous_job_id
                     project = shortfilms.update(project_id, project)
                     flattened = flatten_shots(project)
                     scene, shot = next((item for item in flattened if item[1]["id"] == shot_id), (scene, shot))
@@ -2908,6 +2924,7 @@ def create_app() -> web.Application:
     app.router.add_put("/api/shortfilms/{project_id}", update_shortfilm)
     app.router.add_delete("/api/shortfilms/{project_id}", delete_shortfilm)
     app.router.add_post("/api/shortfilms/{project_id}/shots/{shot_id}/compile", compile_shortfilm_shot)
+    app.router.add_post("/api/shortfilms/{project_id}/segments", append_shortfilm_segments)
     app.router.add_get("/api/shortfilms/{project_id}/jobs", list_shortfilm_jobs)
     app.router.add_post("/api/compile", compile_api)
     app.router.add_post("/api/render", render)

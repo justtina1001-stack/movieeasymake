@@ -1,5 +1,26 @@
 # MiniMax H3 Studio
 
+## 省顯存與加速選項（2026-09-10）
+
+快速生成的影片設定、短片創作的故事企劃都有獨立的「省顯存」開關。全新表單／新建短片預設勾選；舊草稿、舊專案、舊任務配方若沒有這個欄位，維持未啟用，避免悄悄改動既有工作流。API 欄位為 `memory_optimization`（布林值）。省顯存旨在降低運算暫存峰值，不保證加速或完全避免長片／高解析度的 OOM。
+
+| 生成品質 | 適用模型 | 設定與用途 |
+| --- | --- | --- |
+| 原有原生／Turbo／原版稀疏 | 維持既有適用範圍 | 保留原來的 LoRA、步數與預設選擇。原版稀疏為保留舊圖，仍包含記憶體節點。 |
+| Turbo 聲音改善 | FL2VA（文生、首尾、循環、續接） | 4 步 v1.2、Euler/simple、Shift 6/3；主要改善聲音，不是速度升級。 |
+| Ref Turbo 品質比較 | Ref2VA（多模態、角色替換、彈窗、MG） | 8 步 v1.0、Euler/simple、Shift 12/3、參考圖 match；與原本 4 步比較參考品質，不能保證更快。 |
+| 實驗性 Turbo-SLA | FL2VA | 專用 SLA LoRA、4 步、Shift 6/3、保留 15% 注意力區塊；需要 ComfyUI 0.35.0 與配套依賴，不是把一般 Turbo LoRA 換個名字。 |
+
+SLA 使用 ComfyUI 原生 `BlockSparseAttention` 的 H3 分塊 QKV 路徑；目前與額外 `H3MemoryOptimization` 的 forward hook 不相容。介面會取消勾選並停用該開關，API 也拒絕兩者同時啟用。不要疊加舊 `H3SparseAttention` 或其他蒸餾加速 LoRA。實驗加速可能影響細節、動作或音訊，先以相同素材、Seed、5 秒影片比較，再用於正式輸出；未通過本機測速前不宣稱倍速。
+
+短片品質是全片設定；有參考素材的鏡頭使用 Ref2VA，無參考素材的鏡頭使用 FL2VA。若選了僅限單一模型的品質，不相容鏡頭沿用既有的 Turbo 穩定版適配規則，規則檢查及鏡頭編譯都會提示。缺少模型或節點則明確報錯，不會因缺件偷偷換用其他模型。
+
+本版新安裝固定 ComfyUI `v0.35.0`／`40c4fcd`，自訂節點固定 H3-Optimizations `0.2.42`／`52b5f1e`。既有同事執行 Git 更新不會覆蓋 `ComfyUI/`、模型、私人設定或作品；「模型更新」只補模型與自訂節點，**不會自動升級既有 ComfyUI 核心**。需要 SLA 時，請 GPU 主機管理者備份後更新核心與其 `requirements.txt`，再重啟引擎；遠端面板無權替主機安裝或更新。
+
+來源：[ComfyUI 0.35.0](https://github.com/Comfy-Org/ComfyUI/releases/tag/v0.35.0)、[H3-Optimizations](https://github.com/Zironic/H3-Optimizations)、[Turbo-SLA](https://huggingface.co/lightx2v/Minimax-h3-Turbo-SLA)、[FL v1.2](https://huggingface.co/lightx2v/Minimax-h3-Turbo/discussions/52)、[Ref 8 步](https://huggingface.co/lightx2v/Minimax-h3-Turbo/discussions/51)。
+
+本機驗證：128 項 Python 測試、7 項前端測試、15 種工作流結構檢查皆通過；另以小型隨機權重模型完成 CPU 10 項及 RTX 5060 Ti CUDA 10 項相容性測試，確認稀疏注意力實際呼叫 CUDA 核心。這些不是正式影片的速度、顯存或畫質基準；尚未用完整 INT8 模型進行影片生成比較。目前 embedding 省顯存的 Auto 模式遇到核心結構變更會安全退回原生路徑，不能視為所有省顯存子功能均已啟用。
+
 ## 自訂 LoRA（2026-09-05）
 
 快速生成的影片設定與短片創作的故事企劃都有「自訂 LoRA」折疊面板。
@@ -20,7 +41,7 @@ MiniMax H3 Studio 是 ComfyUI 的簡化操作介面，可使用本機 ComfyUI，
 
 第一次使用先執行專案根目錄的 `setup_h3_studio.bat`，再雙擊 `start_h3_studio.bat`。瀏覽器會開啟 <http://127.0.0.1:8787>。右上角「引擎設定」可切換本機與遠端模式。
 
-本機沒有 ComfyUI 時，可在「引擎設定」展開一鍵安裝器。安裝前會檢查 NVIDIA GPU、Git、Python、記憶體與磁碟空間，並要求使用者閱讀 MiniMax H3 Community License。基礎模型與壓縮 Turbo LoRA 約 60.2 GiB，建議保留至少 81 GiB。
+本機沒有 ComfyUI 時，可在「引擎設定」展開一鍵安裝器。安裝前會檢查 NVIDIA GPU、Git、Python、記憶體與磁碟空間，並要求使用者閱讀 MiniMax H3 Community License。本版影片基礎模型與所有內建 LoRA 共約 69.2 GiB，建議保留至少 90 GiB；語音、音樂與作品另計。
 
 新安裝預設是「一般使用者」工作站，不顯示共享金鑰管理。GPU 主機可執行根目錄的 `set_h3_admin_mode.bat` 切換成「管理主機」；角色只保存在 Git 忽略的本機 `config.json`，不會隨專案分享。
 
@@ -42,11 +63,25 @@ MiniMax H3 Studio 是 ComfyUI 的簡化操作介面，可使用本機 ComfyUI，
 - 工作佇列、進度、取消、影片預覽和下載
 - 本機／遠端 ComfyUI 切換；遠端輸出自動回存面板電腦
 - 共享 GPU Gateway：每位同事各自執行 H3 Studio，以個人金鑰共用主機 ComfyUI；素材、歷史、輸出與取消操作均依所有權隔離
-- 一鍵安裝本機 ComfyUI、CUDA PyTorch、五個 H3 基礎模型與三個壓縮 Turbo LoRA，支援中斷後續裝
+- 一鍵安裝本機 ComfyUI、CUDA PyTorch、五個 H3 基礎模型與內建 Turbo／SLA LoRA，支援中斷後續裝
 - 模型更新中心：啟動時依 Git 版本清單檢查本機模型，可選立即更新、明天再提醒或略過版本；遠端模式由 GPU 主機管理者處理
 - MiniMax Music 3 音樂工作室：歌曲／純音樂、官方三段式 Caption、自訂歌詞、時長、Seed、MP3／FLAC、試聽、下載、歷史與我的最愛
 
 ## 短片創作
+
+### 連續分段編排（2026-09-10）
+
+在「短片創作 → 場次與分鏡」展開「連續分段編排」，設定本組目標 `60` 秒、每段 `5` 秒，按「建立／調整輸入欄」便會產生 12 個分鏡詞欄位。亦可選每段 10 或 15 秒，目標需為每段秒數的整數倍。草稿隨專案保存；縮減已有內容的段數會先詢問。
+
+填寫各段動作並選擇每段必用的共用素材；未勾選的資產仍可藉由分鏡詞中的名稱自動引用。按「加入連續分鏡」只新增一個場次，不覆蓋舊分鏡，也不立即生成。這一組的第一段建立新的開頭，第二段起預設勾選沿用上一鏡尾幀；需要承接既有場次時，可在加入後手動勾選第一段的續接。
+
+每段最多引用 9 項素材，同時 **所有參考圖片合計不得超過 9 張**；角色的多張形象圖逐張計算、續接尾幀占 1 張、另加的分鏡圖也占名額。續接段通常僅剩 8 張可供角色、場景或道具使用，聲音上限為 3 段。編排欄逐段計數，前端批次送出前與後端編譯時都會阻擋超限，不會自動丟棄素材。
+
+按「依序生成未完成鏡頭」會逐段等待完成再送下一段，沿用既有資產庫並擷取前段尾幀。失敗或取消會停止後續送出；修正後再次執行會跳過已完成鏡頭、等待正在執行的鏡頭。重生前段時會使連續相依的後段回到草稿，舊作品仍留在歷史；尾幀快取也會核對來源工作 ID。批次期間暫停本頁的專案編輯和切換，避免錯接分鏡。不要在多個分頁同時啟動同一個專案的批次。
+
+請保持 **此瀏覽器分頁、Studio 與引擎開啟**；關閉分頁不會取消已送出的鏡頭，但也不會繼續送出下一段，重新開啟後需再次按批次按鈕。這不是伺服器背景排程，也不會自動合併為一支完整影片。5 秒是生成請求時長，實際片長受模型幀數約束可能略長。續接提示沿用 H3 提示詞 Skill 的參考物件／畫面錨點區分，要求保持身份、位置、姿態、光線與動作；模型不能保證像素完全一致或每段完全無縫。
+
+驗證包含 12 段編排、共用／名稱引用、多圖與尾幀計數、超限阻擋、串行送出、失敗續跑與來源快取更新；已完成本機介面和 API 測試，未為測試啟動正式 GPU 影片生成。
 
 頂端切換至「短片創作」後，可建立獨立故事專案。此模式不連接官方 API 或外部 Agent，而是用表單與固定規則把專案內容編譯成 MiniMax H3 官方 T2VA／Ref2VA 提示詞，再交給原本的本機或遠端 ComfyUI 引擎。
 
@@ -99,9 +134,11 @@ MiniMax H3 Studio 是 ComfyUI 的簡化操作介面，可使用本機 ComfyUI，
 
 ## 測試
 
+先在專案根目錄完成 `setup_h3_studio.bat`，再從專案根目錄執行；面板測試不需要安裝 ComfyUI 或下載模型。
+
 ```powershell
-cd "E:\MINIMAX H3\H3Studio"
-..\ComfyUI\.venv\Scripts\python.exe -m unittest discover -s tests -v
+cd H3Studio
+.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
 ## MG 動畫模式

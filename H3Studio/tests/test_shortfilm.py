@@ -6,6 +6,8 @@ from pathlib import Path
 from domain import compile_request
 from shortfilm import (
     ShortFilmStore,
+    ShortFilmError,
+    append_continuous_scene,
     changed_reference_aliases,
     compile_shot_payload,
     new_asset,
@@ -20,6 +22,82 @@ from shortfilm import (
 
 
 class ShortFilmTests(unittest.TestCase):
+    def test_continuous_minute_creates_twelve_connected_shots(self):
+        project = new_project("一分鐘")
+        asset = new_asset("character", "主角")
+        asset["image_asset_ids"] = ["1" * 32]
+        project["assets"] = [asset]
+        result = append_continuous_scene(project, {"duration": 5, "prompts": [f"主角向前走，第{i}段" for i in range(12)]})
+        scene = result["scenes"][0]
+        self.assertEqual(len(scene["shots"]), 12)
+        self.assertEqual(result["target_duration"], 60)
+        self.assertEqual(project["scenes"], [])  # no mutation of caller
+        for index, shot in enumerate(scene["shots"]):
+            self.assertEqual(shot["continue_previous"], index > 0)
+            payload, _ = compile_shot_payload(result, scene["id"], shot["id"], continuation_asset_id="2" * 32 if index else None)
+            self.assertEqual(payload["duration"], 5)
+            self.assertEqual(payload["references"][0]["image_asset_ids"], ["1" * 32])
+            self.assertEqual(payload["first_image_asset_id"], "2" * 32 if index else None)
+            compiled = compile_request(payload)
+            self.assertIn("subject_definitions:", compiled.prompt)
+            if index:
+                self.assertIn("preceding shot's final frame", compiled.prompt)
+
+    def test_continuous_append_preserves_old_jobs_and_does_not_link_first_segment(self):
+        project, scene, shot = self.project_with_shot()
+        shot["status"] = "completed"
+        shot["job_id"] = "a" * 32
+        result = append_continuous_scene(project, {"duration": 10, "prompts": ["走路", "停下"]})
+        self.assertEqual(result["scenes"][0]["shots"][0]["job_id"], "a" * 32)
+        self.assertFalse(result["scenes"][1]["shots"][0]["continue_previous"])
+        self.assertEqual(result["target_duration"], 25)
+
+    def test_continuous_shared_materials_plus_tail_frame_limit(self):
+        project = new_project()
+        for index in range(9):
+            asset = new_asset("character", f"actor_{index}")
+            asset["image_asset_ids"] = [f"{index + 1:032x}"]
+            project["assets"].append(asset)
+        plan = {"duration": 5, "prompts": ["walk", "run"], "asset_ids": [asset["id"] for asset in project["assets"]]}
+        with self.assertRaisesRegex(ShortFilmError, "10 張.*續接尾幀"):
+            append_continuous_scene(project, plan)
+        self.assertEqual(project["scenes"], [])
+        plan["asset_ids"] = plan["asset_ids"][:8]
+        result = append_continuous_scene(project, plan)
+        self.assertEqual(len(result["scenes"][0]["shots"][1]["asset_ids"]), 8)
+        # Auto-matched aliases count in addition to the manual selection.
+        plan["prompts"][1] = "actor_8 walks"
+        with self.assertRaisesRegex(ShortFilmError, "10 張"):
+            append_continuous_scene(project, plan)
+
+    def test_continuous_limits_count_multiimage_assets_and_audio(self):
+        project = new_project()
+        asset = new_asset("character", "actor")
+        asset["image_asset_ids"] = [f"{index + 1:032x}" for index in range(9)]
+        project["assets"] = [asset]
+        with self.assertRaisesRegex(ShortFilmError, "10 張"):
+            append_continuous_scene(project, {"prompts": ["actor walks", "actor runs"]})
+        project["assets"] = []
+        for index in range(4):
+            asset = new_asset("character", f"voice_{index}")
+            asset["audio_asset_id"] = f"{index + 1:032x}"
+            project["assets"].append(asset)
+        with self.assertRaisesRegex(ShortFilmError, "4 段.*3 段"):
+            append_continuous_scene(project, {"prompts": ["walk"], "asset_ids": [a["id"] for a in project["assets"]]})
+
+    def test_continuous_plan_rejects_invalid_input(self):
+        for plan in (None, {}, {"duration": 4, "prompts": ["walk"]}, {"prompts": [""]}, {"prompts": ["x" * 5001]}, {"prompts": ["walk"], "asset_ids": ["missing"]}):
+            with self.subTest(plan=str(plan)[:80]), self.assertRaises(ShortFilmError):
+                append_continuous_scene(new_project(), plan)
+
+    def test_segment_draft_and_continuation_source_survive_store_normalization(self):
+        project, scene, shot = self.project_with_shot()
+        project["segment_draft"] = {"duration": 5, "target_duration": 60, "prompts": ["draft", ""], "asset_ids": []}
+        shot["continuation_job_id"] = "a" * 32
+        result = normalize_project(project)
+        self.assertEqual(result["segment_draft"]["prompts"], ["draft", ""])
+        self.assertEqual(result["scenes"][0]["shots"][0]["continuation_job_id"], "a" * 32)
+
     def test_project_job_records_keeps_history_and_legacy_link(self):
         project = new_project("測試短片")
         scene = new_scene()

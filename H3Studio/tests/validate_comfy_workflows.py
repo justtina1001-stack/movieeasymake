@@ -70,21 +70,28 @@ async def main():
     try:
         await nodes.init_extra_nodes(init_custom_nodes=True, init_api_nodes=False)
         cases = [
-            ("t2v", "native", 0.4),
-            ("t2v", "turbo", 0.4),
-            ("t2v", "turbo", 0.98),
-            ("fl2va", "turbo", 0.4),
-            ("r2v", "turbo", 0.4),
-            ("t2v", "turbo_fast", 0.98),
-            ("fl2va", "turbo_quality", 0.98),
-            ("t2v", "sparse_experimental", 0.98),
+            ("t2v", "native", 0.4, False),
+            ("t2v", "turbo", 0.4, False),
+            ("t2v", "turbo", 0.98, False),
+            ("fl2va", "turbo", 0.4, False),
+            ("r2v", "turbo", 0.4, False),
+            ("t2v", "turbo_fast", 0.98, False),
+            ("fl2va", "turbo_quality", 0.98, False),
+            ("t2v", "sparse_experimental", 0.98, False),
+            ("t2v", "native", 0.4, True),
+            ("r2v", "native", 0.4, True),
+            ("r2v", "turbo", 0.4, True),
+            ("fl2va", "turbo_audio", 0.98, True),
+            ("r2v", "turbo_ref_quality", 0.98, True),
+            ("fl2va", "turbo_sla", 0.98, False),
         ]
-        for mode, quality_mode, megapixels in cases:
+        for mode, quality_mode, megapixels, memory_optimization in cases:
             data = payload(mode, quality_mode)
             data["megapixels"] = megapixels
+            data["memory_optimization"] = memory_optimization
             compiled = compile_request(data)
             uploaded = {ASSET: "example.png", VIDEO: VALIDATION_VIDEO.name}
-            label = f"{mode}-{quality_mode}-{megapixels}mp"
+            label = f"{mode}-{quality_mode}-{megapixels}mp-memory{memory_optimization}"
             workflow = build_workflow(compiled, uploaded, f"validate-{label}")
             valid, error, outputs, node_errors = await execution.validate_prompt(label, workflow, None)
             if not valid:

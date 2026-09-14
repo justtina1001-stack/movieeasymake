@@ -4,7 +4,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import av
 from PIL import Image
@@ -175,6 +175,9 @@ class FakeBatchComfy:
     async def ensure_running(self):
         return None
 
+    async def model_inventory(self, *, refresh=False):
+        return dict(fl2va=True, ref2va=True, text_encoder=True, video_vae=True, audio_vae=True)
+
     async def upload_asset(self, path, _subfolder):
         return path.name
 
@@ -190,6 +193,29 @@ class FakeBatchComfy:
 
 
 class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_memory_node_fails_before_upload_or_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            job_dir, output_dir = root / "jobs", root / "outputs"
+            job_dir.mkdir()
+            output_dir.mkdir()
+            payload = dict(mode="r2v", prompt="Hero waves.", memory_optimization=True,
+                           references=[dict(alias="Hero", type="character", image_asset_ids=["a" * 32])])
+            fake = FakeBatchComfy(b"unused")
+            fake.model_inventory = AsyncMock(return_value=dict(ref2va=True, text_encoder=True,
+                                                               video_vae=True, audio_vae=True,
+                                                               h3_memory_optimization=False))
+            fake.upload_asset = AsyncMock()
+            with patch("app.JOB_DIR", job_dir), patch("app.OUTPUT_DIR", output_dir):
+                manager = JobManager(object(), fake)
+                job = manager.create(compile_request(payload), payload)
+                await manager.tasks[job["id"]]
+                self.assertEqual(job["status"], "failed")
+                self.assertIn("H3MemoryOptimization", job["error"])
+                self.assertTrue(job["memory_optimization"])
+                fake.upload_asset.assert_not_called()
+                self.assertEqual(fake.counter, 0)
+
     async def test_failed_progress_connection_is_reconciled_from_comfy_history(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -7,6 +7,7 @@ from pathlib import Path
 from aiohttp import web
 
 from comfy_client import ComfyClient
+from domain import TURBO_LORA_CANDIDATES
 from settings import ConnectionSettings
 
 
@@ -96,6 +97,61 @@ class ComfyClientRecoveryTests(unittest.IsolatedAsyncioTestCase):
             (4).to_bytes(4, "big") + len(metadata).to_bytes(4, "big") + metadata + png
         )
         self.assertEqual(decoded, (png, "image/png"))
+
+
+class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.schemas = {
+            "UNETLoader": {"input": {"required": {"unet_name": [[
+                "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+                "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            ]]}}},
+            "CLIPLoader": {"input": {"required": {"clip_name": [["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"]]}}},
+            "VAELoader": {"input": {"required": {"vae_name": [["minimax_h3_video_vae_fp16.safetensors", "minimax_h3_audio_vae_fp32.safetensors"]]}}},
+            "LoraLoaderModelOnly": {"input": {"required": {"lora_name": [[candidates[0] for candidates in TURBO_LORA_CANDIDATES.values()]]}}},
+            "H3MemoryOptimization": {"input": {"required": {"model": ["MODEL"]}}},
+            "MiniMaxH3SigmaShift": {"input": {"required": {"model": ["MODEL"]}}},
+            "BlockSparseAttention": {"input": {"required": {"selection": ["COMFY_DYNAMICCOMBO_V3", {"options": [
+                {"key": "sla", "inputs": {"required": {"keep_percent": ["FLOAT", {"default": 10.0}]}}},
+            ]}]}}},
+        }
+        app = web.Application()
+        app.router.add_get("/object_info/{node}", self.object_info)
+        self.runner = web.AppRunner(app)
+        await self.runner.setup()
+        self.site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        await self.site.start()
+        port = self.site._server.sockets[0].getsockname()[1]
+        self.temporary = tempfile.TemporaryDirectory()
+        settings = ConnectionSettings(mode="remote", base_url=f"http://127.0.0.1:{port}",
+                                      comfy_dir=self.temporary.name, auto_start_local=False)
+        self.client = ComfyClient(settings, Path(self.temporary.name))
+
+    async def asyncTearDown(self):
+        await self.runner.cleanup()
+        self.temporary.cleanup()
+
+    async def object_info(self, request):
+        node = request.match_info["node"]
+        # Comfy returns HTTP 200 with an empty object for unknown nodes.
+        return web.json_response({node: self.schemas[node]} if node in self.schemas else {})
+
+    async def test_missing_sparse_node_does_not_hide_independent_memory(self):
+        inventory = await self.client.model_inventory()
+        self.assertTrue(inventory["h3_memory_optimization"])
+        self.assertFalse(inventory["h3_optimizations"])
+        self.assertTrue(inventory["h3_sla_attention"])
+        self.assertTrue(inventory["h3_sigma_shift"])
+        for key in ("fl2v_768_sla", "fl2v_768_audio_v12", "ref2v_768_quality_v10"):
+            self.assertTrue(inventory[f"turbo_{key}"])
+            self.assertEqual(await self.client.resolve_turbo_lora(key), TURBO_LORA_CANDIDATES[key][0])
+
+    async def test_sla_requires_correct_dynamic_schema_not_just_http_200(self):
+        await self.client.model_inventory()
+        self.schemas["BlockSparseAttention"] = {"input": {"required": {"selection": [["sol-attn"]]}}}
+        self.assertFalse((await self.client.model_inventory(refresh=True))["h3_sla_attention"])
+        del self.schemas["H3MemoryOptimization"]
+        self.assertFalse((await self.client.model_inventory(refresh=True))["h3_memory_optimization"])
 
 
 if __name__ == "__main__":

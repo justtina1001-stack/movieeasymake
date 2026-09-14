@@ -1009,6 +1009,7 @@ function currentSettings() {
     scheduler: $("#scheduler").value,
     ref_image_size: $("#refImageSize").value,
     quality_mode: $("#qualityMode").value,
+    memory_optimization: $("#memoryOptimization").checked,
     keyframe_fit: $("#keyframeFit").value,
     motion_profile: $("#motionProfile").value,
     motion_intensity: Number($("#motionIntensity").value),
@@ -1052,6 +1053,8 @@ function restoreForm() {
   if (hasRetime) $("#retimeDuration").value = form.retime_duration;
   $("#retimeDuration").disabled = !hasRetime;
   $("#exportFrames").checked = form.export_frames === true;
+  // Existing drafts retain their old graph; only a fresh form opts in by default.
+  $("#memoryOptimization").checked = state.form ? form.memory_optimization === true : true;
 }
 
 function dimensions() {
@@ -1086,8 +1089,33 @@ function isReferenceMode(mode = state.mode) {
   return ["r2v", "replace", "popup_panel", "mg_animation"].includes(mode);
 }
 
-function turboProfile(width, height, qualityMode = $("#qualityMode").value) {
-  if (isReferenceMode()) return {
+const flOnlyQualityModes = new Set(["turbo_fast", "turbo_quality", "turbo_audio", "turbo_sla", "sparse_experimental"]);
+const refOnlyQualityModes = new Set(["turbo_ref_quality"]);
+
+function qualityModeCompatible(qualityMode, referenceMode) {
+  return !(referenceMode ? flOnlyQualityModes : refOnlyQualityModes).has(qualityMode);
+}
+
+function turboProfile(width, height, qualityMode = $("#qualityMode").value, referenceMode = isReferenceMode()) {
+  if (qualityMode === "turbo_ref_quality") return {
+    key: "ref2v_768_quality_v10",
+    steps: 8,
+    title: "Ref2VA Turbo v1.0 · 8 steps 品質比較",
+    hint: "僅限多模態／角色替換等 Ref2VA 鏡頭。用於比較參考品質，並非比現有 4 步更快；鎖定 Euler、simple、Shift 12/3 與 match。",
+  };
+  if (qualityMode === "turbo_audio") return {
+    key: "fl2v_768_audio_v12",
+    steps: 4,
+    title: "FL2VA Turbo v1.2 768p · 4 steps 聲音改善",
+    hint: "僅限 FL2VA；主要改善聲音穩定度，步數相同不代表更快。鎖定 Euler、simple 與 Shift 6/3。",
+  };
+  if (qualityMode === "turbo_sla") return {
+    key: "fl2v_768_sla",
+    steps: 4,
+    title: "實驗性 Turbo-SLA · 4 steps",
+    hint: "僅限 FL2VA，使用 SLA 專用 LoRA、原生稀疏注意力 keep 15% 與 Shift 6/3；不疊加原版稀疏節點。建議先用首尾幀、5 秒比較速度與畫質；可能改變動態與細節，不保證加速。",
+  };
+  if (referenceMode) return {
     key: "ref2v_544",
     steps: 4,
     title: "Ref2VA Turbo · 4 steps",
@@ -1124,12 +1152,15 @@ function turboProfile(width, height, qualityMode = $("#qualityMode").value) {
 function syncQualityMode(width, height) {
   const select = $("#qualityMode");
   const referenceMode = isReferenceMode();
-  const flOnlyModes = new Set(["turbo_fast", "turbo_quality", "sparse_experimental"]);
-  [...select.options].forEach(option => { option.disabled = referenceMode && flOnlyModes.has(option.value); });
-  if (referenceMode && flOnlyModes.has(select.value)) select.value = "turbo";
+  [...select.options].forEach(option => { option.disabled = !qualityModeCompatible(option.value, referenceMode); });
+  // Preserve the requested mode when switching workflows; report incompatibility
+  // instead of silently substituting a different model or acceleration method.
+  const compatible = qualityModeCompatible(select.value, referenceMode);
   const qualityMode = select.value;
+  $("#memoryOptimization").disabled = qualityMode === "turbo_sla";
+  if (qualityMode === "turbo_sla") $("#memoryOptimization").checked = false;
   const accelerated = qualityMode !== "native";
-  const profile = turboProfile(width, height, qualityMode);
+  const profile = turboProfile(width, height, qualityMode, referenceMode && !flOnlyQualityModes.has(qualityMode));
   $("#steps").disabled = accelerated;
   $("#scheduler").disabled = accelerated;
   $("#refImageSize").disabled = accelerated && referenceMode;
@@ -1137,17 +1168,35 @@ function syncQualityMode(width, height) {
     $("#steps").value = profile.steps;
     $("#scheduler").value = "simple";
     if (referenceMode) $("#refImageSize").value = "match";
-    const availability = engineModelInventory[`turbo_${profile.key}`];
-    const modelNote = availability === true ? " Turbo LoRA 已就緒。" : availability === false ? " 目前引擎尚未偵測到這個 Turbo LoRA。" : "";
-    const optimizerNote = qualityMode === "sparse_experimental"
-      ? engineModelInventory.h3_optimizations === true ? " 加速節點已就緒。" : " 尚未偵測到 H3-Optimizations，請先執行模型更新並重啟引擎。"
-      : "";
     $("#qualityModeTitle").textContent = profile.title;
-    $("#qualityModeHint").textContent = profile.hint + modelNote + optimizerNote;
+    $("#qualityModeHint").textContent = (compatible ? "" : "此生成方式與所選品質不相容，請重新選擇生成品質；不會自動換用其他 LoRA。 ") + profile.hint + accelerationAvailabilityNote(qualityMode, profile);
   } else {
     $("#qualityModeTitle").textContent = "原生品質模式";
     $("#qualityModeHint").textContent = "保留目前採樣設定，適合正式成品；不載入 Turbo LoRA。";
   }
+  $("#memoryOptimizationHint").textContent = memoryOptimizationHint($("#memoryOptimization").checked, qualityMode);
+}
+
+function capabilityNote(key, label) {
+  const available = engineModelInventory[key];
+  if (available === true) return ` ${label}已就緒。`;
+  if (available === false && key === "h3_sla_attention") return ` 目前引擎缺少${label}；請更新目前運算引擎的 ComfyUI 核心至 0.35.0 以上及配套依賴，再重啟；模型更新只會補模型／自訂節點。送出時不會自動改用其他方案。`;
+  if (available === false) return ` 目前引擎缺少${label}；請在模型更新中安裝對應項目並重啟引擎，送出時不會自動改用其他方案。`;
+  return ` 尚未確認${label}，請先連線引擎檢查；送出時不會自動改用其他方案。`;
+}
+
+function accelerationAvailabilityNote(qualityMode, profile) {
+  let note = capabilityNote(`turbo_${profile.key}`, "此 Turbo LoRA");
+  if (qualityMode === "turbo_sla") note += capabilityNote("h3_sla_attention", "原生 SLA 節點（ComfyUI 0.35.0+）");
+  if (qualityMode === "sparse_experimental") note += capabilityNote("h3_optimizations", "原版 H3 稀疏節點");
+  return note;
+}
+
+function memoryOptimizationHint(enabled, qualityMode) {
+  if (qualityMode === "turbo_sla") return "SLA 已使用內建分塊 QKV，額外省顯存暫不可併用，避免節點衝突；切換其他品質後可重新勾選。";
+  const description = "獨立於生成品質，減少運算暫存峰值；不保證更快，也不保證完全避免記憶體不足。";
+  if (qualityMode === "sparse_experimental") return description + " 原版稀疏模式為保留舊工作流，仍會使用省顯存節點；若要完全停用，請切換其他生成品質。" + capabilityNote("h3_memory_optimization", "H3 記憶體最佳化節點");
+  return description + (enabled ? capabilityNote("h3_memory_optimization", "H3 記憶體最佳化節點") : " 目前未啟用，可隨時勾選測試。");
 }
 
 function changeQualityMode() {
@@ -1783,6 +1832,7 @@ async function applyJobRecipe(jobId) {
   if (hasRetime) $("#retimeDuration").value = raw.retime_duration;
   $("#retimeDuration").disabled = !hasRetime;
   $("#exportFrames").checked = raw.export_frames === true;
+  $("#memoryOptimization").checked = raw.memory_optimization === true;
   $("#jobName").value = recipe.job?.name || raw.job_name || "";
   state.modePrompts ||= {};
   state.modePrompts[mode] = raw.prompt || "";
@@ -2067,6 +2117,7 @@ async function checkStatus() {
     if (data.studio_role) applyStudioRole({ studio_role: data.studio_role });
     engineModelInventory = data.models || {};
     syncQualityMode(...dimensions());
+    syncShortFilmAcceleration();
     const remote = data.connection_mode === "remote";
     $("#executionMode").textContent = remote ? "遠端 GPU" : "本機 GPU";
     $("#renderNote").textContent = remote
@@ -2091,6 +2142,9 @@ async function checkStatus() {
       $("#startEngine").textContent = "啟動引擎";
     }
   } catch {
+    engineModelInventory = {};
+    syncQualityMode(...dimensions());
+    syncShortFilmAcceleration();
     if (engineStartingAt) showEngineStarting();
     else {
       $("#statusDot").className = "status-dot error";
@@ -2313,7 +2367,7 @@ async function loadShortFilmProjects(force = false) {
 async function createShortFilmProject() {
   const project = await api("/api/shortfilms", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: "未命名短片", scenes: [{ title: "場次 1", shots: [{}] }] }),
+    body: JSON.stringify({ title: "未命名短片", memory_optimization: true, scenes: [{ title: "場次 1", shots: [{}] }] }),
   });
   shortFilmProjects.unshift(project);
   activeShortFilmId = project.id;
@@ -2357,6 +2411,106 @@ function scheduleShortFilmSave() {
 
 function shortFilmFlatten(project) {
   return (project?.scenes || []).flatMap(scene => (scene.shots || []).map(shot => ({ scene, shot })));
+}
+
+function shortFilmSegmentDraft(project) {
+  if (!project.segment_draft) project.segment_draft = { target_duration: 60, duration: 5, prompts: [], asset_ids: [] };
+  return project.segment_draft;
+}
+
+function shortFilmSegmentPreview(project) {
+  const draft = shortFilmSegmentDraft(project);
+  const scene = { id: "segment-preview", title: "連續分段", shots: draft.prompts.map((action, index) => ({
+    id: `segment-${index}`, title: `第 ${index + 1} 段`, action, duration: draft.duration,
+    asset_ids: draft.asset_ids, continue_previous: index > 0,
+  })) };
+  return { project: { ...project, scenes: [scene] }, scene };
+}
+
+function updateShortFilmSegmentUsage() {
+  const project = activeShortFilmProject();
+  if (!project) return;
+  const preview = shortFilmSegmentPreview(project);
+  let invalid = 0;
+  preview.scene.shots.forEach((shot, index) => {
+    const usage = shortFilmShotReferenceUsage(preview.project, shot);
+    const node = $(`[data-sf-segment-usage="${index}"]`);
+    if (node) node.innerHTML = shortFilmUsageMarkup(usage).badge;
+    if (!shot.action.trim() || usage.assetCount > 9 || usage.imageCount > 9 || usage.audioCount > 3) invalid++;
+  });
+  const draft = project.segment_draft;
+  const total = draft.prompts.length * Number(draft.duration);
+  const mismatch = total !== Number(draft.target_duration)
+    || Number($("#sfSegmentTarget").value) !== Number(draft.target_duration)
+    || Number($("#sfSegmentDuration").value) !== Number(draft.duration);
+  $("#sfSegmentSummary").textContent = draft.prompts.length
+    ? `${draft.prompts.length} 段 × ${draft.duration} 秒 = ${total} 秒。${mismatch ? "秒數已調整，請先按建立／調整輸入欄。" : invalid ? `有 ${invalid} 段未填寫或超過素材上限，請修正後再加入。` : "檢查通過，可加入連續分鏡。"}`
+    : "請先建立輸入欄。";
+  $("#sfAppendSegments").disabled = shortFilmBatchRunning || !draft.prompts.length || invalid > 0 || mismatch;
+}
+
+function renderShortFilmSegmentBuilder() {
+  const project = activeShortFilmProject();
+  if (!project) return;
+  const draft = shortFilmSegmentDraft(project);
+  $("#sfSegmentTarget").value = draft.target_duration;
+  $("#sfSegmentDuration").value = draft.duration;
+  $("#sfSegmentAssets").innerHTML = project.assets.map(asset => `<label class="shortfilm-asset-chip"><input type="checkbox" data-sf-segment-asset="${asset.id}" ${draft.asset_ids.includes(asset.id) ? "checked" : ""}><span>${escapeHtml(asset.alias)} (${(asset.image_asset_ids || []).length} 張)</span></label>`).join("") || '<small>先在上方素材庫加入角色、場景或道具。</small>';
+  $("#sfSegmentRows").innerHTML = draft.prompts.map((prompt, index) => `<label class="sf-segment-row"><strong>第 ${index + 1} 段 · ${index * draft.duration}–${(index + 1) * draft.duration} 秒${index ? " · 接上一段尾幀" : " · 新的開頭"}</strong><textarea data-sf-segment-prompt="${index}" rows="3" maxlength="5000" placeholder="使用素材名稱描述本段可見動作、鏡頭與結尾狀態；時間以這一段的 0 秒起算。">${escapeHtml(prompt)}</textarea><span data-sf-segment-usage="${index}"></span></label>`).join("");
+  updateShortFilmSegmentUsage();
+}
+
+function buildShortFilmSegmentRows() {
+  const project = activeShortFilmProject();
+  if (!project || shortFilmBatchRunning) return;
+  const draft = shortFilmSegmentDraft(project);
+  const target = Number($("#sfSegmentTarget").value);
+  const duration = Number($("#sfSegmentDuration").value);
+  const count = target / duration;
+  if (![5, 10, 15].includes(duration) || !Number.isInteger(count) || count < 1 || target > 3600 || count + shortFilmFlatten(project).length > 500) {
+    return toast("目標秒數需為每段秒數的整數倍，且加入後總鏡頭不得超過 500 個。", true);
+  }
+  if (draft.prompts.slice(count).some(text => text.trim()) && !confirm("減少段數會移除尾端已填寫的草稿分鏡詞，確定調整？")) return;
+  draft.target_duration = target;
+  draft.duration = duration;
+  draft.prompts = Array.from({ length: count }, (_, index) => draft.prompts[index] || "");
+  renderShortFilmSegmentBuilder();
+  scheduleShortFilmSave();
+}
+
+async function appendShortFilmSegments() {
+  if (shortFilmBatchRunning) return;
+  const button = $("#sfAppendSegments");
+  setButtonBusy(button, true);
+  // Prevent edits or switching projects during the save + append transaction.
+  setShortFilmBatchEditing(true);
+  try {
+    const project = await saveShortFilmProject();
+    if (!project) return;
+    const result = await api(`/api/shortfilms/${project.id}/segments`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(project.segment_draft),
+    });
+    shortFilmProjects[shortFilmProjects.findIndex(item => item.id === project.id)] = result;
+    renderShortFilmWorkspace();
+    toast("已加入連續分鏡；檢查後按「依序生成未完成鏡頭」。");
+  } catch (error) { toast(error.message, true); }
+  finally { setButtonBusy(button, false); setShortFilmBatchEditing(false); updateShortFilmSegmentUsage(); }
+}
+
+function shortFilmBatchBlockers(project) {
+  return shortFilmFlatten(project).flatMap(({ scene, shot }, index) => {
+    const label = `${scene.title}／${shot.title}`;
+    const usage = shortFilmShotReferenceUsage(project, shot);
+    if (!shot.action?.trim()) return [`${label} 尚未填寫可見動作。`];
+    if (shot.continue_previous && index === 0) return [`${label} 是第一鏡，沒有上一鏡尾幀。`];
+    if (usage.assetCount > 9 || usage.imageCount > 9 || usage.audioCount > 3) return [`${label} 超過素材上限：${usage.assetCount}/9 項、圖片 ${usage.imageCount}/9 張（含尾幀）、聲音 ${usage.audioCount}/3 段。`];
+    return [];
+  });
+}
+
+function setShortFilmBatchEditing(locked) {
+  $(".shortfilm-main-column").inert = locked;
+  for (const selector of ["#shortfilmProjectSelect", "#newShortfilmProject", "#deleteShortfilmProject"]) $(selector).disabled = locked;
 }
 
 function shortFilmAliasMentioned(text, alias) {
@@ -2406,7 +2560,7 @@ function shortFilmShotReferenceUsage(project, shot) {
 }
 
 function shortFilmUsageMarkup(usage) {
-  const over = usage.imageCount > 9 || usage.audioCount > 3;
+  const over = usage.assetCount > 9 || usage.imageCount > 9 || usage.audioCount > 3;
   const near = !over && (usage.imageCount >= 8 || usage.audioCount >= 3);
   const statusClass = over ? " over" : near ? " near" : "";
   const breakdown = [
@@ -2418,7 +2572,7 @@ function shortFilmUsageMarkup(usage) {
     ? `已套用 ${usage.assetCount} 項（自動 ${usage.automaticAssetCount}）`
     : `已選 ${usage.assetCount} 項`;
   return {
-    badge: `<span class="shortfilm-reference-count${statusClass}">${selectionLabel} · 參考圖片 ${usage.imageCount}/9 · 聲音 ${usage.audioCount}/3</span>`,
+    badge: `<span class="shortfilm-reference-count${statusClass}">${selectionLabel} / 上限 9 項 · 參考圖片 ${usage.imageCount}/9 · 聲音 ${usage.audioCount}/3</span>`,
     note: `<small class="shortfilm-reference-note${over ? " over" : ""}">${breakdown}。分鏡文字提到名稱代號時會自動套用；其餘素材可手動勾選。每鏡頭圖片合計最多 9 張。</small>`,
   };
 }
@@ -2466,10 +2620,43 @@ function shortFilmWarnings(project) {
     if (shot.speaker_alias && !aliases.has(shot.speaker_alias)) warnings.push(`${label} 的說話角色不存在。`);
     if (shot.continue_previous && index === 0) warnings.push(`${label} 是第一鏡，不能沿用上一鏡尾幀。`);
     const usage = shortFilmShotReferenceUsage(project, shot);
+    if (usage.assetCount > 9) warnings.push(`${label} 引用 ${usage.assetCount} 項素材，超過每鏡頭 9 項上限。`);
+    const referenceMode = shortFilmShotUsesReferenceMode(project, shot);
+    if (!qualityModeCompatible(project.quality_mode, referenceMode)) warnings.push(`${label} 使用${referenceMode ? "素材參考（Ref2VA）" : "文生／首尾（FL2VA）"}模型，與全片所選品質不相容；本鏡頭會改用 Turbo 穩定版。若不希望自動適配，請改選全片共用的原生品質。`);
     if (usage.imageCount > 9) warnings.push(`${label} 使用 ${usage.imageCount} 張參考圖片，超過每鏡頭 9 張上限。`);
     if (usage.audioCount > 3) warnings.push(`${label} 使用 ${usage.audioCount} 段參考聲音，超過每鏡頭 3 段上限。`);
   });
   return warnings;
+}
+
+function shortFilmShotUsesReferenceMode(project, shot) {
+  if (shot.storyboard_asset_id || shot.continue_previous) return true;
+  const selection = shortFilmShotAssetSelection(project, shot);
+  return (project.assets || []).some(asset => selection.selectedIds.has(asset.id) && ((asset.image_asset_ids || []).length || asset.audio_asset_id));
+}
+
+function syncShortFilmAcceleration() {
+  const project = activeShortFilmProject();
+  if (!project) return;
+  const qualityMode = project.quality_mode || "native";
+  const memoryInput = $("#sfMemoryOptimization");
+  memoryInput.disabled = qualityMode === "turbo_sla";
+  if (qualityMode === "turbo_sla") {
+    memoryInput.checked = false;
+    project.memory_optimization = false;
+  }
+  $("#sfMemoryOptimizationHint").textContent = "每個鏡頭共用。" + memoryOptimizationHint(memoryInput.checked, qualityMode);
+  if (qualityMode === "native") {
+    $("#sfQualityHint").textContent = "所有鏡頭使用原生品質，不載入 Turbo LoRA；省顯存可獨立勾選。";
+    return;
+  }
+  const referenceMode = qualityMode === "turbo_ref_quality";
+  const [width, height] = project.megapixels === 0.98 && project.aspect_ratio === "16:9" ? [1344, 768] : [864, 480];
+  const profile = turboProfile(width, height, qualityMode, referenceMode);
+  const adaptationNote = qualityMode === "turbo"
+    ? " 全片會依各鏡頭有無參考素材自動選用 FL2VA／Ref2VA Turbo；下方狀態為非參考鏡頭的模型，參考鏡頭於送出時另行檢查。"
+    : " 本選項為全片設定；模型類型不相容的鏡頭會改用 Turbo 穩定版，右側規則檢查會逐鏡頭提醒。缺少節點或模型則會報錯，不會自動換用其他方案。";
+  $("#sfQualityHint").textContent = profile.hint + adaptationNote + accelerationAvailabilityNote(qualityMode, profile);
 }
 
 function renderShortFilmWorkspace() {
@@ -2489,6 +2676,7 @@ function renderShortFilmWorkspace() {
   $("#sfAspectRatio").value = project.aspect_ratio || "16:9";
   $("#sfMegapixels").value = String(project.megapixels ?? 0.4);
   $("#sfQuality").value = project.quality_mode || "native";
+  $("#sfMemoryOptimization").checked = project.memory_optimization === true;
   $("#sfExportFrames").checked = project.export_frames === true;
   $("#sfStyle").value = project.style || "";
   $("#sfSynopsis").value = project.synopsis || "";
@@ -2502,6 +2690,7 @@ function renderShortFilmWorkspace() {
 function renderShortFilmAssets() {
   const project = activeShortFilmProject();
   if (!project) return;
+  renderShortFilmSegmentBuilder();
   const list = $("#shortfilmAssetList");
   $("#shortfilmAssetEmpty").classList.toggle("hidden", project.assets.length > 0);
   list.innerHTML = project.assets.map(asset => {
@@ -2584,6 +2773,7 @@ function renderShortFilmScenes() {
 function renderShortFilmSummary(extraWarnings = null) {
   const project = activeShortFilmProject();
   if (!project) return;
+  syncShortFilmAcceleration();
   const shots = shortFilmFlatten(project);
   const generatedTotal = shots.reduce((sum, item) => sum + Number(item.shot.duration || 0), 0);
   const total = shots.reduce((sum, item) => sum + Number(item.shot.retime_duration || item.shot.duration || 0), 0);
@@ -2712,6 +2902,8 @@ async function compileShortFilmShot(shotId, generate = false) {
   const refreshedIndex = flattened.findIndex(item => item.shot.id === shotId);
   for (let index = refreshedIndex + 1; index < flattened.length && flattened[index].shot.continue_previous; index += 1) {
     flattened[index].shot.continuation_asset_id = null;
+    flattened[index].shot.continuation_job_id = null;
+    flattened[index].shot.job_id = null;
     flattened[index].shot.status = "draft";
   }
   await saveShortFilmProject();
@@ -2723,7 +2915,8 @@ async function compileShortFilmShot(shotId, generate = false) {
   return job;
 }
 
-async function refreshShortFilmShotStatuses() {
+async function refreshShortFilmShotStatuses(force = false) {
+  if (shortFilmBatchRunning && !force) return;
   if (shortFilmStatusRefreshing || !shortFilmProjects.length) return;
   shortFilmStatusRefreshing = true;
   try {
@@ -2761,13 +2954,24 @@ async function runShortFilmBatch() {
   if (shortFilmBatchRunning) return;
   const project = activeShortFilmProject();
   if (!project || !shortFilmFlatten(project).length) return toast("請先建立至少一個鏡頭。", true);
+  const blockers = shortFilmBatchBlockers(project);
+  if (blockers.length) {
+    renderShortFilmSummary(blockers);
+    return toast(`尚未送出：${blockers[0]}`, true);
+  }
   shortFilmBatchRunning = true;
+  setShortFilmBatchEditing(true);
+  let finishNote = "批次已停止。可再次按依序生成接續；目前已送出的鏡頭不會被取消。";
   $("#runShortfilmBatch").classList.add("hidden");
   $("#stopShortfilmBatch").classList.remove("hidden");
   try {
-    await refreshShortFilmShotStatuses();
-    for (const { shot } of shortFilmFlatten(activeShortFilmProject())) {
+    await refreshShortFilmShotStatuses(true);
+    const shotIds = shortFilmFlatten(activeShortFilmProject()).map(item => item.shot.id);
+    for (const shotId of shotIds) {
       if (!shortFilmBatchRunning) break;
+      // Compilation replaces the project object and invalidates downstream renders.
+      // Always resolve the current shot instead of holding a stale snapshot.
+      const { shot } = findShortFilmShot(shotId);
       if (shot.status === "completed") continue;
       let jobId = shot.job_id;
       if (jobId && ["queued", "preparing", "running"].includes(shot.status)) {
@@ -2784,20 +2988,42 @@ async function runShortFilmBatch() {
       await saveShortFilmProject();
       renderShortFilmScenes(); renderShortFilmSummary();
     }
-    if (shortFilmBatchRunning) toast("短片的未完成鏡頭已依序生成完畢。")
+    if (shortFilmBatchRunning) {
+      finishNote = "短片的未完成鏡頭已依序生成完畢，可在短片作品列表預覽各段影片。";
+      toast(finishNote);
+    }
   } catch (error) {
+    finishNote = `批次已暫停：${error.message} 修正後可再次按依序生成接續。`;
     toast(error.message, true);
   } finally {
     shortFilmBatchRunning = false;
+    setShortFilmBatchEditing(false);
     $("#runShortfilmBatch").classList.remove("hidden");
     $("#stopShortfilmBatch").classList.add("hidden");
-    $("#shortfilmBatchNote").textContent = "連戲鏡頭會等待上一鏡完成並自動擷取尾幀；請保持 H3 Studio 開啟。";
+    $("#shortfilmBatchNote").textContent = finishNote;
     refreshShortFilmShotStatuses();
   }
 }
 
 function bindEvents() {
   bindLoraPanels();
+  $("#sfBuildSegmentRows").addEventListener("click", buildShortFilmSegmentRows);
+  $("#sfAppendSegments").addEventListener("click", appendShortFilmSegments);
+  $("#sfSegmentBuilder").addEventListener("input", event => {
+    const project = activeShortFilmProject();
+    if (!project || shortFilmBatchRunning) return;
+    const draft = shortFilmSegmentDraft(project);
+    if (event.target.dataset.sfSegmentPrompt !== undefined) draft.prompts[Number(event.target.dataset.sfSegmentPrompt)] = event.target.value;
+    if (event.target.id === "sfSegmentTarget" || event.target.id === "sfSegmentDuration") {
+      $("#sfSegmentSummary").textContent = "秒數已調整，請按「建立／調整輸入欄」套用。";
+      $("#sfAppendSegments").disabled = true;
+      return;
+    }
+    const assetId = event.target.dataset.sfSegmentAsset;
+    if (assetId) draft.asset_ids = event.target.checked ? [...new Set([...draft.asset_ids, assetId])] : draft.asset_ids.filter(id => id !== assetId);
+    updateShortFilmSegmentUsage();
+    scheduleShortFilmSave();
+  });
   $(".workspace-switch").addEventListener("click", event => {
     const button = event.target.closest("[data-workspace]");
     if (button) setWorkspace(button.dataset.workspace);
@@ -2920,6 +3146,13 @@ function bindEvents() {
     const project = activeShortFilmProject();
     if (!project) return;
     project.export_frames = event.target.checked;
+    scheduleShortFilmSave();
+  });
+  $("#sfMemoryOptimization").addEventListener("change", event => {
+    const project = activeShortFilmProject();
+    if (!project) return;
+    project.memory_optimization = event.target.checked;
+    syncShortFilmAcceleration();
     scheduleShortFilmSave();
   });
   $$("[data-sf-add-asset]").forEach(button => button.addEventListener("click", () => {
@@ -3103,6 +3336,7 @@ function bindEvents() {
     if (event.target.checked) $("#retimeDuration").focus();
   });
   $("#exportFrames").addEventListener("change", updateSummary);
+  $("#memoryOptimization").addEventListener("change", updateSummary);
   $("#duration").addEventListener("change", refreshPromptTemplateIfUntouched);
   $("#qualityMode").addEventListener("change", changeQualityMode);
   ["aspectRatio", "megapixels", "keyframeFit"].forEach(id => {

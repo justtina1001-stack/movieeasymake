@@ -1,23 +1,26 @@
 {
   "schema_version": 1,
-  "version": "2026.08.31-1",
-  "published_at": "2026-08-31",
+  "version": "2026.09.10-1",
+  "published_at": "2026-09-10",
   "channel": "stable",
-  "title": "MiniMax H3 Turbo 768p 新版與實驗性稀疏加速",
-  "summary": "保留 16 GB 顯卡適用的 INT8 穩定模型，新增 FL2VA 4-step v1.1、8-step 768p 高品質 LoRA 與可選 H3-Optimizations。",
+  "title": "H3 獨立省顯存、SLA 實驗加速與音訊／參考品質選項",
+  "summary": "保留既有 INT8 基礎模型及 Turbo 配方，新增 SLA 專用 4 步、FL2VA v1.2 音訊及 Ref2VA 8 步 LoRA。SLA 需要 ComfyUI 0.35.0 及配套依賴；模型更新不會自動改動既有引擎核心。",
   "minimum_vram_gb": 12,
   "recommended_vram_gb": 16,
   "changes": [
     "Pruned INT8 ConvRot：降低基礎模型的顯存與系統記憶體需求",
     "FL2VA Turbo 4-step v1.1 768p：新版快速生成選項",
     "FL2VA Turbo 8-step v1.0 768p：新版高品質與音訊選項",
-    "H3-Optimizations 0.2.37：提供選配的記憶體與稀疏注意力實驗模式",
-    "Ref2VA 4 步 Turbo：繼續作為多模態參考穩定預覽"
+    "H3-Optimizations 0.2.42：獨立省顯存選項與相容性修正",
+    "FL2VA Turbo-SLA：專用 4 步 LoRA，保留 15% 注意力區塊；實驗選項，不與舊稀疏／額外省顯存節點疊加",
+    "FL2VA 4 步 v1.2：音訊改善選項，非速度升級",
+    "Ref2VA 8 步 v1.0：參考品質比較選項；保留現有 4 步預覽",
+    "新安裝固定 ComfyUI 0.35.0；既有使用者需另行升級核心才能使用 SLA"
   ],
   "custom_nodes": [
     {
       "repo_url": "https://github.com/Zironic/H3-Optimizations.git",
-      "revision": "83149e0f93b65a099095a41302f665c15b6cdf4f",
+      "revision": "52b5f1e2345c2d06b9c7457131dbada2872ae7d2",
       "target": "H3-Optimizations"
     }
   ],
@@ -93,6 +96,30 @@
       "target": "loras/minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
       "size": 1956193000,
       "sha256": "08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo-SLA",
+      "revision": "10ade67cd15ff7a135fa35c2a0673ea96c839247",
+      "source": "minimax_h3_fl2v_turbo_4step_v0.1_768p_sla_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_fl2v_turbo_4step_v0.1_768p_sla_comfyui_bf16.safetensors",
+      "size": 1956192992,
+      "sha256": "5cae6df40a06ea825f85fc8876c9ea1c9692c833a9af07bb8b3bac9ce2a71bac"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "2f015e66b37c585cea9dc4ae6f1850ea8788e742",
+      "source": "minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "2f015e66b37c585cea9dc4ae6f1850ea8788e742",
+      "source": "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "6a56f41ab4229c9dd845b9501bbd475ee57e112d846cf2e819d534a1ae928c5a"
     }
   ]
 }
