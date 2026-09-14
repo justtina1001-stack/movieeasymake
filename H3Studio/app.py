@@ -2154,18 +2154,35 @@ def create_app() -> web.Application:
         except InstallerError as error:
             return json_response_error(error)
 
+    def model_update_blockers() -> list[dict[str, str]]:
+        blockers = []
+        if comfy.is_starting:
+            blockers.append({"code": "engine_starting", "message": "這台 Studio 正在啟動或等待連線 ComfyUI 引擎，請等啟動完成或失敗後重試。"})
+        if jobs.gpu_lock.locked():
+            blockers.append({"code": "generation", "message": "這台 Studio 有影片、音樂或語音工作正在準備或生成，請等待工作結束。"})
+        if installer.public_status().get("status") in {"starting", "running", "cancelling"}:
+            blockers.append({"code": "engine_installation", "message": "這台電腦正在安裝或修復 ComfyUI，請到「引擎設定」查看進度。"})
+        if music_installer.public_status()["active"]:
+            blockers.append({"code": "music_download", "message": "這台 Studio 正在下載 Music 3 模型，請到「Music 3」查看進度。"})
+        if voice_installer.public_status()["active"]:
+            blockers.append({"code": "voice_download", "message": "這台 Studio 正在安裝語音環境或模型，請到「語音」查看進度。"})
+        return blockers
+
     async def model_update_status(_: web.Request) -> web.Response:
         try:
-            return web.json_response(await asyncio.to_thread(model_updates.inspect))
+            result = await asyncio.to_thread(model_updates.inspect)
+            result["blockers"] = model_update_blockers()
+            return web.json_response(result)
         except (ModelUpdateError, OSError, ValueError) as error:
             return json_response_error(error)
 
     async def start_model_update(_: web.Request) -> web.Response:
-        installer_active = installer.public_status().get("status") in {"starting", "running", "cancelling"}
-        if jobs.gpu_lock.locked() or comfy.is_starting or installer_active or music_installer.public_status()["active"] or voice_installer.public_status()["active"]:
-            return json_response_error(
-                RequestError("目前有生成、引擎安裝或其他模型下載工作，請完成後再更新 H3 模型。"), 409
-            )
+        blockers = model_update_blockers()
+        if blockers:
+            return web.json_response({
+                "error": "暫時無法更新 H3 模型：" + "；".join(item["message"] for item in blockers),
+                "blockers": blockers,
+            }, status=409)
         try:
             return web.json_response(await model_updates.start(), status=202)
         except (ModelUpdateError, OSError, ValueError) as error:
