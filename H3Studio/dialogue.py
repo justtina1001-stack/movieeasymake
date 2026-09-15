@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable
 _DIALOGUE = re.compile(r"<d>.*?</d>", re.DOTALL)
 _LANGUAGE_TAG = re.compile(r"^\s*\[[A-Za-z][A-Za-z -]*\]")
 _SPEECH_END = re.compile(
-    r"(?:台詞|台词|對白|对白|旁白|畫外音|画外音|低聲|低声|大喊|喊道|喊|"
+    r"(?:台詞|台词|對白|对白|旁白|畫外音|画外音|低聲|低声|低語|低语|大喊|喊道|喊|"
     r"說道|说道|說|说|問道|问道|問|问|回答|答道|回應|回应|自言自語|自言自语|"
     r"喃喃自語|喃喃自语|念道|"
     r"\b(?:says?|said|asks?|asked|replies|replied|shouts?|whispers?|dialogue|"
@@ -33,7 +33,7 @@ _NO_DIALOGUE = re.compile(r"^(?:無|无|沒有|没有|無對白|无对白|無台
 _QUOTE_PAIRS = {"「": "」", "『": "』", "“": "”", '"': '"'}
 _SILENT_HEADING = re.compile(
     r"(?:無|无|沒有|没有|不要|禁止|不需|不必|不)(?:任何|加入|新增|加上)?"
-    r"(?:對白|对白|台詞|台词|旁白|畫外音|画外音|說|说|喊)|"
+    r"(?:對白|对白|台詞|台词|旁白|畫外音|画外音|說|说|喊|低語|低语)|"
     r"\bno\s+(?:spoken\s+)?(?:dialogue|speech|narration|voice[ -]?over)\b", re.I,
 )
 _VISIBLE_TEXT = re.compile(r"字幕|字卡|招牌|標語|标语|螢幕文字|屏幕文字|\b(?:caption|subtitle|signage)\b", re.I)

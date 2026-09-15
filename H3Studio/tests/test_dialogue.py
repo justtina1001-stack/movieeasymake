@@ -4,6 +4,17 @@ from dialogue import format_dialogue
 
 
 class DialogueFormattingTests(unittest.TestCase):
+    def test_soft_spoken_line_in_sound_effect_description_is_tagged(self):
+        for cue in ('清冷低語', '低语'):
+            text = f'* **音效 [無 BGM]**：風聲「呼——」，少年{cue}：「請等我回來。」。'
+            expected = f'* **音效 [無 BGM]**：風聲「呼——」，少年{cue}：<d>[Chinese] 請等我回來。</d>。'
+            self.assertEqual(format_dialogue(text), expected)
+            self.assertEqual(format_dialogue(expected), expected)
+
+    def test_silent_directions_and_visible_low_voice_quotes_remain_unchanged(self):
+        for text in ('少年不要低語：「秘密。」', '少年不低语：「秘密。」', '字幕顯示低語：「秘密。」'):
+            self.assertEqual(format_dialogue(text), text)
+
     def test_quoted_negative_answer_is_spoken_not_a_no_dialogue_option(self):
         self.assertEqual(format_dialogue('小明說：「沒有。」'), '小明說：<d>[Chinese] 沒有。</d>')
         self.assertEqual(format_dialogue('無', dialogue_field=True), '無')

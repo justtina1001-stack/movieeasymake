@@ -35,6 +35,15 @@ def spoken_blocks(prompt):
 
 
 class DialogueCompileTests(unittest.TestCase):
+    def test_ref2va_tags_low_voice_dialogue_and_preserves_sound_effects(self):
+        compiled = compile_request(request_payload(
+            '* **音效 [無 BGM]**：法力震鳴「嗡——」，少年清冷低語：「請等我回來。」。',
+            mode='r2v', references=[{'alias': '少年', 'type': 'character', 'image_asset_ids': [IMAGE_A]}],
+        ))
+        self.assertEqual(spoken_blocks(compiled.prompt), ['[Chinese] 請等我回來。'])
+        self.assertIn('法力震鳴「嗡——」', compiled.prompt)
+        self.assertIn('<Subject 1>（少年）清冷低語：<d>[Chinese] 請等我回來。</d>', compiled.prompt)
+
     def test_inline_chinese_speech_is_tagged_without_changing_the_words(self):
         compiled = compile_request(request_payload("小明走進車站。小明說：「你好，歡迎回來……！」"))
         self.assertEqual(spoken_blocks(compiled.prompt), ["[Chinese] 你好，歡迎回來……！"])
