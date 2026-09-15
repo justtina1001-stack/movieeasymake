@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260915-voice-seed-auto">
+  <link rel="stylesheet" href="/static/styles.css?v=20260915-video-seed-auto">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -130,7 +130,7 @@
             <label>畫面比例<select id="aspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label>
             <label>解析度<select id="megapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">原生畫質 · 0.98MP</option></select></label>
             <label>時長<div class="field-unit"><input id="duration" type="number" min="5" max="15" step="0.5" value="5"><span>秒</span></div></label>
-            <label>Seed<div class="seed-row"><input id="seed" type="number" min="0" value="1"><button id="randomSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div></label>
+            <div><label for="seed">Seed</label><div class="seed-row"><input id="seed" type="number" min="0" value="1" aria-describedby="videoSeedHelp"><button id="videoSeedAuto" class="button ghost small seed-auto-button" type="button" aria-label="每次影片生成自動更換 Seed" aria-pressed="true">AUTO</button><button id="randomSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div><small id="videoSeedHelp" class="field-help">每次生成前自動換新 Seed，欄位保留本次使用值。</small></div>
           </div>
           <div class="quality-selector">
             <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 穩定版 · 自動適配</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1 768p</option><option value="turbo_quality">Turbo 新高品質 · 8-step 768p</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2 768p</option><option value="turbo_ref_quality">Ref Turbo 品質比較 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速 · 4-step（原版）</option></select></label>
@@ -830,7 +830,7 @@ non_diegetic_music: ...</pre></div>
           <details class="advanced music-advanced">
             <summary>進階設定</summary>
             <div class="form-grid two">
-              <div><label for="voiceSeed">Seed</label><div class="seed-row"><input id="voiceSeed" inputmode="numeric" aria-describedby="voiceSeedHelp"><button id="voiceSeedAuto" class="button ghost small seed-auto-button" type="button" aria-label="每次語音生成自動更換 Seed" aria-pressed="true">AUTO</button><button id="randomVoiceSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div><small id="voiceSeedHelp" class="field-help">AUTO 已開啟：每次生成前換新 Seed；欄位保留本次送出的數值。</small></div>
+              <label>Seed<div class="seed-row"><input id="voiceSeed" inputmode="numeric"><button id="randomVoiceSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div></label>
               <div class="voice-license-note"><strong>模型授權</strong><span>Qwen3-TTS 程式與模型採 Apache-2.0；聲線素材本身的權利仍由使用者負責。</span></div>
             </div>
           </details>
@@ -848,6 +848,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260915-voice-seed-auto"></script>
+  <script src="/static/app.js?v=20260915-video-seed-auto"></script>
 </body>
 </html>

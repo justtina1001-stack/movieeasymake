@@ -388,19 +388,8 @@ function closeMusicStudio() {
   $$("#musicJobList audio").forEach(audio => audio.pause());
 }
 
-function randomVoiceSeed(previous = null) {
-  const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-  return previous !== null && seed === Number(previous) ? (seed + 1) % Number.MAX_SAFE_INTEGER : seed;
-}
-
-function setVoiceSeedAuto(enabled, persist = true) {
-  $("#voiceSeedAuto").setAttribute("aria-pressed", String(enabled));
-  $("#voiceSeed").readOnly = enabled;
-  $("#randomVoiceSeed").disabled = enabled;
-  $("#voiceSeedHelp").textContent = enabled
-    ? "AUTO 已開啟：每次生成前換新 Seed；欄位保留本次送出的數值。"
-    : "固定 Seed：每次沿用欄位數值；可手動輸入或按 ↻ 更換。";
-  if (persist) localStorage.setItem("h3studio-voice-seed-auto-v1", String(enabled));
+function randomVoiceSeed() {
+  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
 }
 
 function voiceModeLabel(mode) {
@@ -506,15 +495,13 @@ async function generateVoice() {
   setButtonBusy(button, true);
   button.textContent = "正在加入 GPU 佇列...";
   try {
-    if ($("#voiceSeedAuto").getAttribute("aria-pressed") === "true") {
-      $("#voiceSeed").value = randomVoiceSeed($("#voiceSeed").value);
-    }
     const job = await api("/api/voice/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(collectVoicePayload()),
     });
     toast(`語音工作 ${job.id.slice(0, 8)} 已加入佇列`);
+    $("#voiceSeed").value = randomVoiceSeed();
     voicePage = 1;
     await loadVoiceJobs(true);
   } catch (error) {
@@ -1013,6 +1000,21 @@ function bindLoraPanels() {
       renderLoraPanels();
     });
   }
+}
+
+function randomVideoSeed(previous = null) {
+  const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+  return previous !== null && seed === Number(previous) ? (seed + 1) % Number.MAX_SAFE_INTEGER : seed;
+}
+
+function setVideoSeedAuto(enabled, persist = true) {
+  $("#videoSeedAuto").setAttribute("aria-pressed", String(enabled));
+  $("#seed").readOnly = enabled;
+  $("#randomSeed").disabled = enabled;
+  $("#videoSeedHelp").textContent = enabled
+    ? "每次生成前自動換新 Seed，欄位保留本次使用值。"
+    : "每次沿用此 Seed；可手動輸入或按 ↻ 更換。";
+  if (persist) localStorage.setItem("h3studio-video-seed-auto-v1", String(enabled));
 }
 
 function currentSettings() {
@@ -1719,6 +1721,10 @@ async function renderVideo() {
   setButtonBusy(button, true);
   button.querySelector("span").textContent = "送入工作佇列...";
   try {
+    if ($("#videoSeedAuto").getAttribute("aria-pressed") === "true") {
+      $("#seed").value = randomVideoSeed($("#seed").value);
+      persistForm();
+    }
     const job = await api("/api/render", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3507,8 +3513,11 @@ function bindEvents() {
     saveState();
   });
   $("#randomSeed").addEventListener("click", () => {
-    $("#seed").value = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+    $("#seed").value = randomVideoSeed($("#seed").value);
     updateSummary();
+  });
+  $("#videoSeedAuto").addEventListener("click", () => {
+    setVideoSeedAuto($("#videoSeedAuto").getAttribute("aria-pressed") !== "true");
   });
   $("#startEngine").addEventListener("click", async () => {
     engineStartingAt = Date.now();
@@ -3579,9 +3588,6 @@ function bindEvents() {
   $$('[data-close-voice]').forEach(element => element.addEventListener("click", closeVoiceStudio));
   $$('[data-voice-mode]').forEach(button => button.addEventListener("click", () => setVoiceMode(button.dataset.voiceMode)));
   $("#randomVoiceSeed").addEventListener("click", () => { $("#voiceSeed").value = randomVoiceSeed(); });
-  $("#voiceSeedAuto").addEventListener("click", () => {
-    setVoiceSeedAuto($("#voiceSeedAuto").getAttribute("aria-pressed") !== "true");
-  });
   $("#generateVoice").addEventListener("click", generateVoice);
   $("#installVoiceModel").addEventListener("click", async () => {
     try {
@@ -4305,6 +4311,7 @@ async function setKeyframe(target, file) {
 
 function initialize() {
   restoreForm();
+  setVideoSeedAuto(localStorage.getItem("h3studio-video-seed-auto-v1") !== "false", false);
   bindEvents();
   installInteractionMotion();
   setWorkspace(studioWorkspace, false);
@@ -4313,7 +4320,6 @@ function initialize() {
   $("#musicSeed").value = randomMusicSeed();
   setVoiceMode("custom");
   $("#voiceSeed").value = randomVoiceSeed();
-  setVoiceSeedAuto(localStorage.getItem("h3studio-voice-seed-auto-v1") !== "false", false);
   renderVoiceReference();
   renderKeyframePreview("first", state.firstImage, "起始圖片", false);
   renderKeyframePreview("last", state.lastImage, "結束圖片", true);
