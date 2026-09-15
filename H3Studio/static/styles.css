@@ -240,6 +240,8 @@ input:focus, select:focus, textarea:focus { border-color: rgba(255,101,66,.66); 
 .field-unit span { position: absolute; right: 12px; bottom: 13px; color: var(--muted); font-size: 11px; }
 .seed-row { display: flex; gap: 6px; }
 .seed-row input { min-width: 0; }
+.seed-auto-button { flex-shrink: 0; padding-inline: 10px; }
+.seed-auto-button[aria-pressed="true"] { color: var(--cyan); border-color: var(--cyan); background: rgba(85,215,208,.1); }
 .quality-selector { display: grid; grid-template-columns: minmax(220px, .7fr) minmax(0, 1.3fr); gap: 16px; align-items: center; margin-top: 16px; padding: 14px 16px; border: 1px solid rgba(85,215,208,.18); border-radius: 14px; background: linear-gradient(135deg, rgba(85,215,208,.06), rgba(255,176,77,.035)); }
 .quality-selector > div { display: flex; flex-direction: column; gap: 5px; }
 .quality-selector strong { color: var(--cyan); font-size: 12px; }
