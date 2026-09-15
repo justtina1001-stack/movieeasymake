@@ -508,14 +508,20 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             if item is not background and item is not reel and item is not character
         ]
         references = [background, reel, character, *extra_references]
+    replacement_source_images = []
     if mode == "replace":
         if len(references) != 1:
-            raise RequestError("角色替換模式只需要一個新角色，請勿另外加入原角色。")
+            raise RequestError("角色替換模式只設定一個新角色；要辨識被替換的人物，請使用『原角色參考圖』欄位。")
         replacement = references[0]
         if not (replacement.get("image_asset_ids") or []):
             raise RequestError("角色替換模式需要至少一張新角色圖片。")
         if not (_clean_text(replacement.get("video_asset_id")) or replacement.get("video_asset_ids")):
             raise RequestError("角色替換模式需要一支原始表演影片。")
+        replacement_source_images = payload.get("replacement_source_image_asset_ids", [])
+        if not isinstance(replacement_source_images, list) or any(
+            not isinstance(value, str) or not value.strip() for value in replacement_source_images
+        ):
+            raise RequestError("原角色參考圖必須是圖片素材編號清單。")
     speakers = tuple(
         _clean_text(item.get("alias")) for item in references
         if item.get("type") in {"character", "creature"}
@@ -651,6 +657,26 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 "audio_tag": audio_tag,
             })
 
+        if replacement_source_images:
+            source_tags = []
+            for image_id in replacement_source_images:
+                picture_index += 1
+                reference_images.append(image_id)
+                source_tags.append(f"<Picture {picture_index}>")
+            target = _clean_text(payload.get("replacement_target")) or "the specified original character"
+            assignments.append(
+                f"{', '.join(source_tags)} are identification-only references for the original character "
+                f"to replace in <Video 1>: {target}. Locate that person using these images and the target description. "
+                "They are not appearance references for <Subject 1>, not output keyframes, and not additional cast members. "
+                "Replace only the identified person with <Subject 1>, whose appearance comes exclusively from the new-character pictures. "
+                "Never blend the original face, hair, clothes, or body with the replacement. Preserve all other people; "
+                "do not add <Subject 1> to frames where the identified original character is absent."
+            )
+            mapping.append({
+                "alias": "原角色辨識", "type": "replacement_source", "subject_tag": None,
+                "picture_tags": source_tags, "video_tags": [], "video_audio_tags": [], "audio_tag": None,
+            })
+
         shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, aliases, speakers)
         guides.extend(storyboard_guides)
         for shot_index, image_id in enumerate(storyboard_images, start=1):
@@ -687,7 +713,10 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 picture_tags = item.get("picture_tags") or []
                 video_tags = item.get("video_tags") or []
                 audio_tag = item.get("audio_tag")
-                if subject_tag:
+                if item["type"] == "replacement_source":
+                    for tag in picture_tags:
+                        retention.append(f"{tag}: weak_reference only to identify the original person to replace in <Video 1>; do not transfer appearance to the output.")
+                elif subject_tag:
                     retention.append(
                         f"{subject_tag}: fully_preserved whenever {alias} appears; keep identity, face, body proportions, "
                         "clothing, colors, and distinguishing features consistent across the shot."
@@ -712,6 +741,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             if not retention:
                 retention.append("N/A")
             detail_parts = [rewritten_prompt]
+            if mode == "replace":
+                detail_parts.extend(assignments)
             if shot_lines:
                 detail_parts.append("Storyboard guidance:\n" + "\n".join(shot_lines))
             summary_prefix = "keyframe completion + reference generation" if first_image else "reference generation"

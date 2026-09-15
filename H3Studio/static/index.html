@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260915-video-seed-auto">
+  <link rel="stylesheet" href="/static/styles.css?v=20260915-replacement-source-images">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -266,17 +266,22 @@
         </section>
 
         <section id="replacementPanel" class="panel hidden">
-          <div class="panel-title"><span class="step-number">03</span><div><h2>角色替換素材</h2><p>只設定新角色與原始表演影片，不要再加入舊角色</p></div></div>
+          <div class="panel-title"><span class="step-number">03</span><div><h2>角色替換素材</h2><p>原角色圖指定要替換的人物，新角色圖決定替換後外觀，原影片提供表演與動作</p></div></div>
           <div class="form-grid two replacement-fields">
             <label>新角色名稱<input id="replacementAlias" value="新角色" placeholder="例如：妲己"></label>
             <label>要替換的位置／原角色<input id="replacementTarget" value="動態參考影片中的主要角色" placeholder="例如：影片左側穿白衣的狐妖"></label>
           </div>
           <label class="replacement-description">新角色固定特徵<input id="replacementDescription" placeholder="例如：黑色長髮、紅色古裝、金色髮飾"></label>
           <div class="replacement-assets">
+            <div id="replacementSourceImageZone" class="asset-zone replacement-zone" data-replacement-kind="sourceImages">
+              <input id="replacementSourceImageInput" type="file" accept="image/*" multiple hidden>
+              <div class="asset-zone-title"><span>原角色參考圖（選填） · <b id="replacementSourceImageCount">0 張</b></span><button id="addReplacementSourceImages" type="button">＋ 選擇圖片</button></div>
+              <div id="replacementSourceImageList" class="thumb-grid"><span class="asset-placeholder">拖入原影片中要替換的人物截圖；建議裁切至單一角色，清楚露出臉部與服裝</span></div>
+            </div>
             <div id="replacementImageZone" class="asset-zone replacement-zone" data-replacement-kind="images">
               <input id="replacementImageInput" type="file" accept="image/*" multiple hidden>
-              <div class="asset-zone-title"><span>新角色圖片 · <b id="replacementImageCount">0/9</b></span><button id="addReplacementImages" type="button">＋ 選擇圖片</button></div>
-              <div id="replacementImageList" class="thumb-grid"><span class="asset-placeholder">拖入 1～9 張新角色圖片；建議包含臉部、半身與全身</span></div>
+              <div class="asset-zone-title"><span>替換後角色圖（必填） · <b id="replacementImageCount">0 張</b></span><button id="addReplacementImages" type="button">＋ 選擇圖片</button></div>
+              <div id="replacementImageList" class="thumb-grid"><span class="asset-placeholder">拖入至少 1 張替換後角色圖片；用來決定生成後的臉部、服裝與外觀</span></div>
             </div>
             <div id="replacementVideoZone" class="asset-zone replacement-zone" data-replacement-kind="video">
               <input id="replacementVideoInput" type="file" accept="video/mp4,video/webm,video/quicktime,.mov,.mkv,.avi" hidden>
@@ -285,6 +290,7 @@
               <label class="check-row"><input id="replacementUseAudio" type="checkbox"><span>將原聲提供給 AI，協助嘴型與動作同步</span></label>
             </div>
           </div>
+          <p class="render-note">原角色圖用來指定「換掉誰」，替換後角色圖決定「換成誰」，兩組合計最多 9 張。長片建議最多 8 張，預留一張給跨段連續性；未提供原角色圖時，仍依文字指定對象。</p>
           <div id="replacementVideoInfo" class="replacement-video-info empty">
             <strong>尚未分析來源影片</strong><span>上傳後會顯示尺寸、時長、音軌與預計片段數。</span>
           </div>
@@ -848,6 +854,6 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260915-video-seed-auto"></script>
+  <script src="/static/app.js?v=20260915-replacement-source-images"></script>
 </body>
 </html>

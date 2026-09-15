@@ -1611,10 +1611,14 @@ class JobManager:
                 references[0].get("video_use_audio") and (parent.get("source_info") or {}).get("has_audio")
             )
             image_ids = list(references[0].get("image_asset_ids") or [])
+            reference_image_count = len(image_ids) + len(payload.get("replacement_source_image_asset_ids") or []) + sum(
+                1 for shot in (payload.get("storyboards") or [])
+                if shot.get("image_asset_id") and shot.get("guide_mode") != "exact"
+            )
             if (
                 previous_continuity_asset
                 and payload.get("replacement_continuity", True)
-                and len(image_ids) < 9
+                and reference_image_count < 9
                 and previous_continuity_asset not in image_ids
             ):
                 image_ids.append(previous_continuity_asset)

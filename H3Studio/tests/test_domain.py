@@ -175,6 +175,48 @@ class CompileRequestTests(unittest.TestCase):
         with self.assertRaisesRegex(RequestError, "新角色圖片"):
             compile_request(payload)
 
+    def test_replace_source_images_select_original_without_becoming_new_identity(self):
+        payload = self.base("replace")
+        payload.update({
+            "references": [{"alias": "新角色", "type": "character", "image_asset_ids": [IMAGE_A], "video_asset_id": VIDEO_A}],
+            "replacement_source_image_asset_ids": [IMAGE_B],
+            "replacement_target": "左側穿白衣的人",
+            "storyboards": [{"duration": 5, "image_asset_id": IMAGE_C, "guide_mode": "reference"}],
+        })
+        for profile in ("", "shortfilm"):
+            with self.subTest(profile=profile):
+                payload["prompt_profile"] = profile
+                compiled = compile_request(payload)
+                self.assertEqual(compiled.reference_images, [IMAGE_A, IMAGE_B, IMAGE_C])
+                self.assertEqual(required_asset_ids(compiled), [IMAGE_A, IMAGE_B, IMAGE_C, VIDEO_A])
+                self.assertIn("<Picture 2> are identification-only", compiled.prompt)
+                self.assertIn("左側穿白衣的人", compiled.prompt)
+                self.assertNotIn("<Subject 2>", compiled.prompt)
+                self.assertIn("not appearance references for <Subject 1>", compiled.prompt)
+                self.assertEqual(compiled.mapping[0]["picture_tags"], ["<Picture 1>"])
+                self.assertEqual(compiled.mapping[1]["type"], "replacement_source")
+                if profile:
+                    self.assertIn("<Picture 2>: weak_reference", compiled.prompt)
+                    self.assertNotIn("<Picture 2>: fully_preserved", compiled.prompt)
+                paths = {IMAGE_A: "new.png", IMAGE_B: "original.png", IMAGE_C: "storyboard.png", VIDEO_A: "source.mp4"}
+                workflow = build_workflow(compiled, paths, "replace-test")
+                ref_node = next(node for node in workflow.values() if node["class_type"] == "MiniMaxH3ReferenceToVideo")
+                for index, name in enumerate(["new.png", "original.png", "storyboard.png"]):
+                    image_node = workflow[ref_node["inputs"][f"ref_images.ref_image_{index}"][0]]
+                    self.assertEqual(image_node["inputs"]["image"], name)
+
+    def test_replace_source_images_validate_shape_and_shared_image_limit(self):
+        payload = self.base("replace")
+        payload["references"] = [{"alias": "新角色", "type": "character", "image_asset_ids": [IMAGE_A], "video_asset_id": VIDEO_A}]
+        for invalid in (None, IMAGE_B, {}, [None], [42], [""]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(RequestError, "原角色參考圖"):
+                compile_request({**payload, "replacement_source_image_asset_ids": invalid})
+        payload["replacement_source_image_asset_ids"] = [IMAGE_B] * 8
+        self.assertEqual(len(compile_request(payload).reference_images), 9)
+        payload["storyboards"] = [{"duration": 5, "image_asset_id": IMAGE_C}]
+        with self.assertRaisesRegex(RequestError, "最多可使用 9 張"):
+            compile_request(payload)
+
     def test_replace_batch_segment_adds_identity_and_timeline_continuity_rules(self):
         payload = self.base("replace")
         payload["references"] = [{

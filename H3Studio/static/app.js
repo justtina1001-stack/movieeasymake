@@ -39,6 +39,7 @@ const defaultState = {
     target: "動態參考影片中的主要角色",
     description: "",
     images: [],
+    sourceImages: [],
     video: null,
     videoUseAudio: true,
     videoInfo: null,
@@ -1251,7 +1252,7 @@ function lockedReferenceIds() {
 }
 
 function assetCount() {
-  if (state.mode === "replace") return state.replacement.images.length + (state.replacement.video ? 1 : 0);
+  if (state.mode === "replace") return state.replacement.images.length + state.replacement.sourceImages.length + (state.replacement.video ? 1 : 0);
   if (state.mode === "symbol_loop") return state.symbolLoop.preparedAsset ? 1 : 0;
   let count = 0;
   if (state.firstImage) count++;
@@ -1412,10 +1413,14 @@ function renderReplacement() {
   $("#replacementAlias").value = replacement.alias;
   $("#replacementTarget").value = replacement.target;
   $("#replacementDescription").value = replacement.description;
-  $("#replacementImageCount").textContent = `${replacement.images.length}/9`;
+  $("#replacementImageCount").textContent = `${replacement.images.length} 張`;
+  $("#replacementSourceImageCount").textContent = `${replacement.sourceImages.length} 張`;
+  $("#replacementSourceImageList").innerHTML = replacement.sourceImages.length
+    ? replacement.sourceImages.map((asset, index) => `<div class="asset-thumb" style="background-image:url('${asset.url}')" title="${escapeHtml(asset.name)}"><button data-replacement-remove-source-image="${index}" type="button" aria-label="移除原角色參考圖">×</button></div>`).join("")
+    : `<span class="asset-placeholder">拖入原影片中要替換的人物截圖；建議裁切至單一角色，清楚露出臉部與服裝</span>`;
   $("#replacementImageList").innerHTML = replacement.images.length
     ? replacement.images.map((asset, index) => `<div class="asset-thumb" style="background-image:url('${asset.url}')" title="${escapeHtml(asset.name)}"><button data-replacement-remove-image="${index}" type="button">×</button></div>`).join("")
-    : `<span class="asset-placeholder">拖入 1～9 張新角色圖片；建議包含臉部、半身與全身</span>`;
+    : `<span class="asset-placeholder">拖入至少 1 張替換後角色圖片；用來決定生成後的臉部、服裝與外觀</span>`;
   $("#replacementVideoPreview").innerHTML = replacement.video
     ? `<div class="asset-thumb video"><span>▶</span><span>${escapeHtml(replacement.video.name)}</span><button id="removeReplacementVideo" type="button">×</button></div>`
     : `<span class="asset-placeholder">拖入含有要被替換角色的原影片</span>`;
@@ -1457,12 +1462,14 @@ async function prepareReplacementVideo() {
 }
 
 async function addReplacementFiles(kind, files) {
-  const accepted = [...files].filter(file => acceptsReferenceFile(file, kind));
-  if (!accepted.length) throw new Error(kind === "images" ? "請拖入新角色圖片。" : "請拖入原始表演影片。");
-  if (kind === "images") {
-    const remaining = Math.max(0, 9 - state.replacement.images.length);
-    if (!remaining) throw new Error("新角色圖片最多 9 張。");
-    for (const file of accepted.slice(0, remaining)) state.replacement.images.push(await uploadFile(file, "replacement-character"));
+  const isImage = kind === "images" || kind === "sourceImages";
+  const accepted = [...files].filter(file => acceptsReferenceFile(file, isImage ? "images" : "video"));
+  if (!accepted.length) throw new Error(isImage ? "請拖入角色圖片。" : "請拖入原始表演影片。");
+  if (isImage) {
+    const remaining = Math.max(0, 9 - state.replacement.images.length - state.replacement.sourceImages.length);
+    if (accepted.length > remaining) throw new Error(`原角色參考圖與替換後角色圖合計最多 9 張，目前還可加入 ${remaining} 張。`);
+    const target = kind === "sourceImages" ? state.replacement.sourceImages : state.replacement.images;
+    for (const file of accepted) target.push(await uploadFile(file, kind === "sourceImages" ? "replacement-source-character" : "replacement-character"));
   } else {
     state.replacement.video = await uploadFile(accepted[0], "replacement-performance-video");
     state.replacement.videoInfo = null;
@@ -1656,6 +1663,7 @@ function collectPayload() {
     replacement_split_strategy: state.replacement.splitStrategy || "smart",
     replacement_audio_mode: state.replacement.audioMode || "original",
     replacement_target: state.mode === "replace" ? state.replacement.target.trim() : "",
+    replacement_source_image_asset_ids: state.mode === "replace" ? state.replacement.sourceImages.map(asset => asset.id) : [],
     mg_animation: {
       character_position: state.mgAnimation.characterPosition,
       character_position_detail: state.mgAnimation.characterPositionDetail.trim(),
@@ -1686,15 +1694,25 @@ function collectPayload() {
   };
 }
 
+function validateReplacementSourceCompilation(payload, compiled) {
+  if (payload.mode !== "replace" || !payload.replacement_source_image_asset_ids?.length) return;
+  if (!compiled.mapping?.some(item => item.type === "replacement_source") ||
+      !payload.replacement_source_image_asset_ids.every(id => compiled.reference_images?.includes(id))) {
+    throw new Error("目前 Studio 後端尚未支援原角色參考圖。請等工作完成後，關閉 Studio 執行視窗並重新執行 start_h3_studio.bat，再送出生成。");
+  }
+}
+
 async function compilePreview() {
   const button = $("#compileButton");
   setButtonBusy(button, true);
   try {
+    const payload = collectPayload();
     const result = await api("/api/compile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(collectPayload()),
+      body: JSON.stringify(payload),
     });
+    validateReplacementSourceCompilation(payload, result);
     $("#compiledPrompt").textContent = result.prompt;
     $("#compiledPanel").classList.remove("hidden");
     toast(`提示詞已編譯，使用 ${result.asset_count} 個素材`);
@@ -1725,10 +1743,17 @@ async function renderVideo() {
       $("#seed").value = randomVideoSeed($("#seed").value);
       persistForm();
     }
+    const payload = collectPayload();
+    if (payload.mode === "replace" && payload.replacement_source_image_asset_ids.length) {
+      const compiled = await api("/api/compile", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+      });
+      validateReplacementSourceCompilation(payload, compiled);
+    }
     const job = await api("/api/render", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(collectPayload()),
+      body: JSON.stringify(payload),
     });
     toast(`工作 ${job.id.slice(0, 8)} 已加入佇列`);
     await loadJobs(true);
@@ -2033,6 +2058,7 @@ async function applyJobRecipe(jobId) {
       target: raw.replacement_target || "動態參考影片中的主要角色",
       description: reference.description || "",
       images: (reference.image_asset_ids || []).map(id => recipeAsset(id, assets)).filter(Boolean),
+      sourceImages: (raw.replacement_source_image_asset_ids || []).map(id => recipeAsset(id, assets)).filter(Boolean),
       video,
       videoUseAudio: Boolean(reference.video_use_audio),
       videoInfo: video?.video_info || null,
@@ -2343,7 +2369,7 @@ function addStoryboard() {
 function replacementPrompt() {
   const alias = state.replacement?.alias?.trim() || "新角色";
   const target = state.replacement?.target?.trim() || "動態參考影片中的主要角色";
-  return `[Shot 1] Create ${alias} as the only visual replacement for ${target} in the uploaded source video. Preserve ${alias}'s face, hairstyle, body proportions, costume, colors, and identifying details from the reference pictures throughout the entire shot. Transfer only the source character's screen position, pose sequence, timing, gaze direction, body mechanics, and interactions to ${alias}. The replacement performance is {{主要表演動作}}.
+  return `[Shot 1] Create ${alias} as the only visual replacement for ${target} in the uploaded source video. Use any original-character identification images only to locate the person to replace. Preserve ${alias}'s face, hairstyle, body proportions, costume, colors, and identifying details from the new-character appearance pictures throughout the entire shot. Transfer only the source character's screen position, pose sequence, timing, gaze direction, body mechanics, and interactions to ${alias}. The replacement performance is {{主要表演動作}}.
 
 Remove every visual identity trait of the original character. Never show the original character beside ${alias}, never blend their faces, hair, clothing, or anatomy, and never add ${alias} to frames where the specified source character is absent. Preserve all other people, props, scenery, lighting, camera motion, framing, and edit rhythm from the source video.
 
@@ -3938,6 +3964,12 @@ function bindEvents() {
     saveState();
   });
   $("#addReplacementImages").addEventListener("click", () => $("#replacementImageInput").click());
+  $("#addReplacementSourceImages").addEventListener("click", () => $("#replacementSourceImageInput").click());
+  $("#replacementSourceImageInput").addEventListener("change", async event => {
+    try { await addReplacementFiles("sourceImages", event.target.files); }
+    catch (error) { toast(error.message, true); }
+    event.target.value = "";
+  });
   $("#addReplacementVideo").addEventListener("click", () => $("#replacementVideoInput").click());
   $("#replacementImageInput").addEventListener("change", async event => {
     try { await addReplacementFiles("images", event.target.files); }
@@ -3970,6 +4002,12 @@ function bindEvents() {
     const button = event.target.closest("[data-replacement-remove-image]");
     if (!button) return;
     state.replacement.images.splice(Number(button.dataset.replacementRemoveImage), 1);
+    renderReplacement(); updateSummary(); saveState();
+  });
+  $("#replacementSourceImageList").addEventListener("click", event => {
+    const button = event.target.closest("[data-replacement-remove-source-image]");
+    if (!button) return;
+    state.replacement.sourceImages.splice(Number(button.dataset.replacementRemoveSourceImage), 1);
     renderReplacement(); updateSummary(); saveState();
   });
   $("#replacementVideoPreview").addEventListener("click", event => {

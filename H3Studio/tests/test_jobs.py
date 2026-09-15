@@ -79,8 +79,27 @@ class JobListingTests(unittest.TestCase):
             "first_image_asset_id": "a" * 32,
             "references": [{"image_asset_ids": ["b" * 32], "video_asset_id": "c" * 32}],
             "continuation_source_job_id": "d" * 32,
+            "replacement_source_image_asset_ids": ["e" * 32],
         }
-        self.assertEqual(request_asset_ids(payload), {"a" * 32, "b" * 32, "c" * 32})
+        self.assertEqual(request_asset_ids(payload), {"a" * 32, "b" * 32, "c" * 32, "e" * 32})
+
+    def test_replacement_children_keep_source_refs_and_respect_continuity_capacity(self):
+        manager = JobManager.__new__(JobManager)
+        parent = {"name": "換角", "segments": [{}, {}], "source_info": {"has_audio": True}}
+        segment = {"index": 2, "input_duration": 5, "input_start": 4.5, "input_end": 9.5,
+                   "core_start": 5, "core_end": 9.5, "source_asset_id": "segment-video"}
+        for count, storyboard, expected in ((7, False, 2), (8, False, 1), (7, True, 1)):
+            with self.subTest(count=count, storyboard=storyboard):
+                raw = {
+                    "replacement_source_image_asset_ids": [f"source-{i}" for i in range(count)],
+                    "references": [{"image_asset_ids": ["new"], "video_asset_id": "original"}],
+                    "storyboards": [{"image_asset_id": "storyboard"}] if storyboard else [],
+                }
+                child = manager._replacement_child_payload(raw, parent, segment, "previous")
+                self.assertEqual(child["replacement_source_image_asset_ids"], raw["replacement_source_image_asset_ids"])
+                self.assertEqual(len(child["references"][0]["image_asset_ids"]), expected)
+                self.assertEqual(child["references"][0]["video_asset_id"], "segment-video")
+                self.assertEqual(raw["references"][0]["image_asset_ids"], ["new"])
 
 
 class JobDeletionTests(unittest.TestCase):
@@ -277,6 +296,7 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
             assets = AssetStore(asset_dir)
             assets.register_derived_video(source_id, "source.mp4", "replacement-performance-video")
             image = assets.save_image(Image.new("RGB", (64, 64), (200, 30, 40)), "new.png", "replacement-character")
+            original_image = assets.save_image(Image.new("RGB", (64, 64), (20, 30, 40)), "original.png", "replacement-source-character")
             generated = root / "generated.mp4"
             make_video(generated, [(60, 120, 180)] * (10 * 24), with_audio=True)
             payload = {
@@ -290,6 +310,7 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 "replacement_auto_split": True,
                 "replacement_continuity": True,
                 "replacement_audio_mode": "original",
+                "replacement_source_image_asset_ids": [original_image["id"]],
                 "references": [{
                     "alias": "新角色",
                     "type": "character",
@@ -315,6 +336,11 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
             children = [job for job in manager.jobs.values() if job.get("parent_job_id") == parent["id"]]
             self.assertEqual(len(children), 2)
             self.assertTrue(all(job["hidden"] for job in children))
+            for child in children:
+                saved = json.loads((job_dir / f"{child['id']}.request.json").read_text(encoding="utf-8"))
+                self.assertEqual(saved["replacement_source_image_asset_ids"], [original_image["id"]])
+                prompt = (job_dir / f"{child['id']}.prompt.txt").read_text(encoding="utf-8")
+                self.assertIn("identification-only", prompt)
             final_path = output_dir / completed["local_output"]
             with av.open(str(final_path)) as container:
                 frames = list(container.decode(video=0))
