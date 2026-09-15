@@ -231,7 +231,11 @@ function installInteractionMotion() {
 async function api(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(data?.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -1726,6 +1730,7 @@ function queueJobPresentation(job, queue = sharedQueueData) {
   const active = ["queued", "preparing", "running"].includes(job.status);
   const percent = value => value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Math.max(0, Math.min(100, Math.round(Number(value))));
   if (!active) return { label: statusLabel(job.status), detail: job.current_node || statusLabel(job.status), progress: percent(job.progress), waiting: false };
+  if (queue?.error_code === "studio_restart_required") return { label: "Studio 待重啟", detail: "介面已更新；請等工作完成後重啟 Studio，才能確認引擎順位。", progress: null, waiting: false };
   const row = queue?.jobs?.[job.id];
   const phase = row?.phase;
   if (phase === "engine_waiting" && queue.available) {
@@ -1830,10 +1835,11 @@ async function loadSharedQueue() {
     const data = await api("/api/queue", { signal: controller.signal });
     if (typeof data.available !== "boolean" || !data.jobs || typeof data.jobs !== "object") throw new Error("無法辨識排隊資訊，請更新並重新啟動 Studio。");
     if (data.available && ![data.running_count, data.pending_count].every(value => Number.isInteger(value) && value >= 0)) throw new Error("引擎排隊數量尚未提供。");
-    sharedQueueData = { ...data, stale: false };
+    sharedQueueData = { ...data, error_code: null, stale: false };
   } catch (error) {
+    const restartRequired = error.status === 404 || (!Number.isInteger(error.status) && /\bHTTP 404\b/.test(error.message));
     const localJobs = Object.fromEntries(Object.entries(sharedQueueData?.jobs || {}).filter(([, row]) => ["local_waiting", "preparing", "finishing", "local_processing"].includes(row.phase)));
-    sharedQueueData = { ...sharedQueueData, available: false, running_count: null, pending_count: null, running: [], pending: [], jobs: localJobs, stale: Boolean(sharedQueueData?.updated_at), error: /HTTP 404/.test(error.message) ? "此 Studio 尚未提供排隊資訊，請更新並重新啟動 Studio。" : "排隊資訊暫時無法取得，請確認引擎連線；工作可能仍在進行。" };
+    sharedQueueData = { ...sharedQueueData, available: false, running_count: null, pending_count: null, running: [], pending: [], jobs: localJobs, stale: Boolean(sharedQueueData?.updated_at), error_code: restartRequired ? "studio_restart_required" : null, error: restartRequired ? "介面已更新，背景 Studio 尚未提供排隊資訊。請等生成工作完成後，更新並重新啟動 Studio：關閉 Studio 執行視窗，再執行 start_h3_studio.bat。只重新整理瀏覽器不會重啟 Studio。" : "排隊資訊暫時無法取得，請確認引擎連線；工作可能仍在進行。" };
   } finally {
     clearTimeout(timeout);
     sharedQueueLoading = false;

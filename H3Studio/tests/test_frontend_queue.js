@@ -34,6 +34,12 @@ const waitingQueue = () => ({ ...emptyQueue(), running_count: 1, pending_count: 
   local: { job_id: 'local', kind: 'video', phase: 'local_waiting', position: null, progress: 0 },
 } });
 
+function useFetchApi(context, response) {
+  context.fetch = async () => response;
+  const start = source.indexOf('async function api(');
+  vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), context);
+}
+
 test('engine waiting overrides misleading running status and percentages without mutating the job', () => {
   const { context, run } = fixture(waitingQueue());
   context.job = { id: 'video', status: 'running', progress: 5, current_node: '生成中' };
@@ -104,14 +110,63 @@ test('transport failure clears all engine ranks and marks preserved local inform
   assert.equal(element('#refreshSharedQueue').disabled, false);
 });
 
-test('old backend 404 explains the required update without claiming the engine is idle', async () => {
+for (const [format, json] of [
+  ['JSON', async () => ({ error: 'Not Found' })],
+  ['plain text', async () => { throw new SyntaxError('404: Not Found'); }],
+]) {
+  test(`old backend ${format} 404 identifies the restart requirement and clears misleading engine information`, async () => {
+    const { context, element, run } = fixture(waitingQueue());
+    useFetchApi(context, { ok: false, status: 404, json });
+    await assert.rejects(run('api("/api/queue")'), error => error.status === 404);
+    await run('loadSharedQueue()');
+    assert.equal(context.sharedQueueData.available, false);
+    assert.equal(context.sharedQueueData.error_code, 'studio_restart_required');
+    assert.equal(context.sharedQueueData.jobs.video, undefined);
+    assert.equal(context.sharedQueueData.running.length, 0);
+    assert.equal(context.sharedQueueData.pending.length, 0);
+    assert.match(element('#queueStatusMessage').textContent, /(?:重新啟動|重啟) Studio/);
+    assert.equal(element('#queueRunningCount').textContent, '—');
+    assert.equal(element('#queuePendingCount').textContent, '—');
+    assert.equal(element('#queueLocalCount').textContent, '1');
+    assert.match(element('#queueUpdatedAt').textContent, /上次取得/);
+    const active = run('queueJobPresentation({id:"video",status:"running",progress:5,current_node:"生成中"})');
+    assert.equal(active.label, 'Studio 待重啟');
+    assert.match(active.detail, /工作完成後.*重啟 Studio/);
+    assert.equal(active.progress, null);
+    assert.doesNotMatch(run('queueProgressContent(queueJobPresentation({id:"video",status:"running",progress:5}))'), /5%|前方 \d|排隊第/);
+    assert.equal(run('queueJobPresentation({id:"video",status:"completed",progress:100}).label'), '已完成');
+    assert.equal(context.sharedQueueLoading, false);
+    assert.equal(element('#refreshSharedQueue').disabled, false);
+  });
+}
+
+test('successful queue response clears the restart hint and restores the confirmed engine state', async () => {
   const { context, element, run } = fixture();
-  context.api = async () => { throw Error('HTTP 404'); };
+  useFetchApi(context, { ok: false, status: 404, json: async () => ({ error: 'Not Found' }) });
   await run('loadSharedQueue()');
-  assert.match(element('#queueStatusMessage').textContent, /更新並重新啟動 Studio/);
-  assert.equal(element('#queueRunningCount').textContent, '—');
+  assert.equal(context.sharedQueueData.error_code, 'studio_restart_required');
   assert.equal(element('#queueLocalCount').textContent, '—');
-  assert.equal(context.sharedQueueLoading, false);
+  context.api = async () => ({ ...emptyQueue(), running_count: 1, jobs: { video: { phase: 'engine_running', progress: 42 } } });
+  await run('loadSharedQueue()');
+  assert.notEqual(context.sharedQueueData.error_code, 'studio_restart_required');
+  assert.equal(context.sharedQueueData.stale, false);
+  assert.doesNotMatch(element('#queueStatusMessage').textContent, /重啟|重新啟動/);
+  const active = run('queueJobPresentation({id:"video",status:"running",progress:5})');
+  assert.equal(active.label, '引擎生成中');
+  assert.equal(active.progress, 42);
+});
+
+test('HTTP status takes precedence over an unrelated error message mentioning HTTP 404', async () => {
+  const { context, element, run } = fixture(waitingQueue());
+  useFetchApi(context, { ok: false, status: 403, json: async () => ({ error: 'Access denied; upstream previously returned HTTP 404' }) });
+  await run('loadSharedQueue()');
+  assert.equal(context.sharedQueueData.available, false);
+  assert.notEqual(context.sharedQueueData.error_code, 'studio_restart_required');
+  assert.equal(context.sharedQueueData.jobs.video, undefined);
+  assert.doesNotMatch(element('#queueStatusMessage').textContent, /重啟|重新啟動/);
+  const active = run('queueJobPresentation({id:"video",status:"running",progress:5})');
+  assert.notEqual(active.label, 'Studio 待重啟');
+  assert.equal(active.progress, null);
 });
 
 test('engine-unavailable response retains fresh local work while suppressing all engine rows', async () => {
