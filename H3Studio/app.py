@@ -12,7 +12,7 @@ import re
 import uuid
 import webbrowser
 import zipfile
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,7 @@ from voice import (
 from shared_gateway import GatewayError, SharedComfyGateway
 from queue_presentation import build_queue_view
 from queue_cancel import QueueCancelError
+from face_repair import repair_capabilities, repair_options
 from shortfilm import (
     ShortFilmError,
     ShortFilmStore,
@@ -1215,6 +1216,7 @@ class JobManager:
             "parent_job_id": parent_job_id,
             "segment_index": segment_index,
             "mode": compiled.mode,
+            "face_repair": compiled.face_repair,
             "quality_mode": compiled.quality_mode,
             "memory_optimization": compiled.memory_optimization,
             "status": "queued",
@@ -1466,6 +1468,10 @@ class JobManager:
                 try:
                     raw_request = json.loads((JOB_DIR / f"{job_id}.request.json").read_text(encoding="utf-8"))
                     compiled = compile_request(raw_request)
+                    if job.get("face_repair"):
+                        compiled = replace(compiled, face_repair=job["face_repair"],
+                            width=job["width"], height=job["height"], length=job["face_repair"]["frames"],
+                            actual_duration=job["duration"], requested_duration=job["duration"])
                     await self.complete_job(job_id, compiled, prompt_id, output, history)
                     return True
                 except Exception as error:
@@ -1849,6 +1855,10 @@ class JobManager:
                     raise asyncio.CancelledError
                 self.update(job_id, status="preparing", progress=0)
                 await self.comfy.ensure_running()
+                if compiled.face_repair:
+                    capability = await repair_capabilities(self.comfy)
+                    if not capability["ready"]:
+                        raise RequestError(capability["error"])
                 inventory = await self.comfy.model_inventory(refresh=True)
                 validate_runtime_inventory(compiled, inventory)
                 turbo_lora_name = None
@@ -2508,6 +2518,50 @@ def create_app() -> web.Application:
         except (RequestError, json.JSONDecodeError) as error:
             return json_response_error(error)
 
+    async def face_repair_status(_: web.Request) -> web.Response:
+        return web.json_response(await repair_capabilities(comfy))
+
+    async def repair_face(request: web.Request) -> web.Response:
+        try:
+            source_id = request.match_info["job_id"]
+            source_job = jobs.jobs.get(source_id)
+            if not source_job or source_job.get("status") != "completed":
+                raise RequestError("請選擇已完成的影片進行臉部修復。")
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise RequestError("修復設定格式錯誤。")
+            reference_id = str(payload.get("reference_image_asset_id") or "")
+            reference_path = assets.path_for(reference_id)
+            if reference_path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+                raise RequestError("請上傳清楚的角色臉部參考圖片。")
+            source_path = await jobs.job_output_path(source_job)
+            info = await asyncio.to_thread(probe_video, source_path)
+            options = repair_options(payload, info["duration"])
+            capability = await repair_capabilities(comfy)
+            if not capability["ready"]:
+                raise RequestError(capability["error"])
+            asset_id = uuid.uuid4().hex
+            segment_path = ASSET_DIR / f"{asset_id}.mp4"
+            actual = await asyncio.to_thread(extract_replacement_segment, source_path, segment_path,
+                options["start_frame"], options["start_frame"] + options["frames"], info["has_audio"])
+            if abs(actual * 24 - options["frames"]) > 0.5:
+                raise RequestError("來源影片時間資訊與解碼結果不同，請調整修復區間。")
+            assets.register_derived_video(asset_id, "face-repair-source.mp4", "face-repair-source")
+            options.update(source_asset_id=asset_id, source_job_id=source_id)
+            raw = {
+                "mode": "r2v", "job_name": clean_job_name(source_job.get("name") or "影片")[:60] + "_臉部修復",
+                "prompt": "[Shot 1] Refine the face of 修復角色 in the cropped source performance. Preserve the reference identity, facial proportions, age, expression, gaze, head movement and mouth timing. Restore natural eyes and facial detail without changing the performance. No additional people. No new speech.",
+                "duration": 5, "aspect_ratio": "1:1", "megapixels": 0.4, "quality_mode": "native",
+                "steps": 20, "seed": options["seed"], "references": [{"alias": "修復角色", "type": "character", "image_asset_ids": [reference_id]}],
+                "face_repair": options,
+            }
+            compiled = replace(compile_request(raw), width=info["width"], height=info["height"],
+                length=options["frames"], actual_duration=actual, requested_duration=actual, face_repair=options)
+            job = jobs.create(compiled, raw)
+            return web.json_response(job, status=202)
+        except (RequestError, ValueError, OSError, json.JSONDecodeError) as error:
+            return json_response_error(error)
+
     async def render(request: web.Request) -> web.Response:
         try:
             payload = await request.json()
@@ -2944,6 +2998,8 @@ def create_app() -> web.Application:
     app.router.add_get("/", index)
     app.router.add_get("/api/status", status)
     app.router.add_get("/api/queue", queue_status)
+    app.router.add_get("/api/face-repair/status", face_repair_status)
+    app.router.add_post("/api/jobs/{job_id}/face-repair", repair_face)
     app.router.add_get("/api/loras", lora_catalog)
     app.router.add_get("/api/connection", connection)
     app.router.add_post("/api/connection", update_connection)

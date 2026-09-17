@@ -125,6 +125,7 @@ class CompiledRequest:
     mapping: list[dict[str, Any]]
     custom_loras: list[dict[str, Any]] = field(default_factory=list)
     memory_optimization: bool = False
+    face_repair: dict[str, Any] | None = None
 
 
 def validate_runtime_inventory(compiled: CompiledRequest, inventory: dict[str, bool]) -> None:
@@ -1103,6 +1104,9 @@ def build_workflow(
         "format": "auto",
         "codec": "auto",
     }, "Save Video")
+    if compiled.face_repair:
+        from face_repair import wire_face_repair
+        return wire_face_repair(workflow, compiled, uploaded_assets)
     return workflow
 
 
@@ -1114,5 +1118,6 @@ def required_asset_ids(compiled: CompiledRequest) -> list[str]:
         *compiled.reference_videos,
         *compiled.reference_audios,
         *(guide["asset_id"] for guide in compiled.guides),
+        (compiled.face_repair or {}).get("source_asset_id"),
     ]
     return list(dict.fromkeys(value for value in values if value))

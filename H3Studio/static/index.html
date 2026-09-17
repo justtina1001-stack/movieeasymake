@@ -854,6 +854,28 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/static/app.js?v=20260915-replacement-source-images"></script>
+  <div id="faceRepairModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="faceRepairTitle">
+    <div class="modal-backdrop" data-close-face-repair></div>
+    <section class="modal-card">
+      <div class="modal-heading"><div><p class="eyebrow">H3 FACE REFINE</p><h2 id="faceRepairTitle">臉部修復</h2></div><button class="icon-button" type="button" data-close-face-repair aria-label="關閉臉部修復">×</button></div>
+      <p class="render-note">修復遠景的小臉，另存為新片段，保留原片與所選區間原聲。每次處理一位人物；請先用約 5 秒測試外觀、閃爍與嘴型。</p>
+      <video id="faceRepairVideo" class="job-video" controls preload="metadata"></video>
+      <div class="form-grid two">
+        <label>開始時間（秒）<input id="faceRepairStart" type="number" min="0" step="0.1" value="0"></label>
+        <label>修復長度<select id="faceRepairDuration"><option value="5">約 5 秒 · 先試修</option><option value="10">約 10 秒</option><option value="15">約 15 秒</option></select></label>
+        <label>要修復的人物<select id="faceRepairSelection"><option value="largest_face">畫面中最大的一張臉</option><option value="centre_most">最靠近中央的臉</option><option value="left_most">最左側的臉</option><option value="right_most">最右側的臉</option></select></label>
+        <label>修復強度<select id="faceRepairStrength"><option value="0.2">輕度 · 優先保留原貌</option><option value="0.3" selected>標準 · 建議先試</option><option value="0.45">較強 · 可能改變五官</option></select></label>
+        <label>臉部處理解析度<select id="faceRepairCanvas"><option value="512">512 · 較省顯存</option><option value="768">768 · 較細緻、較耗資源</option></select></label>
+        <label>Seed<input id="faceRepairSeed" type="number" min="0" max="9007199254740991" value="42" step="1"></label>
+      </div>
+      <label>角色臉部參考圖（必填）<input id="faceRepairImage" type="file" accept="image/png,image/jpeg,image/webp,image/bmp"></label>
+      <p id="faceRepairImageName" class="render-note">請選擇清楚的單人臉部圖片，用來維持修復後的外觀。</p>
+      <p class="render-note">人物依位置／大小選取，參考圖用於外觀重建，不是自動辨認身份。遮擋、交錯與切鏡可能追蹤錯人；偵測不到的幀保留原畫面。時長依 H3 幀數規格調整，片尾不足時會縮短。</p>
+      <p id="faceRepairStatus" role="status" class="connection-hint">正在檢查修復功能…</p>
+      <div class="modal-actions"><button id="faceRepairCheck" class="button ghost" type="button">重新檢查</button><button id="faceRepairSubmit" class="button primary" type="button" disabled>建立修復工作</button></div>
+    </section>
+  </div>
+  <script src="/static/app.js?v=20260917-face-repair"></script>
+  <script src="/static/face-repair.js?v=20260917-face-repair"></script>
 </body>
 </html>

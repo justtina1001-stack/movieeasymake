@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import mimetypes
+import os
 import subprocess
 import sys
 import time
@@ -125,6 +126,7 @@ class ComfyClient:
                     "--preview-method", "taesd", "--listen", "127.0.0.1",
                 ],
                 cwd=self.comfy_dir,
+                env={**os.environ, "H3_FACEREFINE_STRICT_PATHS": "1"},
                 stdout=self.log_handle,
                 stderr=subprocess.STDOUT,
                 creationflags=creationflags,
