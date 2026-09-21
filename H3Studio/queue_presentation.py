@@ -8,7 +8,7 @@ from typing import Any
 
 
 ACTIVE_STATUSES = {"queued", "preparing", "running"}
-KIND_LABELS = {"video": "影片", "music": "音樂", "voice": "語音", "unknown": "工作"}
+KIND_LABELS = {"video": "影片", "music": "音樂", "voice": "語音", "image": "圖片", "unknown": "工作"}
 
 
 def build_queue_view(
@@ -17,6 +17,7 @@ def build_queue_view(
     music_jobs: dict[str, dict[str, Any]],
     voice_jobs: dict[str, dict[str, Any]],
     *,
+    image_jobs: dict[str, dict[str, Any]] | None = None,
     colleague_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Do not infer a global rank for jobs still behind the local GPU lock.
@@ -29,7 +30,7 @@ def build_queue_view(
     available = snapshot.get("available") is True
     all_jobs = {
         job_id: (kind, job)
-        for kind, collection in (("video", video_jobs), ("music", music_jobs), ("voice", voice_jobs))
+        for kind, collection in (("video", video_jobs), ("music", music_jobs), ("voice", voice_jobs), ("image", image_jobs or {}))
         for job_id, job in collection.items()
     }
     by_prompt = {

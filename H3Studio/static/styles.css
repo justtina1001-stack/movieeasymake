@@ -271,6 +271,7 @@ input:disabled, select:disabled { opacity: .62; cursor: not-allowed; }
 
 .button { border: 1px solid transparent; border-radius: 10px; padding: 10px 15px; cursor: pointer; transition: transform var(--motion-fast) ease, filter .2s, box-shadow .2s, border-color .2s; font-weight: 650; font-size: 12px; }
 .button:hover { filter: brightness(1.1); transform: translateY(-2px); }
+a.button { color: inherit; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
 .button:active, .icon-button:active, .delete-button:active, .text-button:active { transform: translateY(0) scale(.955); }
 .button.primary { background: linear-gradient(135deg, var(--accent), #ff3d68); box-shadow: 0 10px 30px rgba(255,80,75,.2); }
 .button.primary:hover { box-shadow: 0 14px 36px rgba(255,80,75,.3); }

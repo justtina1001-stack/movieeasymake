@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>圖片工作室 · MiniMax H3 Studio</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260921-qwen-image">
+  <link rel="stylesheet" href="/static/images.css?v=20260921">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="/"><span class="brand-mark">H3</span><span><strong>MiniMax H3 Studio</strong><small>IMAGE WORKSPACE</small></span></a><a class="button ghost small" href="/">返回影片工作室</a></header>
+  <main class="image-page">
+    <section class="image-intro"><div><p class="eyebrow">QWEN-IMAGE-2.1</p><h1>從想法，到畫面。</h1><p>文字生圖 · 多圖編輯 · 透明背景</p></div><span class="image-badge">研究／評估版</span></section>
+    <p class="image-license">本模型限研究／評估；正式商業用途需另取得授權。<a href="https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE" target="_blank" rel="noopener">查看官方授權</a></p>
+    <section class="image-engine"><div><strong id="engineStatus">正在檢查引擎與模型…</strong><p id="engineDetail" role="status"></p></div><button id="refreshStatus" class="button ghost small" type="button">重新檢查</button></section>
+    <div class="image-layout">
+      <form id="imageForm" class="image-panel">
+        <div class="image-section-heading"><span class="eyebrow">01 / CREATE</span><h2>圖片設定</h2></div>
+        <label>生成方式<select id="imageMode"><option value="generate">文字生圖</option><option value="edit">參考圖編輯</option></select></label>
+        <label>工作名稱<input id="imageName" maxlength="80" placeholder="例如：角色三視圖、透明道具"></label>
+        <label>圖片描述<textarea id="imagePrompt" required maxlength="8000" rows="7" placeholder="描述主體、構圖、光線、風格與需要的文字。編輯時，可用「圖 1」「圖 2」指定素材。"></textarea></label>
+        <div id="referenceSection" class="hidden">
+          <label class="image-upload">參考圖片 · 最多 10 張<input id="referenceFiles" type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp"></label>
+          <p class="image-hint">依上傳順序編號。輸出沿用圖 1 的比例；編輯解析度由下方「參考圖處理解析度」決定。透明 PNG 會保留透明通道。</p>
+          <div id="referenceList" class="image-references"></div>
+        </div>
+        <div id="generationSize" class="image-fields"><label>寬度<input id="imageWidth" type="number" min="256" max="2048" step="32" value="1024" required></label><label>高度<input id="imageHeight" type="number" min="256" max="2048" step="32" value="1024" required></label></div>
+        <div id="editingSize" class="hidden"><label>參考圖處理解析度<select id="referenceResolution"><option value="512">512 · 省顯存測試</option><option value="1024" selected>1024 · 建議起點</option><option value="2048">2048 · 較耗顯存</option></select></label></div>
+        <label class="image-check"><input id="imageTransparent" type="checkbox">生成透明背景 PNG</label>
+        <p class="image-hint">透明背景由模型生成，可能仍需清理邊緣。16 GB 顯卡建議從 1024、單張參考開始。</p>
+        <details class="image-advanced"><summary>採樣與 Seed</summary><label>採樣步數<input id="imageSteps" type="number" min="1" max="50" value="25" required></label><label class="image-check"><input id="imageSeedAuto" type="checkbox" checked>AUTO · 每次生成使用新 Seed</label><label>固定 Seed<input id="imageSeed" type="number" min="0" max="9007199254740991" value="42" disabled></label><p class="image-hint">預設 25 步供比較；官方完整品質範例使用 40 步。增加步數會延長生成時間。</p></details>
+        <button id="generateImage" type="submit" class="button primary" disabled>加入生成佇列 →</button>
+        <p id="formMessage" class="image-hint" role="status" aria-live="polite"></p>
+      </form>
+      <section class="image-results" aria-labelledby="resultsTitle">
+        <div class="image-section-heading"><div><span class="eyebrow">02 / RESULTS</span><h2 id="resultsTitle">圖片工作</h2></div><button id="refreshJobs" type="button" class="button ghost small">重新整理</button></div>
+        <p id="imageQueue" class="image-queue" role="status">正在取得共享佇列…</p>
+        <div id="imageJobs" class="image-jobs"><p class="image-empty">正在載入作品…</p></div>
+        <nav class="image-pagination" aria-label="圖片工作分頁"><button id="previousPage" type="button" class="button ghost small">上一頁</button><span id="pageLabel"></span><button id="nextPage" type="button" class="button ghost small">下一頁</button></nav>
+      </section>
+    </div>
+  </main>
+  <script src="/static/images.js?v=20260921"></script>
+</body>
+</html>

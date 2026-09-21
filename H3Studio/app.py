@@ -47,6 +47,7 @@ from shared_gateway import GatewayError, SharedComfyGateway
 from queue_presentation import build_queue_view
 from queue_cancel import QueueCancelError
 from face_repair import repair_capabilities, repair_options
+from qwen_image import register_image_routes
 from shortfilm import (
     ShortFilmError,
     ShortFilmStore,
@@ -1067,7 +1068,7 @@ class AssetStore:
         extension = Path(original_name).suffix.lower()
         final_path = self.directory / f"{asset_id}{extension}"
         temp_path.replace(final_path)
-        transparency_filled = flatten_transparent_image(final_path)
+        transparency_filled = False if kind == "qwen-image-reference" else flatten_transparent_image(final_path)
         metadata = {
             "id": asset_id,
             "name": original_name,
@@ -2076,6 +2077,7 @@ def create_app() -> web.Application:
     app["voice_jobs"] = voice_jobs
     app["shared_gateway"] = gateway
     app["shortfilms"] = shortfilms
+    image_jobs = register_image_routes(app, STATIC_DIR, DATA_DIR)
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
@@ -2122,7 +2124,8 @@ def create_app() -> web.Application:
                 name = users.get(entry.get("user_id"))
                 if name:
                     colleagues[prompt_id] = name
-        result = build_queue_view(snapshot, jobs.jobs, music_jobs.jobs, voice_jobs.jobs, colleague_names=colleagues)
+        result = build_queue_view(snapshot, jobs.jobs, music_jobs.jobs, voice_jobs.jobs,
+                                  image_jobs=image_jobs.jobs, colleague_names=colleagues)
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def connection(_: web.Request) -> web.Response:

@@ -1,5 +1,19 @@
 # MiniMax H3 Studio
 
+## Qwen-Image-2.1 圖片工作室（2026-09-21）
+
+主畫面右上角按「圖片」，或開啟 `/images`。支援文字生圖、最多 10 張參考圖編輯、透明背景 PNG、AUTO Seed、固定 Seed、下載與將成品作為下一張參考圖。圖片與影片共用同一個 GPU 工作鎖及 ComfyUI 佇列；共享佇列可顯示圖片的前方工作數量。中斷重啟後會查詢原本的引擎工作，不重複送出。
+
+**本模型採 Qwen Research License，限研究／評估；商業用途需另取得授權。** [官方授權](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE)；[官方模型](https://huggingface.co/Qwen/Qwen-Image-2.1)；[ComfyUI 格式權重及範例](https://huggingface.co/Comfy-Org/Qwen-Image-2.1)。2.1 與舊版 Qwen-Image 的權重和授權不同，不可直接互換。
+
+GPU 主機執行根目錄 `setup_qwen_image.bat`，確認研究用途後下載官方 Comfy-Org INT8 擴散模型、INT8 Qwen3-VL 8B 文字編碼器與專用 VAE，合計約 17.3 GB（16.1 GiB）。安裝器固定模型版本 `ace0edeb3791a594ddfa36ed5f41a178a394e921`，以 SHA-256 校驗完整檔案；支援續傳，既有不同內容的同名模型會保留並報錯。模型、下載暫存、私人設定和作品均不進 Git。遠端同事只需更新及重啟 Studio，模型安裝在實際 GPU 主機。
+
+需要含 `TextEncodeQwenImage21` 的 ComfyUI，本版使用 `v0.37.0`／`73c9bad4`。全新引擎安裝已固定此版本；既有引擎仍須由主機管理者在佇列清空後備份 ComfyUI 原版本、虛擬環境套件清單及 `user/`（包括資料庫），更新核心及其 `requirements.txt`，再重啟 ComfyUI 和 Studio。`setup_qwen_image.bat` 只安裝圖片權重，不會自行更新核心。僅 Git pull 或重新整理瀏覽器不會更新已執行的後端。核心升級有資料庫遷移，退版時也須還原更新前的資料庫備份。
+
+16 GB 顯卡建議從 1024×1024、25 步、單張參考圖開始；較高解析度、多張參考圖與 40～50 步需要更多資源與時間。編輯模式沿用第一張參考圖的比例，按所選參考圖解析度縮放；文字生圖才使用寬高欄位。透明輸出由模型生成，不保證所有邊緣都乾淨；PNG 保留 Alpha，請在支援透明通道的軟體中檢查。圖片參考的透明 PNG 不會套用 H3 影片素材的螢光綠填底。
+
+本機已用 RTX 5060 Ti 16 GB 完成 512×512 透明生圖、512×512 參考圖換色及 1024×1024 中文生圖，皆使用 25 步。這些是安裝驗證，不是所有解析度、10 圖同時編輯或長時間負載的效能保證。
+
 ## 共用引擎的排隊狀態
 
 頁面上方的「共享生成佇列」會每 3 秒更新，快速生成與短片創作都能看到。可展開「查看工作清單」，確認引擎正在執行的工作、已收到的等待工作，以及這個 Studio 尚未送出的工作；也可手動重新整理。主機管理者可辨識共享引擎使用者，其他使用者看到的同事工作採匿名顯示。
@@ -29,7 +43,7 @@ SLA 使用 ComfyUI 原生 `BlockSparseAttention` 的 H3 分塊 QKV 路徑；目�
 
 短片品質是全片設定；有參考素材的鏡頭使用 Ref2VA，無參考素材的鏡頭使用 FL2VA。若選了僅限單一模型的品質，不相容鏡頭沿用既有的 Turbo 穩定版適配規則，規則檢查及鏡頭編譯都會提示。缺少模型或節點則明確報錯，不會因缺件偷偷換用其他模型。
 
-本版新安裝固定 ComfyUI `v0.35.0`／`40c4fcd`，自訂節點固定 H3-Optimizations `0.2.42`／`52b5f1e`。既有同事執行 Git 更新不會覆蓋 `ComfyUI/`、模型、私人設定或作品；「模型更新」只補模型與自訂節點，**不會自動升級既有 ComfyUI 核心**。需要 SLA 時，請 GPU 主機管理者備份後更新核心與其 `requirements.txt`，再重啟引擎；遠端面板無權替主機安裝或更新。
+本版新安裝固定 ComfyUI `v0.37.0`／`73c9bad4`，自訂節點固定 H3-Optimizations `0.2.42`／`52b5f1e`。既有同事執行 Git 更新不會覆蓋 `ComfyUI/`、模型、私人設定或作品；「模型更新」只補模型與自訂節點，**不會自動升級既有 ComfyUI 核心**。需要 SLA 時，請 GPU 主機管理者備份後更新核心與其 `requirements.txt`，再重啟引擎；遠端面板無權替主機安裝或更新。
 
 來源：[ComfyUI 0.35.0](https://github.com/Comfy-Org/ComfyUI/releases/tag/v0.35.0)、[H3-Optimizations](https://github.com/Zironic/H3-Optimizations)、[Turbo-SLA](https://huggingface.co/lightx2v/Minimax-h3-Turbo-SLA)、[FL v1.2](https://huggingface.co/lightx2v/Minimax-h3-Turbo/discussions/52)、[Ref 8 步](https://huggingface.co/lightx2v/Minimax-h3-Turbo/discussions/51)。
 

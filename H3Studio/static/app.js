@@ -1823,7 +1823,7 @@ function refreshQueueJobAnnotations() {
 }
 
 function queueRowsHtml(rows, group) {
-  const kinds = { video: "影片", music: "音樂", voice: "語音", unknown: "其他工作" };
+  const kinds = { video: "影片", music: "音樂", voice: "語音", image: "圖片", unknown: "其他工作" };
   return rows.map(row => {
     const rank = Number.isInteger(row.position) && row.position > 0 ? `第 ${row.position} 位` : "等待中";
     const phaseLabel = { engine_running: "執行中", engine_waiting: rank, local_waiting: "待送出", preparing: "準備素材", finishing: "完成後處理", local_processing: "本機處理", unknown: "同步狀態中" }[row.phase] || "同步狀態中";
