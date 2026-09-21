@@ -159,6 +159,7 @@ class ImageJobManager:
         self.job_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.jobs, self.tasks, self.cancel_events = {}, {}, {}
+        self.file_lock = asyncio.Lock()
         for path in self.job_dir.glob("*.json"):
             if path.name.endswith(".workflow.json"):
                 continue
@@ -301,6 +302,28 @@ class ImageJobManager:
         self.update(job_id, status="cancelled", current_node=None)
         return job
 
+    async def delete(self, job_id):
+        async with self.file_lock:
+            if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+                raise RequestError("圖片工作編號格式錯誤。")
+            job = self.jobs[job_id]
+            task = self.tasks.get(job_id)
+            if job["status"] not in {"completed", "failed", "cancelled", "interrupted"} or (task and not task.done()):
+                raise RequestError("圖片工作仍在執行，請等待完成，或取消並等待狀態更新後再刪除。")
+            # References are independent AssetStore copies. Only delete this job's
+            # fixed local paths; never follow filenames returned by a remote engine.
+            paths = [(self.output_dir, f"{job_id}{suffix}") for suffix in (".png", ".tmp")]
+            paths += [(self.job_dir, f"{job_id}{suffix}") for suffix in (".workflow.json", ".tmp", ".json")]
+            for root, name in paths:
+                if (root / name).resolve().parent != root.resolve():
+                    raise RequestError("圖片檔案路徑不在工作資料夾內，已停止刪除。")
+            for root, name in paths:
+                (root / name).unlink(missing_ok=True)
+            self.jobs.pop(job_id)
+            self.tasks.pop(job_id, None)
+            self.cancel_events.pop(job_id, None)
+            return {"deleted": True, "job_id": job_id, "comfy_output_preserved": True, "references_preserved": True}
+
     def output_path(self, job_id):
         if job_id not in self.jobs or self.jobs[job_id]["status"] != "completed":
             raise RequestError("圖片尚未完成。")
@@ -344,16 +367,19 @@ def register_image_routes(app, static_dir, data_dir):
                                   "total_pages": pages, "total": len(records)}, headers={"Cache-Control": "no-store"})
     async def cancel(request):
         return web.json_response(await manager.cancel(request.match_info["job_id"]))
+    async def delete(request):
+        return web.json_response(await manager.delete(request.match_info["job_id"]))
     async def output(request):
         path = manager.output_path(request.match_info["job_id"])
         headers = {"Content-Disposition": f'attachment; filename="{path.name}"'} if request.query.get("download") == "1" else {}
         return web.FileResponse(path, headers=headers)
     async def use_reference(request):
-        path = manager.output_path(request.match_info["job_id"])
-        def save():
-            with Image.open(path) as image:
-                return manager.assets.save_image(image, "Qwen-reference.png", "qwen-image-reference")
-        asset = await asyncio.to_thread(save)
+        async with manager.file_lock:
+            path = manager.output_path(request.match_info["job_id"])
+            def save():
+                with Image.open(path) as image:
+                    return manager.assets.save_image(image, "Qwen-reference.png", "qwen-image-reference")
+            asset = await asyncio.to_thread(save)
         return web.json_response({**asset, "url": f"/api/assets/{asset['id']}"})
     async def startup(_):
         for job_id, job in manager.jobs.items():
@@ -368,6 +394,7 @@ def register_image_routes(app, static_dir, data_dir):
     app.router.add_get("/api/images/status", status)
     app.router.add_get("/api/images/jobs", listing)
     app.router.add_post("/api/images/jobs", create)
+    app.router.add_delete("/api/images/jobs/{job_id}", delete)
     app.router.add_post("/api/images/jobs/{job_id}/cancel", cancel)
     app.router.add_get("/api/images/jobs/{job_id}/image", output)
     app.router.add_post("/api/images/jobs/{job_id}/reference", use_reference)

@@ -226,3 +226,75 @@ class ImageAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("error",await response.json())
         response = await self.client.post("/api/images/jobs/not-a-job/cancel")
         self.assertEqual(response.status,404)
+
+    def completed_image(self, job_id=IMAGE_ID):
+        self.manager.jobs[job_id] = {"id":job_id,"status":"completed","created_at":"2026-09-21","name":"測試圖片"}
+        self.manager.update(job_id)
+        path = self.manager.output_dir / f"{job_id}.png"
+        Image.new('RGBA',(32,32),(50,100,200,100)).save(path)
+        (self.manager.job_dir / f"{job_id}.workflow.json").write_text('{}')
+        return path
+
+    async def test_delete_removes_local_files_but_keeps_reference_and_other_job(self):
+        path = self.completed_image()
+        other = self.completed_image('b'*32)
+        response = await self.client.post(f'/api/images/jobs/{IMAGE_ID}/reference')
+        asset = await response.json()
+        reference = self.app['assets'].path_for(asset['id'])
+        reference_bytes = reference.read_bytes()
+        response = await self.client.delete(f'/api/images/jobs/{IMAGE_ID}')
+        self.assertEqual(response.status,200)
+        self.assertTrue((await response.json())['comfy_output_preserved'])
+        self.assertFalse(path.exists())
+        self.assertFalse((self.manager.job_dir / f'{IMAGE_ID}.json').exists())
+        self.assertFalse((self.manager.job_dir / f'{IMAGE_ID}.workflow.json').exists())
+        self.assertEqual(reference.read_bytes(),reference_bytes)
+        self.assertTrue(other.exists())
+        response = await self.client.get('/api/images/jobs')
+        self.assertEqual([j['id'] for j in (await response.json())['items']],['b'*32])
+        reloaded = ImageJobManager(self.manager.comfy,self.root,self.manager.gpu_lock,self.app['assets'])
+        self.assertNotIn(IMAGE_ID,reloaded.jobs)
+        self.assertEqual((await self.client.delete(f'/api/images/jobs/{IMAGE_ID}')).status,404)
+        self.assertNotEqual((await self.client.get(f'/api/images/jobs/{IMAGE_ID}/image')).status,200)
+
+    async def test_delete_rejects_active_status_and_unfinished_task(self):
+        path = self.completed_image()
+        for status in ('queued','preparing','running'):
+            self.manager.jobs[IMAGE_ID]['status']=status
+            response = await self.client.delete(f'/api/images/jobs/{IMAGE_ID}')
+            self.assertEqual(response.status,400)
+            self.assertTrue(path.exists())
+        self.manager.jobs[IMAGE_ID]['status']='completed'
+        task = asyncio.create_task(asyncio.sleep(60))
+        self.manager.tasks[IMAGE_ID]=task
+        try:
+            self.assertEqual((await self.client.delete(f'/api/images/jobs/{IMAGE_ID}')).status,400)
+            self.assertTrue(path.exists())
+        finally:
+            task.cancel()
+            await asyncio.gather(task,return_exceptions=True)
+
+    async def test_delete_waits_for_reference_copy_lock_and_ignores_metadata_paths(self):
+        path = self.completed_image()
+        protected = self.root / 'protected.png'
+        protected.write_bytes(b'preserve')
+        self.manager.jobs[IMAGE_ID]['local_output']=str(protected)
+        self.manager.jobs[IMAGE_ID]['output']={'filename':str(protected)}
+        await self.manager.file_lock.acquire()
+        task = asyncio.create_task(self.manager.delete(IMAGE_ID))
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        self.assertTrue(path.exists())
+        self.manager.file_lock.release()
+        await task
+        self.assertEqual(protected.read_bytes(),b'preserve')
+
+    async def test_file_error_keeps_job_record_for_retry(self):
+        path = self.completed_image()
+        with patch.object(Path,'unlink',side_effect=PermissionError('file in use')):
+            response = await self.client.delete(f'/api/images/jobs/{IMAGE_ID}')
+        self.assertEqual(response.status,400)
+        self.assertIn(IMAGE_ID,self.manager.jobs)
+        self.assertTrue(path.exists())
+        self.assertTrue((self.manager.job_dir / f'{IMAGE_ID}.json').exists())
+        self.assertEqual((await self.client.delete(f'/api/images/jobs/{IMAGE_ID}')).status,200)

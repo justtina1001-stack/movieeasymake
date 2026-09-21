@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../static/images.js'), 'utf8');
 const a='a'.repeat(32), b='b'.repeat(32), c='c'.repeat(32);
 
-async function fixture({draft={}, status={}, jobs=[]}={}) {
+async function fixture({draft={}, status={}, jobs=[], deleteError=false}={}) {
   const elements = new Map(), calls=[];
   let stored = JSON.stringify(draft);
   const defaults={imageMode:'generate',imageWidth:'1024',imageHeight:'1024',imageSteps:'25',imageSeed:'42',referenceResolution:'1024',imageLoraStrength:'1'};
@@ -22,6 +22,7 @@ async function fixture({draft={}, status={}, jobs=[]}={}) {
   const context=vm.createContext({document:{getElementById:el,hidden:false},localStorage:{getItem:()=>stored,setItem:(_,s)=>stored=s},setInterval(){},FormData,
     async fetch(url,options) {
       calls.push({url,options});
+      if(options?.method === 'DELETE') return {ok:!deleteError,json:async()=>deleteError?{error:'刪除失敗'}:{deleted:true}};
       const data = url === '/api/images/status' ? {ready:true,lora_supported:true,loras:[],...status} :
         url.startsWith('/api/images/jobs?page=') ? {items:jobs,page:1,total_pages:1} :
         url === '/api/queue' ? {available:true,jobs:{},running_count:0,pending_count:0,local_waiting_count:0} :
@@ -103,4 +104,40 @@ test('oversized dropped batch is rejected before upload',async()=>{
   await f.fire('referenceDrop','drop',{dataTransfer:{files:Array.from({length:10},()=>({name:'test.png'}))}});
   assert.match(f.el('formMessage').textContent,/10 張/);
   assert.equal(f.calls.some(c=>c.url==='/api/assets'),false);
+});
+
+
+test('delete cancellation sends no request and preserves the card',async()=>{
+  const f=await fixture({jobs:[{id:a,status:'completed',name:'圖片'}]});
+  await f.click('imageJobs',{delete:a});
+  assert.equal(f.el('deleteImageDialog').open,true);
+  await f.fire('cancelImageDelete','click');
+  assert.equal(f.calls.some(c=>c.options?.method==='DELETE'),false);
+  assert.match(f.el('imageJobs').innerHTML,/刪除圖片/);
+});
+
+test('delete targets the chosen job and stale polling cannot resurrect it or alter references',async()=>{
+  const f=await fixture({jobs:[{id:a,status:'completed',name:'圖片'},{id:b,status:'completed',name:'其他圖片'}],draft:{refs:[{id:c}]}});
+  await f.click('imageJobs',{delete:a});
+  await f.fire('confirmImageDelete','click');
+  const calls=f.calls.filter(c=>c.options?.method==='DELETE');
+  assert.equal(calls.length,1);assert.equal(calls[0].url,`/api/images/jobs/${a}`);
+  assert.equal(f.el('imageJobs').innerHTML.includes(`data-job-id="${a}"`),false);
+  assert.equal(f.el('imageJobs').innerHTML.includes(`data-job-id="${b}"`),true);
+  assert.deepEqual(f.draft().refs,[{id:c}]);
+});
+
+test('failed deletion leaves the card visible and reports error',async()=>{
+  const f=await fixture({jobs:[{id:a,status:'completed',name:'圖片'}],deleteError:true});
+  await f.click('imageJobs',{delete:a});
+  await f.fire('confirmImageDelete','click');
+  assert.match(f.el('deleteImageError').textContent,/刪除失敗/);
+  assert.equal(f.el('deleteImageDialog').open,true);
+  assert.equal(f.el('imageJobs').innerHTML.includes(`data-job-id="${a}"`),true);
+});
+
+test('active image jobs show cancel but not delete',async()=>{
+  const f=await fixture({jobs:[{id:a,status:'running',name:'圖片'}]});
+  assert.equal(f.el('imageJobs').innerHTML.includes('data-delete'),false);
+  assert.equal(f.el('imageJobs').innerHTML.includes('data-cancel'),true);
 });

@@ -42,6 +42,7 @@
     </div>
   </main>
   <dialog id="imageCompare" class="image-compare" aria-labelledby="compareTitle"><div class="image-section-heading"><h2 id="compareTitle">原圖與結果</h2><button id="closeCompare" type="button" class="button ghost small">關閉比較</button></div><div class="image-compare-grid"><figure><figcaption>送出時的主圖（圖 1）</figcaption><img id="compareBefore" alt="編輯前的主圖"></figure><figure><figcaption>生成結果</figcaption><img id="compareAfter" alt="編輯後的生成結果"></figure></div></dialog>
-  <script src="/static/images.js?v=20260921-edit2"></script>
+  <dialog id="deleteImageDialog" class="image-compare" style="max-width:520px" aria-labelledby="deleteImageTitle"><h2 id="deleteImageTitle">永久刪除圖片？</h2><p id="deleteImageName"></p><p>此 Studio 的工作紀錄與本機生成圖片會一併刪除，無法復原。</p><p>已轉存的參考圖及 ComfyUI 原始輸出會保留。</p><p id="deleteImageError" role="alert"></p><div class="image-card-actions"><button id="cancelImageDelete" type="button" class="button ghost">保留圖片</button><button id="confirmImageDelete" type="button" class="button danger">確認永久刪除</button></div></dialog>
+  <script src="/static/images.js?v=20260921-delete2"></script>
 </body>
 </html>

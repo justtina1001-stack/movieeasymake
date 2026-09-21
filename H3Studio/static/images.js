@@ -5,6 +5,8 @@
   const draftKey = 'h3-qwen-image-21-draft-v1';
   const fields = ['imageMode','imageName','imagePrompt','imageWidth','imageHeight','imageSteps','imageSeed','imageSeedAuto','imageTransparent','referenceResolution','imageLora','imageLoraStrength'];
   let refs = [], ready = false, uploading = false, submitting = false, page = 1, totalPages = 1, jobs = [], queue = null, polling = false;
+  const deletedIds = new Set();
+  let pendingDelete = null;
   let selectedLora = '', loraSupported = false, availableLoras = [], lastJobsMarkup = '';
   const templates = {
     color:'以圖 1 為主圖，將【指定物件】的顏色改為【目標顏色】，保留原本人物五官、造型、姿勢、構圖與其他物件。',
@@ -121,7 +123,7 @@
     const markup = jobs.length ? jobs.map(job => {
       const active = ['queued','preparing','running'].includes(job.status), done = job.status === 'completed';
       const title = escape(job.name), id = escape(job.id);
-      return `<article class="image-card" data-job-id="${id}">${done ? `<a href="/api/images/jobs/${id}/image" target="_blank" rel="noopener"><img class="image-preview" loading="lazy" src="/api/images/jobs/${id}/image" alt="${title}"></a>` : ''}<div class="image-card-body"><h3>${title}</h3><p>${escape(jobStatus(job))}</p>${active && queue?.jobs?.[job.id]?.phase === 'engine_running' ? `<progress max="100" value="${Math.min(100,Math.max(0,Number(job.progress)||0))}" aria-label="採樣進度"></progress>` : ''}<p>${done ? `${job.width} × ${job.height} · ` : ''}${job.steps} 步 · Seed ${job.seed}${done && job.rgba ? ' · RGBA' : ''}</p>${job.error ? `<p class="image-error">${escape(job.error)}</p>` : ''}<details><summary>查看描述與 LoRA</summary><p>${escape(job.original_prompt || job.prompt)}</p><p>${job.lora_name ? `LoRA：${escape(job.lora_name)} · 強度 ${escape(job.lora_strength)}` : '未使用 LoRA'}</p></details><div class="image-card-actions">${done ? `<a class="button ghost small" href="/api/images/jobs/${id}/image?download=1">下載 PNG</a><button type="button" class="button ghost small" data-continue="${id}">以此圖繼續編輯</button><button type="button" class="button ghost small" data-reference="${id}">新增為輔助參考</button>${job.mode === 'edit' && job.image_asset_ids?.length ? `<button type="button" class="button ghost small" data-compare="${id}">原圖／結果比較</button>` : ''}` : ''}<button type="button" class="button ghost small" data-reuse="${id}">套用設定</button>${active ? `<button type="button" class="button ghost small" data-cancel="${id}">取消</button>` : ''}</div></div></article>`;
+      return `<article class="image-card" data-job-id="${id}">${done ? `<a href="/api/images/jobs/${id}/image" target="_blank" rel="noopener"><img class="image-preview" loading="lazy" src="/api/images/jobs/${id}/image" alt="${title}"></a>` : ''}<div class="image-card-body"><h3>${title}</h3><p>${escape(jobStatus(job))}</p>${active && queue?.jobs?.[job.id]?.phase === 'engine_running' ? `<progress max="100" value="${Math.min(100,Math.max(0,Number(job.progress)||0))}" aria-label="採樣進度"></progress>` : ''}<p>${done ? `${job.width} × ${job.height} · ` : ''}${job.steps} 步 · Seed ${job.seed}${done && job.rgba ? ' · RGBA' : ''}</p>${job.error ? `<p class="image-error">${escape(job.error)}</p>` : ''}<details><summary>查看描述與 LoRA</summary><p>${escape(job.original_prompt || job.prompt)}</p><p>${job.lora_name ? `LoRA：${escape(job.lora_name)} · 強度 ${escape(job.lora_strength)}` : '未使用 LoRA'}</p></details><div class="image-card-actions">${done ? `<a class="button ghost small" href="/api/images/jobs/${id}/image?download=1">下載 PNG</a><button type="button" class="button ghost small" data-continue="${id}">以此圖繼續編輯</button><button type="button" class="button ghost small" data-reference="${id}">新增為輔助參考</button>${job.mode === 'edit' && job.image_asset_ids?.length ? `<button type="button" class="button ghost small" data-compare="${id}">原圖／結果比較</button>` : ''}` : ''}<button type="button" class="button ghost small" data-reuse="${id}">套用設定</button>${active ? `<button type="button" class="button ghost small" data-cancel="${id}">取消</button>` : ''}${['completed','failed','cancelled','interrupted'].includes(job.status) ? `<button type="button" class="button danger small" data-delete="${id}">刪除圖片</button>` : ''}</div></div></article>`;
     }).join('') : '<p class="image-empty">第一張圖片，從左側描述開始。<br>生成結果會保留在這裡，也能作為下一張的參考圖。</p>';
     if (markup !== lastJobsMarkup) {
       const expanded = new Set([...$('imageJobs').querySelectorAll('article[data-job-id]')].filter(e=>e.querySelector('details')?.open).map(e=>e.dataset.jobId));
@@ -135,7 +137,7 @@
     if (polling) return;
     polling = true;
     const results = await Promise.allSettled([api(`/api/images/jobs?page=${page}`),api('/api/queue')]);
-    if (results[0].status === 'fulfilled') { const data = results[0].value; jobs = data.items; page = data.page; totalPages = data.total_pages; }
+    if (results[0].status === 'fulfilled') { const data = results[0].value; jobs = data.items.filter(job=>!deletedIds.has(job.id)); page = data.page; totalPages = data.total_pages; }
     else $('imageQueue').textContent = results[0].reason.message;
     queue = results[1].status === 'fulfilled' ? results[1].value : null;
     if (results[0].status === 'fulfilled') $('imageQueue').textContent = queue?.available ? `共享引擎：執行 ${queue.running_count} 筆 · 排隊 ${queue.pending_count} 筆 · 本機待送出 ${queue.local_waiting_count} 筆` : '暫時無法取得共享引擎佇列，工作仍可能進行中。';
@@ -164,6 +166,15 @@
     uploading=true; update();
     button.disabled = true;
     try {
+      if (button.dataset.delete) {
+        const job=jobs.find(j=>j.id === button.dataset.delete);
+        if (!job) return;
+        pendingDelete=job.id;
+        $('deleteImageName').textContent=job.name;
+        $('deleteImageError').textContent='';
+        $('deleteImageDialog').showModal();
+        return;
+      }
       if (button.dataset.cancel) { await api(`/api/images/jobs/${button.dataset.cancel}/cancel`,{method:'POST'}); await refresh(); }
       if (button.dataset.compare) {
         const job=jobs.find(j=>j.id === button.dataset.compare);
@@ -207,6 +218,21 @@
       }
     } catch(error) { $('formMessage').textContent = error.message; }
     finally { uploading=false; update(); button.disabled = false; }
+  });
+  $('cancelImageDelete').addEventListener('click',()=>{if(!uploading) {pendingDelete=null; $('deleteImageDialog').close();}});
+  $('deleteImageDialog').addEventListener('cancel',event=>{if(uploading) event.preventDefault(); else pendingDelete=null;});
+  $('confirmImageDelete').addEventListener('click',async()=>{
+    if (!pendingDelete || uploading || submitting) return;
+    const id=pendingDelete;
+    uploading=true; update(); $('confirmImageDelete').disabled=true; $('cancelImageDelete').disabled=true;
+    try {
+      await api(`/api/images/jobs/${id}`,{method:'DELETE'});
+      deletedIds.add(id); jobs=jobs.filter(j=>j.id !== id); renderJobs();
+      pendingDelete=null; $('deleteImageDialog').close();
+      $('formMessage').textContent='圖片工作已刪除；已轉存的參考圖與 ComfyUI 原始輸出仍保留。';
+      await refresh();
+    } catch(error) { $('deleteImageError').textContent=error.message; }
+    finally {uploading=false; update(); $('confirmImageDelete').disabled=false; $('cancelImageDelete').disabled=false;}
   });
   $('closeCompare').addEventListener('click',()=> $('imageCompare').close());
   $('refreshStatus').addEventListener('click',checkStatus); $('refreshJobs').addEventListener('click',refresh);
