@@ -298,3 +298,49 @@ class ImageAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(path.exists())
         self.assertTrue((self.manager.job_dir / f'{IMAGE_ID}.json').exists())
         self.assertEqual((await self.client.delete(f'/api/images/jobs/{IMAGE_ID}')).status,200)
+
+    async def test_upscale_copies_source_survives_parent_delete_and_completes_without_qwen(self):
+        self.completed_image()
+        await self.manager.gpu_lock.acquire()
+        capabilities={"ready":True,"models":[{"id":"general","installed":True}]}
+        result=io.BytesIO(); Image.new('RGBA',(64,64),(50,100,200,100)).save(result,format='PNG')
+        async def run(workflow,callback,event):
+            self.assertEqual(workflow['2']['class_type'],'UpscaleModelLoader')
+            self.assertEqual(workflow['4']['inputs']['width'],64)
+            return 'upscale',{'outputs':{'8':{'images':[{'type':'output','filename':'test.png'}]}}}
+        with patch('qwen_image.upscale_capabilities',new=AsyncMock(return_value=capabilities)), \
+             patch('qwen_image.image_capabilities',new=AsyncMock(side_effect=AssertionError('must not require Qwen'))), \
+             patch.object(self.manager.comfy,'ensure_running',new=AsyncMock()), \
+             patch.object(self.manager.comfy,'upload_asset',new=AsyncMock(return_value='host/source.png')), \
+             patch.object(self.manager.comfy,'run_prompt',side_effect=run), \
+             patch.object(self.manager.comfy,'fetch_output',new=AsyncMock(return_value=(result.getvalue(),'image/png'))):
+            response=await self.client.post(f'/api/images/jobs/{IMAGE_ID}/upscale',json={'scale':2,'model':'general'})
+            self.assertEqual(response.status,202)
+            job=await response.json()
+            self.assertEqual(job['mode'],'upscale')
+            self.assertEqual(job['status'],'queued')
+            reference=self.app['assets'].path_for(job['image_asset_ids'][0])
+            with Image.open(reference) as image:self.assertEqual(image.getpixel((0,0))[3],100)
+            self.assertEqual((await self.client.delete(f'/api/images/jobs/{IMAGE_ID}')).status,200)
+            self.assertTrue(reference.exists())
+            self.manager.gpu_lock.release()
+            await self.manager.tasks[job['id']]
+        finished=self.manager.jobs[job['id']]
+        self.assertEqual(finished['status'],'completed')
+        self.assertEqual((finished['width'],finished['height']),(64,64))
+
+    async def test_upscale_validation_and_missing_engine_model_create_no_job(self):
+        self.completed_image()
+        for payload in ({'scale':8},{'model':'missing'},[]):
+            self.assertEqual((await self.client.post(f'/api/images/jobs/{IMAGE_ID}/upscale',json=payload)).status,400)
+        with patch('qwen_image.upscale_capabilities',new=AsyncMock(return_value={'ready':False,'error':'missing models'})):
+            self.assertEqual((await self.client.post(f'/api/images/jobs/{IMAGE_ID}/upscale',json={'scale':2})).status,400)
+        self.assertEqual(list(self.manager.jobs),[IMAGE_ID])
+
+    async def test_upscale_dimensions_must_match_completed_output(self):
+        job_id='b'*32
+        self.manager.jobs[job_id]={'id':job_id,'mode':'upscale','width':64,'height':64}
+        result=io.BytesIO(); Image.new('RGB',(32,32)).save(result,format='PNG')
+        with patch.object(self.manager.comfy,'fetch_output',new=AsyncMock(return_value=(result.getvalue(),'image/png'))):
+            with self.assertRaises(RequestError):
+                await self.manager._complete(job_id,{'outputs':{'8':{'images':[{'type':'output','filename':'wrong.png'}]}}})

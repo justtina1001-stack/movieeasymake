@@ -17,6 +17,7 @@ from PIL import Image
 from domain import RequestError
 from queue_cancel import QueueCancelError
 from qwen_image_models import MODEL_FILES, LICENSE_URL
+from image_upscale import compile_upscale, build_upscale_workflow, upscale_capabilities, MODELS as UPSCALE_MODELS
 
 ACTIVE = {"queued", "preparing", "running"}
 MAX_SEED = 2**53 - 1
@@ -183,6 +184,32 @@ class ImageJobManager:
 
     def create(self, payload):
         compiled = compile_image_request(payload)
+        return self._create_job(compiled)
+
+    async def create_upscale(self, source_id, payload):
+        async with self.file_lock:
+            path = self.output_path(source_id)
+            source = self.jobs[source_id]
+            with Image.open(path) as image:
+                compiled = compile_upscale(payload, image.size)
+                source_transparent = "A" in image.getbands() and image.getchannel("A").getextrema()[0] < 255
+            status = await upscale_capabilities(self.comfy)
+            if not status["ready"]:
+                raise RequestError(status["error"])
+            if not any(m["id"] == compiled["upscale_model"] and m["installed"] for m in status["models"]):
+                raise RequestError("所選放大模型尚未安裝在目前引擎。")
+            def save_source():
+                with Image.open(path) as image:
+                    return self.assets.save_image(image, "upscale-source.png", "qwen-image-reference")
+            asset = await asyncio.to_thread(save_source)
+            description = f"{UPSCALE_MODELS[compiled['upscale_model']]['label']} · {compiled['scale']} 倍增強放大"
+            compiled.update(mode="upscale", name=f"{source['name'][:65]} · {compiled['scale']} 倍放大",
+                            prompt=description, original_prompt=description, source_job_id=source_id,
+                            image_asset_ids=[asset["id"]], steps=None, seed=None, transparent=source_transparent,
+                            reference_resolution=1024, lora_name="", lora_strength=0)
+            return self._create_job(compiled)
+
+    def _create_job(self, compiled):
         for asset_id in compiled["image_asset_ids"]:
             path = self.assets.path_for(asset_id)
             try:
@@ -213,6 +240,9 @@ class ImageJobManager:
         await asyncio.to_thread(temporary.write_bytes, content)
         with Image.open(temporary) as image:
             width, height = image.size
+            job = self.jobs[job_id]
+            if job["mode"] == "upscale" and (width, height) != (job["width"], job["height"]):
+                raise RequestError("放大結果尺寸與要求不符。")
             rgba = image.mode == "RGBA"
             image.verify()
         temporary.replace(path)
@@ -226,11 +256,14 @@ class ImageJobManager:
             async with self.gpu_lock:
                 if event.is_set():
                     raise asyncio.CancelledError
-                self.update(job_id, status="preparing", current_node="檢查圖片模型")
+                is_upscale = job["mode"] == "upscale"
+                self.update(job_id, status="preparing", current_node="檢查放大模型" if is_upscale else "檢查圖片模型")
                 await self.comfy.ensure_running()
-                status = await image_capabilities(self.comfy)
+                status = await upscale_capabilities(self.comfy) if is_upscale else await image_capabilities(self.comfy)
                 if not status["ready"]:
                     raise RequestError(status["error"])
+                if is_upscale and not any(m["id"] == job["upscale_model"] and m["installed"] for m in status["models"]):
+                    raise RequestError("所選放大模型已不在目前引擎中。")
                 if job.get("lora_name") and job.get("lora_strength", 1) > 0:
                     if not status.get("lora_supported") or job["lora_name"] not in status.get("loras", []):
                         raise RequestError("所選 LoRA 未在目前引擎提供；請重新檢查模型，或選擇不使用 LoRA。")
@@ -239,7 +272,7 @@ class ImageJobManager:
                     uploaded[asset_id] = await self.comfy.upload_asset(self.assets.path_for(asset_id), f"h3studio/{job_id}")
                 if event.is_set():
                     raise asyncio.CancelledError
-                workflow = build_image_workflow(job, uploaded, job_id)
+                workflow = (build_upscale_workflow if is_upscale else build_image_workflow)(job, uploaded, job_id)
                 (self.job_dir / f"{job_id}.workflow.json").write_text(json.dumps(workflow, ensure_ascii=False), encoding="utf-8")
                 self.update(job_id, status="running", current_node="送出圖片工作", generation_started_at=now())
                 async def callback(update):
@@ -355,6 +388,10 @@ def register_image_routes(app, static_dir, data_dir):
         return web.FileResponse(static_dir / "images.html")
     async def status(request):
         return web.json_response(await image_capabilities(manager.comfy), headers={"Cache-Control": "no-store"})
+    async def upscale_status(request):
+        return web.json_response(await upscale_capabilities(manager.comfy), headers={"Cache-Control": "no-store"})
+    async def upscale(request):
+        return web.json_response(await manager.create_upscale(request.match_info["job_id"], await request.json()), status=202)
     async def create(request):
         payload = await request.json()
         return web.json_response(manager.create(payload), status=202)
@@ -392,12 +429,14 @@ def register_image_routes(app, static_dir, data_dir):
         await asyncio.gather(*tasks, return_exceptions=True)
     app.router.add_get("/images", page)
     app.router.add_get("/api/images/status", status)
+    app.router.add_get("/api/images/upscale/status", upscale_status)
     app.router.add_get("/api/images/jobs", listing)
     app.router.add_post("/api/images/jobs", create)
     app.router.add_delete("/api/images/jobs/{job_id}", delete)
     app.router.add_post("/api/images/jobs/{job_id}/cancel", cancel)
     app.router.add_get("/api/images/jobs/{job_id}/image", output)
     app.router.add_post("/api/images/jobs/{job_id}/reference", use_reference)
+    app.router.add_post("/api/images/jobs/{job_id}/upscale", upscale)
     app.on_startup.append(startup)
     app.on_cleanup.append(shutdown)
     return manager

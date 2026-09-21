@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../static/images.js'), 'utf8');
 const a='a'.repeat(32), b='b'.repeat(32), c='c'.repeat(32);
 
-async function fixture({draft={}, status={}, jobs=[], deleteError=false}={}) {
+async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscaleStatus={}}={}) {
   const elements = new Map(), calls=[];
   let stored = JSON.stringify(draft);
   const defaults={imageMode:'generate',imageWidth:'1024',imageHeight:'1024',imageSteps:'25',imageSeed:'42',referenceResolution:'1024',imageLoraStrength:'1'};
@@ -24,6 +24,7 @@ async function fixture({draft={}, status={}, jobs=[], deleteError=false}={}) {
       calls.push({url,options});
       if(options?.method === 'DELETE') return {ok:!deleteError,json:async()=>deleteError?{error:'刪除失敗'}:{deleted:true}};
       const data = url === '/api/images/status' ? {ready:true,lora_supported:true,loras:[],...status} :
+        url === '/api/images/upscale/status' ? {ready:true,models:[{id:'general',installed:true},{id:'anime',installed:true}],...upscaleStatus} :
         url.startsWith('/api/images/jobs?page=') ? {items:jobs,page:1,total_pages:1} :
         url === '/api/queue' ? {available:true,jobs:{},running_count:0,pending_count:0,local_waiting_count:0} :
         url.endsWith('/reference') ? {id:c} : {seed:17,id:'job'};
@@ -140,4 +141,34 @@ test('active image jobs show cancel but not delete',async()=>{
   const f=await fixture({jobs:[{id:a,status:'running',name:'圖片'}]});
   assert.equal(f.el('imageJobs').innerHTML.includes('data-delete'),false);
   assert.equal(f.el('imageJobs').innerHTML.includes('data-cancel'),true);
+});
+
+
+test('upscale preview shows exact dimensions and submits a separate job without changing the draft',async()=>{
+  const f=await fixture({jobs:[{id:a,name:'測試',status:'completed',width:512,height:768}],draft:{imagePrompt:'保留原提示'}});
+  await f.click('imageJobs',{upscale:a});
+  assert.equal(f.el('upscaleDialog').open,true);
+  assert.match(f.el('upscaleSize').textContent,/512 × 768 → 1024 × 1536/);
+  assert.equal(f.el('submitUpscale').disabled,false);
+  f.el('upscaleScale').value='4';await f.fire('upscaleScale','input');
+  await f.fire('submitUpscale','click');
+  const call=f.calls.find(c=>c.url===`/api/images/jobs/${a}/upscale`);
+  assert.deepEqual(JSON.parse(call.options.body),{scale:4,model:'general'});
+  assert.equal(f.el('imagePrompt').value,'保留原提示');
+});
+
+test('oversized upscale and missing model block submission',async()=>{
+  for(const config of [{jobs:[{id:a,width:3000,height:2000}]},{jobs:[{id:a,width:512,height:512}],upscaleStatus:{ready:false,error:'後端尚未更新'}}]) {
+    const f=await fixture(config);await f.click('imageJobs',{upscale:a});
+    assert.equal(f.el('submitUpscale').disabled,true);
+    await f.fire('submitUpscale','click');
+    assert.equal(f.calls.some(c=>c.url.endsWith('/upscale')),false);
+  }
+});
+
+test('upscale results expose compare and further editing without invalid seed reuse',async()=>{
+  const f=await fixture({jobs:[{id:a,mode:'upscale',scale:2,status:'completed',image_asset_ids:[b]}]});
+  const html=f.el('imageJobs').innerHTML;
+  assert.match(html,/2 倍增強放大/);assert.match(html,/data-compare/);assert.match(html,/data-continue/);
+  assert.equal(html.includes('data-reuse'),false);assert.equal(html.includes('Seed null'),false);
 });

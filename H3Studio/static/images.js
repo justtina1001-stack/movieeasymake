@@ -7,6 +7,7 @@
   let refs = [], ready = false, uploading = false, submitting = false, page = 1, totalPages = 1, jobs = [], queue = null, polling = false;
   const deletedIds = new Set();
   let pendingDelete = null;
+  let pendingUpscale = null, upscaleModels = [], upscaleReady = false;
   let selectedLora = '', loraSupported = false, availableLoras = [], lastJobsMarkup = '';
   const templates = {
     color:'以圖 1 為主圖，將【指定物件】的顏色改為【目標顏色】，保留原本人物五官、造型、姿勢、構圖與其他物件。',
@@ -123,7 +124,7 @@
     const markup = jobs.length ? jobs.map(job => {
       const active = ['queued','preparing','running'].includes(job.status), done = job.status === 'completed';
       const title = escape(job.name), id = escape(job.id);
-      return `<article class="image-card" data-job-id="${id}">${done ? `<a href="/api/images/jobs/${id}/image" target="_blank" rel="noopener"><img class="image-preview" loading="lazy" src="/api/images/jobs/${id}/image" alt="${title}"></a>` : ''}<div class="image-card-body"><h3>${title}</h3><p>${escape(jobStatus(job))}</p>${active && queue?.jobs?.[job.id]?.phase === 'engine_running' ? `<progress max="100" value="${Math.min(100,Math.max(0,Number(job.progress)||0))}" aria-label="採樣進度"></progress>` : ''}<p>${done ? `${job.width} × ${job.height} · ` : ''}${job.steps} 步 · Seed ${job.seed}${done && job.rgba ? ' · RGBA' : ''}</p>${job.error ? `<p class="image-error">${escape(job.error)}</p>` : ''}<details><summary>查看描述與 LoRA</summary><p>${escape(job.original_prompt || job.prompt)}</p><p>${job.lora_name ? `LoRA：${escape(job.lora_name)} · 強度 ${escape(job.lora_strength)}` : '未使用 LoRA'}</p></details><div class="image-card-actions">${done ? `<a class="button ghost small" href="/api/images/jobs/${id}/image?download=1">下載 PNG</a><button type="button" class="button ghost small" data-continue="${id}">以此圖繼續編輯</button><button type="button" class="button ghost small" data-reference="${id}">新增為輔助參考</button>${job.mode === 'edit' && job.image_asset_ids?.length ? `<button type="button" class="button ghost small" data-compare="${id}">原圖／結果比較</button>` : ''}` : ''}<button type="button" class="button ghost small" data-reuse="${id}">套用設定</button>${active ? `<button type="button" class="button ghost small" data-cancel="${id}">取消</button>` : ''}${['completed','failed','cancelled','interrupted'].includes(job.status) ? `<button type="button" class="button danger small" data-delete="${id}">刪除圖片</button>` : ''}</div></div></article>`;
+      return `<article class="image-card" data-job-id="${id}">${done ? `<a href="/api/images/jobs/${id}/image" target="_blank" rel="noopener"><img class="image-preview" loading="lazy" src="/api/images/jobs/${id}/image" alt="${title}"></a>` : ''}<div class="image-card-body"><h3>${title}</h3><p>${escape(jobStatus(job))}</p>${active && queue?.jobs?.[job.id]?.phase === 'engine_running' ? `<progress max="100" value="${Math.min(100,Math.max(0,Number(job.progress)||0))}" aria-label="處理進度"></progress>` : ''}<p>${done ? `${job.width} × ${job.height} · ` : ''}${job.mode === 'upscale' ? `${job.scale} 倍增強放大` : `${job.steps} 步 · Seed ${job.seed}`}${done && job.rgba ? ' · RGBA' : ''}</p>${job.error ? `<p class="image-error">${escape(job.error)}</p>` : ''}<details><summary>查看描述與 LoRA</summary><p>${escape(job.original_prompt || job.prompt)}</p><p>${job.lora_name ? `LoRA：${escape(job.lora_name)} · 強度 ${escape(job.lora_strength)}` : '未使用 LoRA'}</p></details><div class="image-card-actions">${done ? `<a class="button ghost small" href="/api/images/jobs/${id}/image?download=1">下載 PNG</a><button type="button" class="button ghost small" data-continue="${id}">以此圖繼續編輯</button><button type="button" class="button ghost small" data-upscale="${id}">增強放大</button><button type="button" class="button ghost small" data-reference="${id}">新增為輔助參考</button>${['edit','upscale'].includes(job.mode) && job.image_asset_ids?.length ? `<button type="button" class="button ghost small" data-compare="${id}">原圖／結果比較</button>` : ''}` : ''}${job.mode !== 'upscale' ? `<button type="button" class="button ghost small" data-reuse="${id}">套用設定</button>` : ''}${active ? `<button type="button" class="button ghost small" data-cancel="${id}">取消</button>` : ''}${['completed','failed','cancelled','interrupted'].includes(job.status) ? `<button type="button" class="button danger small" data-delete="${id}">刪除圖片</button>` : ''}</div></div></article>`;
     }).join('') : '<p class="image-empty">第一張圖片，從左側描述開始。<br>生成結果會保留在這裡，也能作為下一張的參考圖。</p>';
     if (markup !== lastJobsMarkup) {
       const expanded = new Set([...$('imageJobs').querySelectorAll('article[data-job-id]')].filter(e=>e.querySelector('details')?.open).map(e=>e.dataset.jobId));
@@ -166,6 +167,21 @@
     uploading=true; update();
     button.disabled = true;
     try {
+      if (button.dataset.upscale) {
+        const job=jobs.find(j=>j.id === button.dataset.upscale); if(!job) return;
+        pendingUpscale=job; upscaleReady=false; upscaleModels=[];
+        $('upscaleScale').value='2'; $('upscaleModel').value='general';
+        $('upscaleSource').textContent=job.name; $('upscaleError').textContent='';
+        $('upscaleStatus').textContent='正在檢查目前引擎的放大模型…';
+        updateUpscale(); $('upscaleDialog').showModal();
+        try {
+          const status=await api('/api/images/upscale/status');
+          upscaleReady=status.ready === true; upscaleModels=status.models || [];
+          const first=upscaleModels.find(m=>m.installed); if(first) $('upscaleModel').value=first.id;
+          $('upscaleStatus').textContent=status.error || 'Real-ESRGAN 放大模型已就緒';
+        } catch(error) { $('upscaleStatus').textContent=error.message; }
+        updateUpscale(); return;
+      }
       if (button.dataset.delete) {
         const job=jobs.find(j=>j.id === button.dataset.delete);
         if (!job) return;
@@ -218,6 +234,28 @@
       }
     } catch(error) { $('formMessage').textContent = error.message; }
     finally { uploading=false; update(); button.disabled = false; }
+  });
+  function updateUpscale() {
+    const job=pendingUpscale, scale=Number($('upscaleScale').value);
+    const fits=job && job.width*job.height <= 4194304 && Math.max(job.width,job.height)*scale <= 4096;
+    const installed=upscaleModels.some(m=>m.id === $('upscaleModel').value && m.installed);
+    $('upscaleSize').textContent=job ? `${job.width} × ${job.height} → ${job.width*scale} × ${job.height*scale}${fits ? '' : ' · 超出尺寸上限，請降低倍率或選擇較小來源'}` : '';
+    $('submitUpscale').disabled=!upscaleReady || !fits || !installed || submitting;
+    if(upscaleReady) $('upscaleStatus').textContent=installed ? 'Real-ESRGAN 放大模型已就緒' : '此模型尚未安裝在目前引擎，請主機執行 setup_image_upscale.bat。';
+  }
+  $('upscaleScale').addEventListener('input',updateUpscale); $('upscaleModel').addEventListener('input',updateUpscale);
+  $('cancelUpscale').addEventListener('click',()=>{if(!submitting) {pendingUpscale=null; $('upscaleDialog').close();}});
+  $('upscaleDialog').addEventListener('cancel',event=>{if(submitting) event.preventDefault(); else pendingUpscale=null;});
+  $('submitUpscale').addEventListener('click',async()=>{
+    if(!pendingUpscale || $('submitUpscale').disabled || submitting || uploading) return;
+    const source=pendingUpscale;
+    submitting=true; update(); updateUpscale(); $('cancelUpscale').disabled=true;
+    try {
+      await api(`/api/images/jobs/${source.id}/upscale`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scale:Number($('upscaleScale').value),model:$('upscaleModel').value})});
+      pendingUpscale=null; $('upscaleDialog').close(); page=1;
+      $('formMessage').textContent='已加入增強放大佇列，完成後會另存新圖片。'; await refresh();
+    } catch(error) { $('upscaleError').textContent=error.message; }
+    finally {submitting=false; update(); updateUpscale(); $('cancelUpscale').disabled=false;}
   });
   $('cancelImageDelete').addEventListener('click',()=>{if(!uploading) {pendingDelete=null; $('deleteImageDialog').close();}});
   $('deleteImageDialog').addEventListener('cancel',event=>{if(uploading) event.preventDefault(); else pendingDelete=null;});
