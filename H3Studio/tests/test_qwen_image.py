@@ -4,20 +4,83 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image
-from aiohttp import FormData
+from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
 import app as studio
 from domain import RequestError
-from qwen_image import compile_image_request, build_image_workflow, ImageJobManager
+from qwen_image import compile_image_request, build_image_workflow, ImageJobManager, is_image_lora, image_capabilities
 from queue_presentation import build_queue_view
+from qwen_image_models import MODEL_FILES
 
 IMAGE_ID = "a" * 32
 
 
+class ImageCapabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_remote_engine_lists_only_dedicated_adapters_and_optional_loader_failure_is_nonfatal(self):
+        missing_loader = False
+        async def info(request):
+            name = request.match_info["name"]
+            if name == "LoraLoaderModelOnly":
+                if missing_loader:
+                    raise web.HTTPNotFound()
+                field, files = "lora_name", ["h3.safetensors", r"qwen_image_2_1\style.safetensors", "qwen_image_2_1/../old.safetensors"]
+            elif name == "TextEncodeQwenImage21":
+                return web.json_response({name:{"input":{}}})
+            else:
+                index, field = {"UNETLoader":(0,"unet_name"),"CLIPLoader":(1,"clip_name"),"VAELoader":(2,"vae_name")}[name]
+                files = [MODEL_FILES[index][1]]
+            return web.json_response({name:{"input":{"required":{field:[files]}}}})
+        engine = web.Application()
+        engine.router.add_get('/object_info/{name}',info)
+        server = TestServer(engine)
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+        comfy = SimpleNamespace(base_url=str(server.make_url('/')).rstrip('/'),mode='remote',auth_headers=lambda:{})
+        result = await image_capabilities(comfy)
+        self.assertTrue(result['ready'])
+        self.assertTrue(result['lora_supported'])
+        self.assertEqual(result['loras'],[r"qwen_image_2_1\style.safetensors"])
+        missing_loader = True
+        result = await image_capabilities(comfy)
+        self.assertTrue(result['ready'])
+        self.assertFalse(result['lora_supported'])
+
+
 class ImageCompileTests(unittest.TestCase):
+    def test_lora_routes_only_model_and_zero_strength_bypasses(self):
+        payload = {"prompt":"保持人物", "lora_name":"qwen_image_2_1/style.safetensors", "lora_strength":0.65}
+        compiled = compile_image_request(payload)
+        graph = build_image_workflow(compiled, {}, "test")
+        self.assertEqual(graph["9"]["class_type"], "LoraLoaderModelOnly")
+        self.assertEqual(graph["9"]["inputs"]["strength_model"], 0.65)
+        self.assertEqual(graph["6"]["inputs"]["model"], ["9", 0])
+        self.assertEqual(graph["4"]["inputs"]["clip"], ["2", 0])
+        compiled["lora_strength"] = 0
+        graph = build_image_workflow(compiled, {}, "test")
+        self.assertNotIn("9", graph)
+        self.assertEqual(graph["6"]["inputs"]["model"], ["1", 0])
+
+    def test_lora_rejects_other_families_traversal_and_nonfinite_strengths(self):
+        self.assertTrue(is_image_lora(r"qwen_image_2_1\角色.safetensors"))
+        for name in ("h3studio_custom/a.safetensors", "qwen_image_2_1/../a.safetensors",
+                     "qwen_image_2_1/a.pt", "qwen_image_2_1/C:/a.safetensors", None, ["x"]):
+            with self.subTest(name=name), self.assertRaises(RequestError):
+                compile_image_request({"prompt":"x", "lora_name":name})
+        for strength in (True, "1", float("nan"), float("inf"), -0.1, 1.6):
+            with self.subTest(strength=strength), self.assertRaises(RequestError):
+                compile_image_request({"prompt":"x", "lora_strength":strength})
+
+    def test_edit_preserves_explicit_reference_order(self):
+        first, second = "b"*32, "a"*32
+        job = compile_image_request({"prompt":"改圖 1", "mode":"edit", "image_asset_ids":[first,second]})
+        graph = build_image_workflow(job, {first:"main.png",second:"style.png"}, "test")
+        self.assertEqual(graph["12"]["inputs"]["image"], "main.png")
+        self.assertEqual(graph["14"]["inputs"]["image"], "style.png")
+
     def test_generation_matches_official_sampling_and_transparent_png_path(self):
         compiled = compile_image_request({"prompt": "紅色小龍", "transparent": True, "seed_auto": False, "seed": 42})
         graph = build_image_workflow(compiled, {}, "test")
@@ -133,6 +196,18 @@ class ImageAPITests(unittest.IsolatedAsyncioTestCase):
             await self.manager.tasks[job["id"]]
             run.assert_not_called()
             self.assertEqual(job["status"],"failed")
+
+    async def test_missing_lora_fails_without_sending_or_uploading(self):
+        with patch("qwen_image.image_capabilities",new=AsyncMock(return_value={"ready":True,"lora_supported":True,"loras":[]})), \
+             patch.object(self.manager.comfy,"ensure_running",new=AsyncMock()), \
+             patch.object(self.manager.comfy,"upload_asset",new=AsyncMock()) as upload, \
+             patch.object(self.manager.comfy,"run_prompt",new=AsyncMock()) as run:
+            job = self.manager.create({"prompt":"test", "lora_name":"qwen_image_2_1/missing.safetensors"})
+            await self.manager.tasks[job["id"]]
+            run.assert_not_called()
+            upload.assert_not_called()
+            self.assertEqual(job["status"],"failed")
+            self.assertIn("LoRA",job["error"])
 
     async def test_recovery_reads_existing_history_without_resubmission(self):
         job_id = "b" * 32

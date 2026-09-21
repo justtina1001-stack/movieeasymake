@@ -22,6 +22,16 @@ ACTIVE = {"queued", "preparing", "running"}
 MAX_SEED = 2**53 - 1
 
 
+def is_image_lora(name):
+    """Only expose the engine's explicitly separated 2.1 adapter collection."""
+    if not isinstance(name, str):
+        return False
+    parts = name.replace("\\", "/").split("/")
+    return (len(parts) >= 2 and parts[0] == "qwen_image_2_1"
+            and all(p and p not in (".", "..") and ":" not in p for p in parts)
+            and name.lower().endswith(".safetensors"))
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -62,11 +72,18 @@ def compile_image_request(payload):
     if len(name) > 80:
         raise RequestError("圖片名稱最多 80 字。")
     text = prompt.strip()
+    lora = payload.get("lora_name", "")
+    if not isinstance(lora, str) or (lora and not is_image_lora(lora)):
+        raise RequestError("請選擇 Qwen-Image-2.1 專用資料夾中的 LoRA。")
+    strength = payload.get("lora_strength", 1.0)
+    if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(strength) or not 0 <= strength <= 1.5:
+        raise RequestError("LoRA 強度必須介於 0～1.5。")
     if payload.get("transparent", False):
         text = f"This is an RGBA format image with transparency. {text}\nThe image has an alpha channel and a transparent background."
     return dict(name=name, prompt=text, original_prompt=prompt, mode=mode, image_asset_ids=refs,
                 width=width, height=height, steps=steps, seed=seed,
-                transparent=payload.get("transparent", False), reference_resolution=resolution)
+                transparent=payload.get("transparent", False), reference_resolution=resolution,
+                lora_name=lora, lora_strength=strength)
 
 
 def build_image_workflow(compiled, uploaded, job_id):
@@ -86,6 +103,10 @@ def build_image_workflow(compiled, uploaded, job_id):
         "7": node("VAEDecode", samples=["6", 0], vae=["3", 0]),
         "8": node("SaveImage", images=["7", 0], filename_prefix=f"H3Studio/QwenImage21/{job_id}"),
     }
+    if compiled.get("lora_name") and compiled.get("lora_strength", 1) > 0:
+        workflow["9"] = node("LoraLoaderModelOnly", model=["1", 0],
+                             lora_name=compiled["lora_name"], strength_model=compiled["lora_strength"])
+        workflow["6"]["inputs"]["model"] = ["9", 0]
     for index, asset_id in enumerate(compiled["image_asset_ids"], 1):
         load, alpha = str(10 + index * 2), str(11 + index * 2)
         workflow[load] = node("LoadImage", image=uploaded[asset_id])
@@ -96,7 +117,7 @@ def build_image_workflow(compiled, uploaded, job_id):
 
 async def image_capabilities(comfy):
     result = {"ready": False, "nodes_ready": False, "models": [], "license_url": LICENSE_URL,
-              "mode": comfy.mode, "error": None}
+              "mode": comfy.mode, "error": None, "lora_supported": False, "loras": []}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             async def info(name):
@@ -118,6 +139,14 @@ async def image_capabilities(comfy):
                 result["error"] = "引擎尚未載入 Qwen-Image-2.1 節點，請主機管理者更新至支援此模型的 ComfyUI（本版驗證 v0.37.0）並重啟。"
             elif not result["ready"]:
                 result["error"] = "模型尚未齊全，請在 GPU 主機執行 setup_qwen_image.bat。遠端使用者不需下載模型。"
+            # Optional adapters must never prevent base-model generation.
+            try:
+                lora = await info("LoraLoaderModelOnly")
+                result["lora_supported"] = bool(lora)
+                choices = lora.get("input", {}).get("required", {}).get("lora_name", [[]])[0]
+                result["loras"] = sorted(n for n in choices if is_image_lora(n))
+            except (aiohttp.ClientError, TimeoutError, ValueError, TypeError):
+                pass
     except (aiohttp.ClientError, TimeoutError, ValueError, TypeError, OSError):
         result["error"] = "暫時無法檢查引擎；請確認 ComfyUI 已啟動或等待目前運算完成後重試。"
     return result
@@ -201,6 +230,9 @@ class ImageJobManager:
                 status = await image_capabilities(self.comfy)
                 if not status["ready"]:
                     raise RequestError(status["error"])
+                if job.get("lora_name") and job.get("lora_strength", 1) > 0:
+                    if not status.get("lora_supported") or job["lora_name"] not in status.get("loras", []):
+                        raise RequestError("所選 LoRA 未在目前引擎提供；請重新檢查模型，或選擇不使用 LoRA。")
                 uploaded = {}
                 for asset_id in job["image_asset_ids"]:
                     uploaded[asset_id] = await self.comfy.upload_asset(self.assets.path_for(asset_id), f"h3studio/{job_id}")

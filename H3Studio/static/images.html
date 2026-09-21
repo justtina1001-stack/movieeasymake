@@ -4,7 +4,7 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>圖片工作室 · MiniMax H3 Studio</title>
   <link rel="stylesheet" href="/static/styles.css?v=20260921-qwen-image">
-  <link rel="stylesheet" href="/static/images.css?v=20260921">
+  <link rel="stylesheet" href="/static/images.css?v=20260921-edit2">
 </head>
 <body>
   <header class="topbar"><a class="brand" href="/"><span class="brand-mark">H3</span><span><strong>MiniMax H3 Studio</strong><small>IMAGE WORKSPACE</small></span></a><a class="button ghost small" href="/">返回影片工作室</a></header>
@@ -17,16 +17,18 @@
         <div class="image-section-heading"><span class="eyebrow">01 / CREATE</span><h2>圖片設定</h2></div>
         <label>生成方式<select id="imageMode"><option value="generate">文字生圖</option><option value="edit">參考圖編輯</option></select></label>
         <label>工作名稱<input id="imageName" maxlength="80" placeholder="例如：角色三視圖、透明道具"></label>
-        <label>圖片描述<textarea id="imagePrompt" required maxlength="8000" rows="7" placeholder="描述主體、構圖、光線、風格與需要的文字。編輯時，可用「圖 1」「圖 2」指定素材。"></textarea></label>
         <div id="referenceSection" class="hidden">
-          <label class="image-upload">參考圖片 · 最多 10 張<input id="referenceFiles" type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp"></label>
-          <p class="image-hint">依上傳順序編號。輸出沿用圖 1 的比例；編輯解析度由下方「參考圖處理解析度」決定。透明 PNG 會保留透明通道。</p>
+          <label id="referenceDrop" class="image-upload">① 上傳或拖入圖片 · 最多 10 張<input id="referenceFiles" type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp"></label>
+          <p class="image-hint">圖 1 是編輯主圖，決定輸出比例；其餘圖片可供角色、服裝或風格參考。可調整順序，調整後請同步修改描述中的圖號。</p>
           <div id="referenceList" class="image-references"></div>
+          <div class="image-edit-help"><label>② 選擇編輯方向<select id="editTemplate"><option value="">自行描述</option><option value="color">更換顏色</option><option value="background">更換背景</option><option value="style">參考另一張圖的風格</option><option value="detail">改善細節</option><option value="cutout">去背／擷取主體</option></select></label><button id="insertTemplate" type="button" class="button ghost small">加入描述範例</button><p class="image-hint">範例會附加在下方，請填妥【】中的內容後送出。</p></div>
         </div>
+        <label><span id="promptLabel">圖片描述</span><textarea id="imagePrompt" required maxlength="8000" rows="7" placeholder="例如：將圖 1 外套改成深藍色，保留同一人物的五官、髮型、姿勢與背景。多圖時請明確指定各圖用途。"></textarea></label>
         <div id="generationSize" class="image-fields"><label>寬度<input id="imageWidth" type="number" min="256" max="2048" step="32" value="1024" required></label><label>高度<input id="imageHeight" type="number" min="256" max="2048" step="32" value="1024" required></label></div>
         <div id="editingSize" class="hidden"><label>參考圖處理解析度<select id="referenceResolution"><option value="512">512 · 省顯存測試</option><option value="1024" selected>1024 · 建議起點</option><option value="2048">2048 · 較耗顯存</option></select></label></div>
         <label class="image-check"><input id="imageTransparent" type="checkbox">生成透明背景 PNG</label>
         <p class="image-hint">透明背景由模型生成，可能仍需清理邊緣。16 GB 顯卡建議從 1024、單張參考開始。</p>
+        <details class="image-advanced"><summary>LoRA · 角色／風格擴充</summary><label>目前引擎的 Qwen-Image-2.1 LoRA<select id="imageLora"><option value="">不使用 LoRA</option></select></label><label>LoRA 強度<input id="imageLoraStrength" type="number" min="0" max="1.5" step="0.05" value="1" disabled></label><p id="loraStatus" class="image-hint" role="status">正在檢查…</p><p class="image-hint">僅適用以 Qwen-Image-2.1 訓練、相容 ComfyUI 的 LoRA。請主機管理者放入 ComfyUI/models/loras/qwen_image_2_1，再按「重新檢查」。資料夾分類不代表已驗證相容；舊版 Qwen、FLUX、H3 LoRA 請勿混用。若作者提供觸發詞，請自行加入描述。強度 0 表示停用。</p></details>
         <details class="image-advanced"><summary>採樣與 Seed</summary><label>採樣步數<input id="imageSteps" type="number" min="1" max="50" value="25" required></label><label class="image-check"><input id="imageSeedAuto" type="checkbox" checked>AUTO · 每次生成使用新 Seed</label><label>固定 Seed<input id="imageSeed" type="number" min="0" max="9007199254740991" value="42" disabled></label><p class="image-hint">預設 25 步供比較；官方完整品質範例使用 40 步。增加步數會延長生成時間。</p></details>
         <button id="generateImage" type="submit" class="button primary" disabled>加入生成佇列 →</button>
         <p id="formMessage" class="image-hint" role="status" aria-live="polite"></p>
@@ -39,6 +41,7 @@
       </section>
     </div>
   </main>
-  <script src="/static/images.js?v=20260921"></script>
+  <dialog id="imageCompare" class="image-compare" aria-labelledby="compareTitle"><div class="image-section-heading"><h2 id="compareTitle">原圖與結果</h2><button id="closeCompare" type="button" class="button ghost small">關閉比較</button></div><div class="image-compare-grid"><figure><figcaption>送出時的主圖（圖 1）</figcaption><img id="compareBefore" alt="編輯前的主圖"></figure><figure><figcaption>生成結果</figcaption><img id="compareAfter" alt="編輯後的生成結果"></figure></div></dialog>
+  <script src="/static/images.js?v=20260921-edit2"></script>
 </body>
 </html>
