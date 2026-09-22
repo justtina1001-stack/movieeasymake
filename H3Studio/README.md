@@ -1,5 +1,25 @@
 # MiniMax H3 Studio
 
+## INT8 影片 VAE 與 FP16 回退（2026-09-22）
+
+影片 VAE 提供「自動／INT8／FP16」選擇（API 欄位 `video_vae`：`auto`／`int8`／`fp16`）。自動模式在引擎為 ComfyUI `0.37.0` 以上且已安裝 INT8 VAE 時優先使用 INT8，否則使用 FP16；明確選 INT8 時，模型缺少或引擎版本不符會報錯。需要維持 FP16 輸出時可直接選 FP16。
+
+更新 Studio 並重新啟動後，在「模型更新」安裝版本 `2026.09.22-1`。本機生成的同事各自在自己的 GPU 電腦更新；遠端模式由實際 GPU 主機管理者安裝。[官方 INT8 ConvRot 權重](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/7a2065e37f5ff9d3c4e605f164d4cac388eff8e8/vae/minimax_h3_video_vae_int8_convrot.safetensors) 新增約 2.81 GB（2.62 GiB），安裝清單固定來源版本、大小與 SHA-256，保留原有 `minimax_h3_video_vae_fp16.safetensors` 供回退。完整安裝包含兩種影片 VAE。
+
+本版新引擎固定 ComfyUI `v0.37.0`／`73c9bad4`，這也是本次 INT8 VAE 的驗證基準。**模型更新不會自動升級既有核心或其依賴。** 舊引擎需等工作完成、備份後更新核心及 `requirements.txt`，再重啟引擎與 Studio；只重新整理瀏覽器不會更新後端。
+
+舊版核心若要升到本次驗證版本：結束所有工作並關閉 ComfyUI，先記錄原 commit／套件版本、備份 `ComfyUI/user/`（含資料庫）。沒有自行修改核心的安裝，可在專案根目錄的 PowerShell 逐行執行下列指令；任一步失敗就先處理錯誤，不使用強制覆蓋。已是 0.37.0 或較新版本則不用降版。
+
+```powershell
+git -C .\ComfyUI fetch origin 73c9bad4d21e7addbe1d13bc92eee0f1431b017d --depth 1
+git -C .\ComfyUI checkout --detach 73c9bad4d21e7addbe1d13bc92eee0f1431b017d
+& .\ComfyUI\.venv\Scripts\python.exe -m pip install -r .\ComfyUI\requirements.txt
+```
+
+重新啟動後，「影片解碼」選「自動」，提示顯示「目前引擎會優先使用 INT8」即可確認；如果只更新了網頁但背景 Studio 還是舊版，選單會提示「Studio 待重啟」。本次程式驗證包含 283 項 Python 與 62 項前端測試，另以現有引擎確認自動選到 INT8、手動 FP16 正確回退，未額外提交影片生成。
+
+[本機實測紀錄](INT8_VAE_TEST_2026-09-21.md)：RTX 5060 Ti 16 GB、兩種解析度的同一段 124 幀素材，連續解碼約為 FP16 的 2.67 倍速度，解碼期間整卡最高取樣占用減少約 2.30–2.35 GiB；抽查畫面未見明顯劣化。這些結果只涵蓋 **VAE 解碼**，不是主模型採樣或整支影片生成加速；各台電腦及不同內容仍需對照，畫質需要時可切回 FP16。
+
 ## Qwen-Image-2.1 圖片工作室（2026-09-21）
 
 主畫面右上角按「圖片」，或開啟 `/images`。支援文字生圖、最多 10 張參考圖編輯、透明背景 PNG、AUTO Seed、固定 Seed、下載與將成品作為下一張參考圖。圖片與影片共用同一個 GPU 工作鎖及 ComfyUI 佇列；共享佇列可顯示圖片的前方工作數量。中斷重啟後會查詢原本的引擎工作，不重複送出。
@@ -91,7 +111,7 @@ MiniMax H3 Studio 是 ComfyUI 的簡化操作介面，可使用本機 ComfyUI，
 
 第一次使用先執行專案根目錄的 `setup_h3_studio.bat`，再雙擊 `start_h3_studio.bat`。瀏覽器會開啟 <http://127.0.0.1:8787>。右上角「引擎設定」可切換本機與遠端模式。
 
-本機沒有 ComfyUI 時，可在「引擎設定」展開一鍵安裝器。安裝前會檢查 NVIDIA GPU、Git、Python、記憶體與磁碟空間，並要求使用者閱讀 MiniMax H3 Community License。本版影片基礎模型與所有內建 LoRA 共約 69.2 GiB，建議保留至少 90 GiB；語音、音樂與作品另計。
+本機沒有 ComfyUI 時，可在「引擎設定」展開一鍵安裝器。安裝前會檢查 NVIDIA GPU、Git、Python、記憶體與磁碟空間，並要求使用者閱讀 MiniMax H3 Community License。本版影片模型、文字編碼器、音訊 VAE、INT8／FP16 兩種影片 VAE 與所有內建 LoRA 共約 71.8 GiB（77.1 GB），建議保留至少 90 GiB；語音、音樂與作品另計。
 
 新安裝預設是「一般使用者」工作站，不顯示共享金鑰管理。GPU 主機可執行根目錄的 `set_h3_admin_mode.bat` 切換成「管理主機」；角色只保存在 Git 忽略的本機 `config.json`，不會隨專案分享。
 
@@ -123,7 +143,7 @@ GPU 主機執行 `setup_h3_face_repair.bat`，等現有工作完成後重啟 Com
 - 工作佇列、進度、取消、影片預覽和下載
 - 本機／遠端 ComfyUI 切換；遠端輸出自動回存面板電腦
 - 共享 GPU Gateway：每位同事各自執行 H3 Studio，以個人金鑰共用主機 ComfyUI；素材、歷史、輸出與取消操作均依所有權隔離
-- 一鍵安裝本機 ComfyUI、CUDA PyTorch、五個 H3 基礎模型與內建 Turbo／SLA LoRA，支援中斷後續裝
+- 一鍵安裝本機 ComfyUI、CUDA PyTorch、H3 模型與 INT8／FP16 影片 VAE、內建 Turbo／SLA LoRA，支援中斷後續裝
 - 模型更新中心：啟動時依 Git 版本清單檢查本機模型，可選立即更新、明天再提醒或略過版本；遠端模式由 GPU 主機管理者處理
 - MiniMax Music 3 音樂工作室：歌曲／純音樂、官方三段式 Caption、自訂歌詞、時長、Seed、MP3／FLAC、試聽、下載、歷史與我的最愛
 

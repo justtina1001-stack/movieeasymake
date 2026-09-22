@@ -25,7 +25,7 @@ from aiohttp import web
 from PIL import Image, ImageOps
 
 from comfy_client import ComfyClient
-from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, validate_runtime_inventory
+from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, validate_runtime_inventory, resolve_video_vae
 from custom_loras import active_loras
 from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
 from model_updates import ModelUpdateError, ModelUpdateManager
@@ -1220,6 +1220,7 @@ class JobManager:
             "face_repair": compiled.face_repair,
             "quality_mode": compiled.quality_mode,
             "memory_optimization": compiled.memory_optimization,
+            "video_vae": compiled.video_vae,
             "status": "queued",
             "progress": 0,
             "current_node": None,
@@ -1267,6 +1268,7 @@ class JobManager:
             "mode": "replace",
             "quality_mode": compiled.quality_mode,
             "memory_optimization": compiled.memory_optimization,
+            "video_vae": compiled.video_vae,
             "workspace": "quick",
             "batch_type": "replace_long",
             "status": "queued",
@@ -1862,6 +1864,8 @@ class JobManager:
                         raise RequestError(capability["error"])
                 inventory = await self.comfy.model_inventory(refresh=True)
                 validate_runtime_inventory(compiled, inventory)
+                video_vae_name = resolve_video_vae(compiled, inventory)
+                self.update(job_id, video_vae_name=video_vae_name)
                 turbo_lora_name = None
                 if compiled.quality_mode != "native":
                     turbo_lora_name = await self.comfy.resolve_turbo_lora(compiled.turbo_profile)
@@ -1895,7 +1899,7 @@ class JobManager:
                     generation_started_at=generation_started_at.isoformat(),
                     output_stem=output_stem,
                 )
-                workflow = build_workflow(compiled, uploaded, output_stem, turbo_lora_name, custom_lora_names)
+                workflow = build_workflow(compiled, uploaded, output_stem, turbo_lora_name, custom_lora_names, video_vae_name=video_vae_name)
                 (JOB_DIR / f"{job_id}.workflow.json").write_text(json.dumps(workflow, ensure_ascii=False, indent=2), encoding="utf-8")
                 (JOB_DIR / f"{job_id}.prompt.txt").write_text(compiled.prompt, encoding="utf-8")
                 node_titles = {node_id: node.get("_meta", {}).get("title", node["class_type"]) for node_id, node in workflow.items()}

@@ -2,12 +2,13 @@ import asyncio
 import json
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from aiohttp import web
 
 from comfy_client import ComfyClient
-from domain import TURBO_LORA_CANDIDATES
+from domain import TURBO_LORA_CANDIDATES, VIDEO_VAE_FILENAMES
 from settings import ConnectionSettings
 
 
@@ -101,6 +102,11 @@ class ComfyClientRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.stats = {"system": {"comfyui_version": "0.37.0"}}
+        self.stats_status = 200
+        self.stats_invalid_json = False
+        self.requests = Counter()
+        self.authorization = []
         self.schemas = {
             "UNETLoader": {"input": {"required": {"unet_name": [[
                 "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
@@ -117,6 +123,7 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
         }
         app = web.Application()
         app.router.add_get("/object_info/{node}", self.object_info)
+        app.router.add_get("/system_stats", self.system_stats)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
         self.site = web.TCPSite(self.runner, "127.0.0.1", 0)
@@ -124,7 +131,8 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
         port = self.site._server.sockets[0].getsockname()[1]
         self.temporary = tempfile.TemporaryDirectory()
         settings = ConnectionSettings(mode="remote", base_url=f"http://127.0.0.1:{port}",
-                                      comfy_dir=self.temporary.name, auto_start_local=False)
+                                      comfy_dir=self.temporary.name, auto_start_local=False,
+                                      remote_access_token="inventory-test-token")
         self.client = ComfyClient(settings, Path(self.temporary.name))
 
     async def asyncTearDown(self):
@@ -133,8 +141,109 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def object_info(self, request):
         node = request.match_info["node"]
+        self.requests[node] += 1
+        self.authorization.append(request.headers.get("Authorization"))
         # Comfy returns HTTP 200 with an empty object for unknown nodes.
         return web.json_response({node: self.schemas[node]} if node in self.schemas else {})
+
+    async def system_stats(self, request):
+        self.requests["system_stats"] += 1
+        self.authorization.append(request.headers.get("Authorization"))
+        if self.stats_invalid_json:
+            return web.Response(text="{", content_type="application/json")
+        return web.json_response(self.stats, status=self.stats_status)
+
+    def set_video_vaes(self, *precisions):
+        self.schemas["VAELoader"]["input"]["required"]["vae_name"][0] = [
+            *(VIDEO_VAE_FILENAMES[precision] for precision in precisions),
+            "minimax_h3_audio_vae_fp32.safetensors",
+        ]
+
+    async def test_fp16_only_is_ready_and_loader_schemas_are_fetched_once(self):
+        inventory = await self.client.model_inventory()
+        self.assertTrue(inventory["video_vae"])
+        self.assertTrue(inventory["video_vae_fp16"])
+        self.assertFalse(inventory["video_vae_int8"])
+        self.assertTrue(inventory["video_vae_int8_supported"])
+        self.assertTrue(inventory["audio_vae"])
+        self.assertEqual(self.requests["VAELoader"], 1)
+        self.assertEqual(self.requests["UNETLoader"], 1)
+        self.assertEqual(self.requests["system_stats"], 1)
+        self.assertEqual(set(self.authorization), {"Bearer inventory-test-token"})
+
+    async def test_int8_only_is_ready_on_tested_or_newer_core(self):
+        self.set_video_vaes("int8")
+        for version in ("0.37.0", "v0.37.0", "0.37.0dev+g123abc", "0.37.0.dev1", "0.38.0", "1.0.0"):
+            with self.subTest(version=version):
+                self.stats = {"system": {"comfyui_version": version}}
+                inventory = await self.client.model_inventory(refresh=True)
+                self.assertTrue(inventory["video_vae"])
+                self.assertTrue(inventory["video_vae_int8"])
+                self.assertTrue(inventory["video_vae_int8_supported"])
+                self.assertFalse(inventory["video_vae_fp16"])
+
+    async def test_both_video_vaes_remain_visible(self):
+        self.set_video_vaes("int8", "fp16")
+        inventory = await self.client.model_inventory()
+        self.assertTrue(inventory["video_vae"])
+        self.assertTrue(inventory["video_vae_int8"])
+        self.assertTrue(inventory["video_vae_fp16"])
+        self.assertTrue(inventory["video_vae_int8_supported"])
+
+    async def test_old_or_unknown_core_requires_fp16(self):
+        for version in ("0.36.0", "0.36.9dev+g123abc", "unknown", "0.37", "0.37.0garbage", "", None):
+            with self.subTest(version=version):
+                self.stats = {"system": {"comfyui_version": version}}
+                self.set_video_vaes("int8")
+                inventory = await self.client.model_inventory(refresh=True)
+                self.assertTrue(inventory["video_vae_int8"])
+                self.assertFalse(inventory["video_vae_int8_supported"])
+                self.assertFalse(inventory["video_vae"])
+                self.set_video_vaes("int8", "fp16")
+                inventory = await self.client.model_inventory(refresh=True)
+                self.assertTrue(inventory["video_vae"])
+                self.assertTrue(inventory["video_vae_fp16"])
+                self.assertFalse(inventory["video_vae_int8_supported"])
+
+    async def test_unknown_stats_shape_preserves_fp16_inventory(self):
+        for stats in ({}, {"system": None}, {"system": []}, []):
+            with self.subTest(stats=stats):
+                self.stats = stats
+                inventory = await self.client.model_inventory(refresh=True)
+                self.assertTrue(inventory["video_vae"])
+                self.assertTrue(inventory["video_vae_fp16"])
+                self.assertFalse(inventory["video_vae_int8_supported"])
+
+    async def test_stats_error_preserves_known_inventory(self):
+        for invalid_json in (False, True):
+            with self.subTest(invalid_json=invalid_json):
+                self.stats_status = 503
+                self.stats_invalid_json = invalid_json
+                inventory = await self.client.model_inventory(refresh=True)
+                self.assertTrue(inventory["video_vae"])
+                self.assertTrue(inventory["video_vae_fp16"])
+                self.assertTrue(inventory["audio_vae"])
+                self.assertTrue(inventory["h3_memory_optimization"])
+                self.assertFalse(inventory["video_vae_int8_supported"])
+
+    async def test_inventory_cache_is_defensive_and_refresh_updates_models_and_version(self):
+        inventory = await self.client.model_inventory()
+        calls = self.requests.copy()
+        inventory["video_vae_fp16"] = False
+        self.set_video_vaes("int8")
+        self.stats = {"system": {"comfyui_version": "0.36.0"}}
+        cached = await self.client.model_inventory()
+        self.assertEqual(self.requests, calls)
+        self.assertTrue(cached["video_vae_fp16"])
+        self.assertFalse(cached["video_vae_int8"])
+        self.assertTrue(cached["video_vae_int8_supported"])
+        refreshed = await self.client.model_inventory(refresh=True)
+        self.assertTrue(refreshed["video_vae_int8"])
+        self.assertFalse(refreshed["video_vae_fp16"])
+        self.assertFalse(refreshed["video_vae_int8_supported"])
+        self.assertFalse(refreshed["video_vae"])
+        self.assertEqual(self.requests["VAELoader"], 2)
+        self.assertEqual(self.requests["system_stats"], 2)
 
     async def test_missing_sparse_node_does_not_hide_independent_memory(self):
         inventory = await self.client.model_inventory()

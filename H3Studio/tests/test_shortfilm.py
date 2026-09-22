@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from domain import compile_request
@@ -22,6 +23,28 @@ from shortfilm import (
 
 
 class ShortFilmTests(unittest.TestCase):
+    def test_video_vae_defaults_for_new_and_legacy_projects(self):
+        self.assertEqual(new_project()["video_vae"], "auto")
+        project, scene, shot = self.project_with_shot()
+        project.pop("video_vae")
+        self.assertEqual(normalize_project(project)["video_vae"], "auto")
+        payload, _ = compile_shot_payload(project, scene["id"], shot["id"])
+        self.assertEqual(payload["video_vae"], "auto")
+        project["video_vae"] = "unknown"
+        self.assertEqual(normalize_project(project)["video_vae"], "auto")
+
+    def test_video_vae_survives_store_reload_and_shot_compilation(self):
+        for selected in ("auto", "int8", "fp16"):
+            with self.subTest(video_vae=selected), TemporaryDirectory() as directory:
+                project, scene, shot = self.project_with_shot()
+                project["video_vae"] = selected
+                store = ShortFilmStore(Path(directory))
+                saved = store.create(project)
+                restored = ShortFilmStore(Path(directory)).get(saved["id"])
+                self.assertEqual(restored["video_vae"], selected)
+                payload, _ = compile_shot_payload(restored, scene["id"], shot["id"])
+                self.assertEqual(payload["video_vae"], selected)
+
     def test_continuous_minute_creates_twelve_connected_shots(self):
         project = new_project("一分鐘")
         asset = new_asset("character", "主角")

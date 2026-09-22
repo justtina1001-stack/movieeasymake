@@ -1,13 +1,16 @@
 {
   "schema_version": 1,
-  "version": "2026.09.10-1",
-  "published_at": "2026-09-10",
+  "version": "2026.09.22-1",
+  "published_at": "2026-09-22",
   "channel": "stable",
-  "title": "H3 獨立省顯存、SLA 實驗加速與音訊／參考品質選項",
-  "summary": "保留既有 INT8 基礎模型及 Turbo 配方，新增 SLA 專用 4 步、FL2VA v1.2 音訊及 Ref2VA 8 步 LoRA。SLA 需要 ComfyUI 0.35.0 及配套依賴；模型更新不會自動改動既有引擎核心。",
+  "title": "H3 INT8 影片解碼與 FP16 回退",
+  "summary": "新增官方 INT8 ConvRot 影片 VAE，改善解碼階段的時間與資源使用，保留 FP16 回退。自動模式在 ComfyUI 0.37.0 以上且已安裝 INT8 時優先使用；這不是主模型採樣加速。模型更新不會自動升級既有引擎核心。",
   "minimum_vram_gb": 12,
   "recommended_vram_gb": 16,
   "changes": [
+    "新增官方 INT8 ConvRot 影片 VAE，固定來源版本、檔案大小及 SHA-256",
+    "影片 VAE 提供自動／INT8／FP16 選擇；自動模式不符合條件時使用 FP16，明選 INT8 缺件或版本不符時報錯",
+    "保留既有 FP16 VAE；本次新增下載約 2.81 GB（2.62 GiB），收益限影片解碼階段",
     "Pruned INT8 ConvRot：降低基礎模型的顯存與系統記憶體需求",
     "FL2VA Turbo 4-step v1.1 768p：新版快速生成選項",
     "FL2VA Turbo 8-step v1.0 768p：新版高品質與音訊選項",
@@ -15,7 +18,7 @@
     "FL2VA Turbo-SLA：專用 4 步 LoRA，保留 15% 注意力區塊；實驗選項，不與舊稀疏／額外省顯存節點疊加",
     "FL2VA 4 步 v1.2：音訊改善選項，非速度升級",
     "Ref2VA 8 步 v1.0：參考品質比較選項；保留現有 4 步預覽",
-    "新安裝固定 ComfyUI 0.35.0；既有使用者需另行升級核心才能使用 SLA"
+    "新安裝固定 ComfyUI 0.37.0；既有核心與配套依賴需另行升級，模型更新不會代為處理"
   ],
   "custom_nodes": [
     {
@@ -59,6 +62,14 @@
       "source": "vae/minimax_h3_video_vae_fp16.safetensors",
       "target": "vae/minimax_h3_video_vae_fp16.safetensors",
       "size": 5207808496
+    },
+    {
+      "repo_id": "Comfy-Org/MiniMax-H3",
+      "revision": "7a2065e37f5ff9d3c4e605f164d4cac388eff8e8",
+      "source": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "target": "vae/minimax_h3_video_vae_int8_convrot.safetensors",
+      "size": 2811065184,
+      "sha256": "52a2c8c73583c86e4f41cdcce3a6ad0ea562987bc0bf3d60a0cef5f5c8e60c0e"
     },
     {
       "repo_id": "Kijai/MiniMax-H3_comfy",

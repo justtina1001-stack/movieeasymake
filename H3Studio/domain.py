@@ -14,6 +14,11 @@ MAX_REFERENCE_AUDIOS = 3
 MAX_REFERENCE_VIDEOS = 3
 ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
 REFERENCE_SUBJECT_TYPES = {"character", "creature", "object"}
+VIDEO_VAE_FILENAMES = {
+    "int8": "minimax_h3_video_vae_int8_convrot.safetensors",
+    "fp16": "minimax_h3_video_vae_fp16.safetensors",
+}
+VIDEO_VAE_MODES = {"auto", *VIDEO_VAE_FILENAMES}
 
 TURBO_PROFILE_FL_544 = "fl2v_544"
 TURBO_PROFILE_FL_768 = "fl2v_768"
@@ -126,6 +131,29 @@ class CompiledRequest:
     custom_loras: list[dict[str, Any]] = field(default_factory=list)
     memory_optimization: bool = False
     face_repair: dict[str, Any] | None = None
+    video_vae: str = "auto"
+
+
+def resolve_video_vae(compiled: CompiledRequest, inventory: dict[str, bool]) -> str:
+    """Resolve auto against the selected engine; explicit choices never fall back."""
+    choice = compiled.video_vae
+    if choice not in VIDEO_VAE_MODES:
+        raise RequestError("不支援的影片解碼選項，請選擇自動、INT8 或 FP16。")
+    # Older inventory producers only advertised the FP16 VAE under video_vae.
+    fp16 = inventory.get("video_vae_fp16", inventory.get("video_vae", False))
+    int8 = inventory.get("video_vae_int8", False)
+    supported = inventory.get("video_vae_int8_supported", False)
+    if choice == "int8" or (choice == "auto" and int8 and supported):
+        if not supported:
+            raise RequestError("INT8 影片解碼需要已驗證的 ComfyUI 0.37.0 以上版本。請更新運算引擎與配套依賴並重啟，或改選自動／FP16。")
+        if not int8:
+            raise RequestError("目前運算引擎找不到 INT8 影片 VAE。請執行模型更新，或改選自動／FP16。")
+        return VIDEO_VAE_FILENAMES["int8"]
+    if fp16:
+        return VIDEO_VAE_FILENAMES["fp16"]
+    if choice == "auto" and int8 and not supported:
+        raise RequestError("目前只有 INT8 影片 VAE，但引擎版本尚未確認相容。請更新至 ComfyUI 0.37.0 以上及配套依賴，或補齊 FP16 影片 VAE。")
+    raise RequestError("目前運算引擎找不到可用的影片 VAE。請補齊所選模型後重新整理，或改選自動。")
 
 
 def validate_runtime_inventory(compiled: CompiledRequest, inventory: dict[str, bool]) -> None:
@@ -134,12 +162,12 @@ def validate_runtime_inventory(compiled: CompiledRequest, inventory: dict[str, b
     required_models = {
         family: "H3 Ref2VA 主模型" if family == "ref2va" else "H3 FL2VA 主模型",
         "text_encoder": "H3 文字編碼器",
-        "video_vae": "H3 影片 VAE",
         "audio_vae": "H3 聲音 VAE",
     }
     missing = [label for key, label in required_models.items() if not inventory.get(key)]
     if missing:
         raise RequestError("目前運算引擎找不到必要模型：" + "、".join(missing) + "。請在該引擎補齊模型後重新整理。")
+    resolve_video_vae(compiled, inventory)
     if compiled.quality_mode != "native" and not inventory.get("h3_sigma_shift"):
         raise RequestError("所選 Turbo 模式需要 MiniMaxH3SigmaShift 節點，請更新目前運算引擎的 ComfyUI 核心並重啟。")
     if compiled.memory_optimization and not inventory.get("h3_memory_optimization"):
@@ -366,6 +394,9 @@ def _mg_animation_description(payload: dict[str, Any], aliases: dict[str, str], 
 
 
 def compile_request(payload: dict[str, Any]) -> CompiledRequest:
+    video_vae = _clean_text(payload.get("video_vae")) or "auto"
+    if video_vae not in VIDEO_VAE_MODES:
+        raise RequestError("不支援的影片解碼選項，請選擇自動、INT8 或 FP16。")
     mode = _clean_text(payload.get("mode")) or "t2v"
     if mode not in {"t2v", "fl2va", "r2v", "replace", "extend", "symbol_loop", "popup_panel", "mg_animation"}:
         raise RequestError("不支援的生成模式。")
@@ -847,6 +878,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 length=length,
                 custom_loras=custom_loras,
                 memory_optimization=memory_optimization,
+                video_vae=video_vae,
                 requested_duration=requested_duration,
                 actual_duration=length / FPS,
                 seed=seed,
@@ -901,6 +933,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         length=length,
         custom_loras=custom_loras,
         memory_optimization=memory_optimization,
+        video_vae=video_vae,
         requested_duration=requested_duration,
         actual_duration=round(length / FPS, 3),
         seed=seed,
@@ -935,7 +968,15 @@ def build_workflow(
     output_stem: str,
     turbo_lora_name: str | None = None,
     custom_lora_names: dict[str, str] | None = None,
+    video_vae_name: str | None = None,
 ) -> dict[str, Any]:
+    if compiled.video_vae not in VIDEO_VAE_MODES:
+        raise RequestError("不支援的影片解碼選項。")
+    selected_vae = video_vae_name or VIDEO_VAE_FILENAMES.get(compiled.video_vae, VIDEO_VAE_FILENAMES["int8"])
+    if selected_vae not in VIDEO_VAE_FILENAMES.values():
+        raise RequestError("不支援的影片 VAE 模型。")
+    if compiled.video_vae != "auto" and selected_vae != VIDEO_VAE_FILENAMES[compiled.video_vae]:
+        raise RequestError("影片 VAE 模型與指定解碼選項不一致。")
     workflow: dict[str, Any] = {}
     next_id = 1
 
@@ -1012,7 +1053,7 @@ def build_workflow(
         "type": "minimax",
         "device": "default",
     }, "MiniMax H3 Text Encoder")
-    video_vae = add("VAELoader", {"vae_name": "minimax_h3_video_vae_fp16.safetensors"}, "Video VAE")
+    video_vae = add("VAELoader", {"vae_name": selected_vae}, "Video VAE")
     audio_vae = add("VAELoader", {"vae_name": "minimax_h3_audio_vae_fp32.safetensors"}, "Audio VAE")
 
     image_nodes: dict[str, str] = {}

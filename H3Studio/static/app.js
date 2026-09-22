@@ -1031,6 +1031,7 @@ function currentSettings() {
     scheduler: $("#scheduler").value,
     ref_image_size: $("#refImageSize").value,
     quality_mode: $("#qualityMode").value,
+    video_vae: $("#videoVae").value || "auto",
     memory_optimization: $("#memoryOptimization").checked,
     keyframe_fit: $("#keyframeFit").value,
     motion_profile: $("#motionProfile").value,
@@ -1060,6 +1061,7 @@ function restoreForm() {
     scheduler: form.scheduler,
     refImageSize: form.ref_image_size,
     qualityMode: form.quality_mode || "native",
+    videoVae: ["auto", "int8", "fp16"].includes(form.video_vae) ? form.video_vae : "auto",
     keyframeFit: form.keyframe_fit || "contain",
     motionProfile: form.motion_profile,
     motionIntensity: form.motion_intensity,
@@ -1221,6 +1223,35 @@ function memoryOptimizationHint(enabled, qualityMode) {
   return description + (enabled ? capabilityNote("h3_memory_optimization", "H3 記憶體最佳化節點") : " 目前未啟用，可隨時勾選測試。");
 }
 
+function videoVaeBackendIsStale() {
+  const inventory = engineModelInventory || {};
+  return typeof inventory.video_vae === "boolean" && ["video_vae_int8", "video_vae_fp16", "video_vae_int8_supported"].every(key => !(key in inventory));
+}
+
+function videoVaeHint(selection) {
+  if (videoVaeBackendIsStale()) return "Studio 待重啟：等目前工作完成後重新啟動 Studio，才能使用影片解碼選項；只重新整理網頁不會更新後端。";
+  const inventory = engineModelInventory || {};
+  const int8Ready = inventory.video_vae_int8 === true && inventory.video_vae_int8_supported === true;
+  const known = ["video_vae_int8", "video_vae_fp16", "video_vae_int8_supported"].every(key => typeof inventory[key] === "boolean");
+  if (selection === "int8") {
+    return (int8Ready ? "目前引擎可使用 INT8。" : known ? "目前引擎缺少 INT8 模型或支援；請補齊後再生成，或改選自動。" : "生成前會確認 INT8 模型與引擎支援。") + " 主要加速解碼、降低記憶體占用；手動指定時不會自動換用 FP16。";
+  }
+  if (selection === "fp16") {
+    return (inventory.video_vae_fp16 === true ? "目前引擎可使用 FP16。" : known ? "目前引擎缺少 FP16 模型，請補齊後再生成。" : "生成前會確認 FP16 模型。") + " 使用相容解碼模式；手動指定時不會自動換用 INT8。";
+  }
+  const status = int8Ready ? "目前引擎會優先使用 INT8。" : known && inventory.video_vae_fp16 ? "目前引擎會使用 FP16。" : known ? "目前引擎沒有可用的影片解碼模型，請先補齊模型。" : "自動優先使用 INT8；引擎不支援或缺少模型時使用 FP16。";
+  return status + " 主要加速解碼、降低記憶體占用；整體生成時間仍依鏡頭而定。";
+}
+
+function syncVideoVaeHints() {
+  const stale = videoVaeBackendIsStale();
+  $("#videoVae").disabled = stale;
+  $("#sfVideoVae").disabled = stale;
+  $("#videoVaeHint").textContent = videoVaeHint($("#videoVae").value);
+  const project = activeShortFilmProject();
+  if (project) $("#sfVideoVaeHint").textContent = videoVaeHint(project.video_vae || "auto");
+}
+
 function changeQualityMode() {
   const accelerated = $("#qualityMode").value !== "native";
   if (accelerated && !state.nativeSampling) {
@@ -1272,6 +1303,7 @@ function filenameStemPreview(value) {
 function updateSummary() {
   const [width, height] = dimensions();
   syncQualityMode(width, height);
+  syncVideoVaeHints();
   updateKeyframeLayout();
   const longReplacement = state.mode === "replace" && state.replacement.autoSplit && Number(state.replacement.videoInfo?.duration) > 15;
   const displayDuration = longReplacement ? Number(state.replacement.videoInfo.duration) : actualDuration();
@@ -1999,6 +2031,7 @@ async function applyJobRecipe(jobId) {
   state.lastImage = null;
   setMode(mode);
   $("#qualityMode").value = raw.quality_mode || "native";
+  $("#videoVae").value = ["auto", "int8", "fp16"].includes(raw.video_vae) ? raw.video_vae : "auto";
   state.customLoras = structuredClone(raw.custom_loras || []);
   renderLoraPanels();
 
@@ -2301,6 +2334,7 @@ async function checkStatus() {
     const data = await api("/api/status");
     if (data.studio_role) applyStudioRole({ studio_role: data.studio_role });
     engineModelInventory = data.models || {};
+    syncVideoVaeHints();
     syncQualityMode(...dimensions());
     syncShortFilmAcceleration();
     const remote = data.connection_mode === "remote";
@@ -2328,6 +2362,7 @@ async function checkStatus() {
     }
   } catch {
     engineModelInventory = {};
+    syncVideoVaeHints();
     syncQualityMode(...dimensions());
     syncShortFilmAcceleration();
     if (engineStartingAt) showEngineStarting();
@@ -2552,7 +2587,7 @@ async function loadShortFilmProjects(force = false) {
 async function createShortFilmProject() {
   const project = await api("/api/shortfilms", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title: "未命名短片", memory_optimization: true, scenes: [{ title: "場次 1", shots: [{}] }] }),
+    body: JSON.stringify({ title: "未命名短片", memory_optimization: true, video_vae: "auto", scenes: [{ title: "場次 1", shots: [{}] }] }),
   });
   shortFilmProjects.unshift(project);
   activeShortFilmId = project.id;
@@ -2861,6 +2896,7 @@ function renderShortFilmWorkspace() {
   $("#sfAspectRatio").value = project.aspect_ratio || "16:9";
   $("#sfMegapixels").value = String(project.megapixels ?? 0.4);
   $("#sfQuality").value = project.quality_mode || "native";
+  $("#sfVideoVae").value = ["auto", "int8", "fp16"].includes(project.video_vae) ? project.video_vae : "auto";
   $("#sfMemoryOptimization").checked = project.memory_optimization === true;
   $("#sfExportFrames").checked = project.export_frames === true;
   $("#sfStyle").value = project.style || "";
@@ -2956,6 +2992,7 @@ function renderShortFilmScenes() {
 }
 
 function renderShortFilmSummary(extraWarnings = null) {
+  syncVideoVaeHints();
   const project = activeShortFilmProject();
   if (!project) return;
   syncShortFilmAcceleration();
@@ -3313,7 +3350,7 @@ function bindEvents() {
   });
   const shortFilmProjectFields = {
     sfTitle: "title", sfFormat: "format", sfTargetDuration: "target_duration", sfAspectRatio: "aspect_ratio",
-    sfMegapixels: "megapixels", sfQuality: "quality_mode", sfStyle: "style", sfSynopsis: "synopsis",
+    sfMegapixels: "megapixels", sfQuality: "quality_mode", sfVideoVae: "video_vae", sfStyle: "style", sfSynopsis: "synopsis",
   };
   Object.entries(shortFilmProjectFields).forEach(([id, field]) => {
     $(`#${id}`).addEventListener("input", event => {
@@ -3512,7 +3549,7 @@ function bindEvents() {
     const card = event.target.closest(".mode-card");
     if (card) setMode(card.dataset.mode);
   });
-  ["aspectRatio", "megapixels", "duration", "retimeDuration", "seed", "steps", "scheduler", "refImageSize", "keyframeFit", "motionProfile", "motionIntensity", "physicsStyle", "cameraResponse", "prompt", "jobName"].forEach(id => {
+  ["aspectRatio", "megapixels", "duration", "retimeDuration", "seed", "steps", "scheduler", "refImageSize", "videoVae", "keyframeFit", "motionProfile", "motionIntensity", "physicsStyle", "cameraResponse", "prompt", "jobName"].forEach(id => {
     $(`#${id}`).addEventListener("input", updateSummary);
     $(`#${id}`).addEventListener("change", updateSummary);
   });

@@ -4,6 +4,7 @@ import asyncio
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 import time
@@ -14,7 +15,7 @@ from urllib.parse import urlencode
 
 import aiohttp
 
-from domain import TURBO_LORA_CANDIDATES
+from domain import TURBO_LORA_CANDIDATES, VIDEO_VAE_FILENAMES
 
 from settings import ConnectionSettings
 from runtime_env import inspect_python_candidates
@@ -148,22 +149,24 @@ class ComfyClient:
             "fl2va": ("UNETLoader", "unet_name", "minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
             "ref2va": ("UNETLoader", "unet_name", "minimax_h3_ref2va_pruned_int8_convrot.safetensors"),
             "text_encoder": ("CLIPLoader", "clip_name", "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"),
-            "video_vae": ("VAELoader", "vae_name", "minimax_h3_video_vae_fp16.safetensors"),
+            **{f"video_vae_{precision}": ("VAELoader", "vae_name", filename)
+               for precision, filename in VIDEO_VAE_FILENAMES.items()},
             "audio_vae": ("VAELoader", "vae_name", "minimax_h3_audio_vae_fp32.safetensors"),
         }
         result = {name: False for name in expected}
         result.update({f"turbo_{profile}": False for profile in TURBO_LORA_CANDIDATES})
         result.update({"h3_memory_optimization": False, "h3_optimizations": False,
-                       "h3_sla_attention": False, "h3_sigma_shift": False})
+                       "h3_sla_attention": False, "h3_sigma_shift": False,
+                       "video_vae_int8_supported": False})
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                loader_schemas = {}
                 for name, (node, field, filename) in expected.items():
-                    async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
-                        if response.status != 200:
-                            continue
-                        payload = await response.json()
-                    values = payload.get(node, {}).get("input", {}).get("required", {}).get(field, [[]])[0]
+                    if node not in loader_schemas:
+                        async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
+                            loader_schemas[node] = await response.json() if response.status == 200 else {}
+                    values = loader_schemas[node].get(node, {}).get("input", {}).get("required", {}).get(field, [[]])[0]
                     result[name] = filename in values
                 async with session.get(f"{self.base_url}/object_info/LoraLoaderModelOnly", headers=self.auth_headers()) as response:
                     if response.status == 200:
@@ -190,6 +193,23 @@ class ComfyClient:
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
             pass
+        try:
+            stats = await self.system_stats()
+            system = stats.get("system", {}) if isinstance(stats, dict) else {}
+            version = system.get("comfyui_version") if isinstance(system, dict) else None
+            match = re.fullmatch(
+                r"v?(\d+)\.(\d+)\.(\d+)(?:dev\d*)?(?:[.+-][A-Za-z0-9][A-Za-z0-9.+-]*)?",
+                version.strip(),
+            ) if isinstance(version, str) else None
+            # 0.37.0 is our tested baseline, not the earliest upstream support.
+            result["video_vae_int8_supported"] = bool(
+                match and tuple(map(int, match.group(1, 2, 3))) >= (0, 37, 0)
+            )
+        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
+            pass
+        result["video_vae"] = result["video_vae_fp16"] or (
+            result["video_vae_int8"] and result["video_vae_int8_supported"]
+        )
         self._model_cache = (time.monotonic() + 60, dict(result))
         return result
 

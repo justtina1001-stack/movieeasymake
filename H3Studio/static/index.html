@@ -137,6 +137,10 @@
             <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 穩定版 · 自動適配</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1 768p</option><option value="turbo_quality">Turbo 新高品質 · 8-step 768p</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2 768p</option><option value="turbo_ref_quality">Ref Turbo 品質比較 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速 · 4-step（原版）</option></select></label>
             <div><strong id="qualityModeTitle">原生品質模式</strong><span id="qualityModeHint">保留目前採樣設定，適合正式成品。</span></div>
           </div>
+          <div class="quality-selector">
+            <label>影片解碼<select id="videoVae" aria-describedby="videoVaeHint"><option value="auto">自動（優先 INT8）</option><option value="int8">INT8（較快、省記憶體）</option><option value="fp16">FP16（相容模式）</option></select></label>
+            <div><strong>影片解碼效能</strong><span id="videoVaeHint">自動優先使用 INT8；引擎不支援或缺少模型時使用 FP16。主要加速解碼、降低記憶體占用；整體生成時間仍依鏡頭而定。</span></div>
+          </div>
           <label class="check-option shortfilm-export-option"><input id="memoryOptimization" type="checkbox" checked aria-describedby="memoryOptimizationHint"><span><strong>省顯存 · H3 記憶體最佳化</strong><small id="memoryOptimizationHint">獨立於生成品質，減少運算暫存峰值；不保證更快，也不保證高解析長影片不會記憶體不足。</small></span></label>
           <div class="retime-selector">
             <label class="check-option"><input id="retimeEnabled" type="checkbox"><span><strong>產生節奏預覽版</strong><small>H3 仍生成至少 5 秒；完成後另外輸出指定秒數，原始影片會保留。</small></span></label>
@@ -422,6 +426,10 @@
                 <label>生成品質<select id="sfQuality" aria-describedby="sfQualityHint"><option value="native">原生品質</option><option value="turbo">Turbo 穩定版</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1</option><option value="turbo_quality">Turbo 新高品質 · 8-step</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2</option><option value="turbo_ref_quality">Ref Turbo 品質比較 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速（原版）</option></select></label>
               </div>
               <p id="sfQualityHint" class="field-help"></p>
+              <div class="quality-selector">
+                <label>影片解碼<select id="sfVideoVae" aria-describedby="sfVideoVaeHint"><option value="auto">自動（優先 INT8）</option><option value="int8">INT8（較快、省記憶體）</option><option value="fp16">FP16（相容模式）</option></select></label>
+                <div><strong>每個鏡頭共用</strong><span id="sfVideoVaeHint">自動優先使用 INT8；引擎不支援或缺少模型時使用 FP16。主要加速解碼、降低記憶體占用；整體生成時間仍依鏡頭而定。</span></div>
+              </div>
               <label class="check-option shortfilm-export-option"><input id="sfMemoryOptimization" type="checkbox" checked aria-describedby="sfMemoryOptimizationHint"><span><strong>全片省顯存 · H3 記憶體最佳化</strong><small id="sfMemoryOptimizationHint">每個鏡頭共用；減少運算暫存峰值，不保證更快，也不保證完全避免記憶體不足。</small></span></label>
               <label class="check-option shortfilm-export-option"><input id="sfExportFrames" type="checkbox"><span><strong>每個鏡頭完成後自動匯出 PNG 連續圖</strong><small>依各鏡頭最終節奏版本打包 ZIP，可從生成工作下載。</small></span></label>
               <div id="sfLoraPanel"></div>

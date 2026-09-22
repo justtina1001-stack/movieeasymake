@@ -81,6 +81,7 @@ def new_project(title: Any = "未命名短片") -> dict[str, Any]:
         "aspect_ratio": "16:9",
         "megapixels": 0.4,
         "quality_mode": "native",
+        "video_vae": "auto",
         "memory_optimization": False,
         "export_frames": False,
         "target_duration": 30.0,
@@ -154,6 +155,8 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
     base["megapixels"] = _bounded_number(raw.get("megapixels"), 0.4, 0.2, 1.0)
     quality_mode = _text(raw.get("quality_mode"), limit=40) or "native"
     base["quality_mode"] = quality_mode if quality_mode in QUALITY_MODES else "native"
+    video_vae = _text(raw.get("video_vae"), limit=10) or "auto"
+    base["video_vae"] = video_vae if video_vae in {"auto", "int8", "fp16"} else "auto"
     base["memory_optimization"] = raw.get("memory_optimization") is True
     try:
         base["custom_loras"] = normalize_loras(raw.get("custom_loras"))
@@ -560,6 +563,7 @@ def compile_shot_payload(
         "aspect_ratio": project["aspect_ratio"],
         "megapixels": project["megapixels"],
         "quality_mode": quality_mode,
+        "video_vae": project.get("video_vae", "auto"),
         "memory_optimization": project.get("memory_optimization") is True,
         "custom_loras": project.get("custom_loras", []),
         "duration": shot["duration"],
