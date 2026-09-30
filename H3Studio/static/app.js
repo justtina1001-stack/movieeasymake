@@ -2291,6 +2291,7 @@ async function loadJobs(force = false) {
               <button class="button ghost" data-job-show-prompt="${job.id}" type="button">查看生成提示詞</button>
               ${job.face_repair ? "" : `<button class="button secondary" data-job-apply="${job.id}" type="button">快速套用</button>`}
               ${job.status === "completed" ? `<button class="button secondary" data-face-repair="${job.id}" type="button">臉部修復</button>` : ""}
+              ${job.status === "completed" ? `<a class="button secondary" href="/editor?job=${encodeURIComponent(job.id)}" target="_blank" rel="noopener">✂ 剪輯影片</a>` : ""}
               <button class="button ghost" data-job-rename="${job.id}" data-job-name="${escapeHtml(job.name || "")}" type="button">重新命名</button>
               ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>${hasRetime ? "下載節奏版" : "下載"}</a>${hasRetime ? `<a class="button ghost" href="/api/jobs/${job.id}/video?original=1&download=1" download>下載原始版</a>` : ""}` : ""}
               ${frameSequence ? `<a class="button secondary" href="/api/jobs/${job.id}/frames" download>下載連續圖 ZIP</a>` : ""}
@@ -3073,6 +3074,7 @@ async function loadShortFilmJobs(force = false) {
         <div class="job-actions">
           <button class="button ghost" data-sf-job-show-prompt="${job.id}" type="button">查看生成提示詞</button>
           ${job.status === "completed" ? `<button class="button secondary" data-face-repair="${job.id}" type="button">臉部修復</button>` : ""}
+          ${job.status === "completed" ? `<a class="button secondary" href="/editor?job=${encodeURIComponent(job.id)}" target="_blank" rel="noopener">✂ 剪輯影片</a>` : ""}
           <button class="button ghost" data-sf-job-rename="${job.id}" data-job-name="${escapeHtml(job.name || "")}" type="button">重新命名</button>
           ${job.status === "completed" ? `<a class="button secondary" href="/api/jobs/${job.id}/video?download=1" download>${hasRetime ? "下載節奏版" : "下載影片"}</a>${hasRetime ? `<a class="button ghost" href="/api/jobs/${job.id}/video?original=1&download=1" download>下載原始版</a>` : ""}` : ""}
           ${frameSequence ? `<a class="button secondary" href="/api/jobs/${job.id}/frames" download>下載連續圖 ZIP</a>` : ""}

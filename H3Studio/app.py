@@ -48,6 +48,10 @@ from queue_presentation import build_queue_view
 from queue_cancel import QueueCancelError
 from face_repair import repair_capabilities, repair_options
 from qwen_image import register_image_routes
+from video_editor import register_editor_routes
+from editor_media_io import register_editor_media_io
+from editor_project_files import register_editor_project_files
+from editor_overlays import register_editor_overlays
 from shortfilm import (
     ShortFilmError,
     ShortFilmStore,
@@ -61,6 +65,7 @@ from shortfilm import (
     validate_shot_references,
 )
 from settings import ConnectionSettings, SettingsError, SettingsStore
+from studio_startup import plan_startup, probe_studio
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -2082,6 +2087,10 @@ def create_app() -> web.Application:
     app["shared_gateway"] = gateway
     app["shortfilms"] = shortfilms
     image_jobs = register_image_routes(app, STATIC_DIR, DATA_DIR)
+    register_editor_routes(app, STATIC_DIR, DATA_DIR)
+    register_editor_media_io(app)
+    register_editor_project_files(app)
+    register_editor_overlays(app)
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
@@ -3105,29 +3114,61 @@ def create_app() -> web.Application:
     return app
 
 
-async def open_browser(port: int) -> None:
-    await asyncio.sleep(1)
-    webbrowser.open(f"http://127.0.0.1:{port}")
+async def open_browser(port: int, path: str = "") -> None:
+    url = f"http://127.0.0.1:{port}{path}"
+    # Startup callbacks run before aiohttp serves requests. Wait in a background
+    # task so the first browser tab opens only once the page can respond.
+    for _ in range(20):
+        if await asyncio.to_thread(probe_studio, port, timeout=0.5):
+            webbrowser.open(url)
+            return
+        await asyncio.sleep(0.25)
+    print(f"Studio is starting. Open {url} once startup finishes.", flush=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="MiniMax H3 Studio")
     parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--auto-port", action="store_true", help="Reuse a responding Studio or select a free local port")
+    parser.add_argument("--open-editor", action="store_true", help="Open the video editor instead of the home page")
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
-    app = create_app()
-    if not args.no_browser:
-        app.on_startup.append(lambda _: asyncio.create_task(open_browser(args.port)))
     try:
-        web.run_app(app, host="127.0.0.1", port=args.port, print=lambda message: print(message, flush=True))
-    except OSError as error:
-        if getattr(error, "winerror", None) == 10048 or error.errno == 10048:
-            url = f"http://127.0.0.1:{args.port}"
-            print(f"MiniMax H3 Studio 已經在執行：{url}", flush=True)
-            if not args.no_browser:
-                webbrowser.open(url)
-            return
-        raise
+        launch = plan_startup(args.port, auto_port=args.auto_port,
+                              required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks"))
+    except (ValueError, RuntimeError) as error:
+        print(f"[ERROR] {error}", flush=True)
+        raise SystemExit(1) from error
+    path = "/editor" if args.open_editor else ""
+    url = f"http://127.0.0.1:{launch.port}{path}"
+    if launch.existing:
+        print(f"MiniMax H3 Studio is already responding: {url}", flush=True)
+        if not args.no_browser:
+            webbrowser.open(url)
+        return
+    print(f"Starting MiniMax H3 Studio: {url}", flush=True)
+    if launch.port != args.port:
+        print(f"Port {args.port} is unavailable; using {launch.port}. Saved data is unchanged.", flush=True)
+    try:
+        app = create_app()
+        if not args.no_browser:
+            async def schedule_browser(application: web.Application) -> None:
+                application["browser_open_task"] = asyncio.create_task(open_browser(launch.port, path))
+
+            async def cleanup_browser(application: web.Application) -> None:
+                task = application.get("browser_open_task")
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+            app.on_startup.append(schedule_browser)
+            app.on_cleanup.append(cleanup_browser)
+        web.run_app(app, sock=launch.sock, print=lambda message: print(message, flush=True))
+    finally:
+        if launch.sock is not None:
+            launch.sock.close()
+        if getattr(launch, "lock", None) is not None:
+            launch.lock.close()
 
 
 if __name__ == "__main__":

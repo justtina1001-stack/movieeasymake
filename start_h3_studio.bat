@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+title MiniMax H3 Studio
 cd /d "%~dp0"
 set "STUDIO_PYTHON=H3Studio\.venv\Scripts\python.exe"
 
@@ -18,28 +19,18 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-call :check_running
-if not errorlevel 1 (
-  echo MiniMax H3 Studio is already running. Opening http://127.0.0.1:8787
-  start "" "http://127.0.0.1:8787"
-  exit /b 0
-)
-echo MiniMax H3 Studio: http://127.0.0.1:8787
+echo Checking the running MiniMax H3 Studio version...
 cd /d "%~dp0H3Studio"
-".venv\Scripts\python.exe" app.py
-if errorlevel 1 (
+".venv\Scripts\python.exe" -u app.py --auto-port %*
+set "STUDIO_EXIT=%errorlevel%"
+if not "%STUDIO_EXIT%"=="0" (
   echo.
-  echo [ERROR] MiniMax H3 Studio stopped unexpectedly. Review the error above.
+  echo [ERROR] MiniMax H3 Studio could not start or reuse the running version. Review the error above.
   pause
 )
-endlocal
-exit /b 0
+exit /b %STUDIO_EXIT%
 
 :check_studio_python
 if not exist "%~dp0%STUDIO_PYTHON%" exit /b 1
 "%~dp0%STUDIO_PYTHON%" -c "import aiohttp, av, numpy, PIL, huggingface_hub" >nul 2>&1
-exit /b %errorlevel%
-
-:check_running
-powershell -NoProfile -Command "try { $response = Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8787/api/status' -TimeoutSec 2; if ($response.StatusCode -eq 200) { exit 0 } } catch {}; exit 1" >nul 2>&1
 exit /b %errorlevel%
