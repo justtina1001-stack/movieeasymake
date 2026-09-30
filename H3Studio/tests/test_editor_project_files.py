@@ -21,6 +21,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from PIL import Image
 
 import editor_project_files as files
+import editor_overlays as overlays
 from video_editor import atomic_json, now, probe_media, register_editor_routes, render_project
 from test_video_editor_render import make_audio, make_source
 
@@ -139,6 +140,124 @@ class ProjectFileTests(unittest.IsolatedAsyncioTestCase):
             value["project"]["overlays"][1].update(start=.25)))
         await self.assert_rejected_atomically(self.repack(data, lambda value:
             value["project"]["overlays"].insert(1, value["project"]["overlays"].pop())))
+
+    async def test_text_style_api_save_reload_and_inactive_preferences_require_version_seven(self):
+        from test_editor_overlays import text_layer
+        styled = text_layer(text="描邊與漸層", stroke_width=.08, stroke_color="#123abc",
+                            fill_mode="linear_gradient", gradient_start="#ffe100",
+                            gradient_end="#09ddee", gradient_angle=35)
+        response = await self.client.put(f"/api/editor/projects/{self.project['id']}",
+            json={"updated_at": self.project["updated_at"], "overlays": [styled]})
+        self.assertEqual(response.status, 200, await response.text() if response.status != 200 else "")
+        self.project = await response.json()
+        active = self.project["overlays"][0]
+        self.assertEqual(active["stroke_color"], "#123ABC")
+        self.assertEqual(active["gradient_start"], "#FFE100")
+        self.assertEqual(active["gradient_end"], "#09DDEE")
+        self.assertEqual(active["stroke_width"], .08)
+        self.assertEqual(active["fill_mode"], "linear_gradient")
+        # Switching the effects off must retain the colors and direction for
+        # a later toggle, without adding explicit default fields to snapshots.
+        inactive = {**active, "stroke_width": 0, "fill_mode": "solid"}
+        response = await self.client.put(f"/api/editor/projects/{self.project['id']}",
+            json={"updated_at": self.project["updated_at"], "overlays": [inactive]})
+        self.assertEqual(response.status, 200, await response.text() if response.status != 200 else "")
+        self.project = await response.json()
+        expected = self.project["overlays"][0]
+        self.assertNotIn("stroke_width", expected)
+        self.assertNotIn("fill_mode", expected)
+        for field in ("stroke_color", "gradient_start", "gradient_end", "gradient_angle"):
+            self.assertEqual(expected[field], active[field])
+        restarted, restarted_store, _, _ = await self.make_store("original")
+        response = await restarted.get(f"/api/editor/projects/{self.project['id']}")
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["overlays"], [expected])
+        self.assertEqual(restarted_store.projects[self.project["id"]]["overlays"], [expected])
+        data = await self.archive()
+        manifest, _ = self.unpack(data)
+        self.assertEqual(manifest["version"], 7)
+        response = await self.upload(data)
+        self.assertEqual(response.status, 201, await response.text() if response.status != 201 else "")
+        self.assertEqual((await response.json())["project"]["overlays"], [expected])
+        await self.assert_rejected_atomically(self.repack(data, lambda value: value.update(version=6)))
+
+    async def test_v7_text_style_archive_preserves_motion_tracks_fades_and_real_export(self):
+        from test_editor_overlays import text_layer
+        motion = [{"time": -1, "x": .35, "y": .4, "easing": "ease_in_out"},
+                  {"time": 2, "x": .65, "y": .6, "easing": "linear"}]
+        active = text_layer(id="gradient", track_id="captions", start=0, end=1,
+            text="描邊漸層\nEDIT", font_size=.12, bold=True, align="left", color="#73A142",
+            stroke_width=.08, stroke_color="#FA13CD", fill_mode="linear_gradient",
+            gradient_start="#FFEE00", gradient_end="#00EEFF", gradient_angle=0,
+            rotation=12, opacity=.85, fade_in=.1, fade_out=.2, position_keyframes=motion)
+        inactive = text_layer(id="solid", track_id="captions", start=1, end=2,
+            text="保留設定", color="#19AF39", background="#102030", rotation=-7,
+            opacity=.8, fade_in=.2, fade_out=.1, stroke_width=0, stroke_color="#13CDF0",
+            fill_mode="solid", gradient_start="#C0338A", gradient_end="#78B329", gradient_angle=235,
+            position_keyframes=motion)
+        self.project = self.store.update_project(self.project["id"], {**self.project,
+            "clips": [{"id": "v1", "media_id": self.video_id, "in": 0, "out": 2,
+                       "speed": 1, "volume": 0}], "audio_clips": [], "overlays": [active, inactive]})
+        expected = self.project["overlays"]
+        rasters = [overlays.text_png(layer, 360, 360) for layer in expected]
+        legacy = {key: value for key, value in expected[0].items()
+                  if key not in ("stroke_width", "stroke_color", "fill_mode", "gradient_start", "gradient_end", "gradient_angle")}
+        self.assertNotEqual(rasters[0], overlays.text_png(legacy, 360, 360))
+        original_output = self.root / "original-text-style.mp4"
+        original_info = await asyncio.to_thread(render_project, self.project,
+            {self.video_id: self.store.media_path(self.video_id)}, original_output,
+            threading.Event(), lambda _: None)
+        data = await self.archive()
+        manifest, entries = self.unpack(data)
+        self.assertEqual(manifest["version"], 7)
+        self.assertEqual(manifest["project"]["overlays"], expected)
+        self.assertEqual(len(manifest["media"]), 1)
+        self.assertEqual(sum(name == f"media/{self.video_id}.source" for name, _ in entries), 1)
+        response = await self.upload(data)
+        self.assertEqual(response.status, 201, await response.text() if response.status != 201 else "")
+        imported = await response.json()
+        restored = imported["project"]
+        self.assertEqual(restored["overlays"], expected)
+        self.assertEqual([overlays.text_png(layer, 360, 360) for layer in restored["overlays"]], rasters)
+        restored_id = restored["clips"][0]["media_id"]
+        self.assertNotEqual(restored_id, self.video_id)
+        self.assertEqual(self.restored.media_path(restored_id).read_bytes(), self.store.media_path(self.video_id).read_bytes())
+        self.store.media_path(self.video_id).unlink()
+        restored_output = self.root / "restored-text-style.mp4"
+        restored_info = await asyncio.to_thread(render_project, restored,
+            {restored_id: self.restored.media_path(restored_id)}, restored_output,
+            threading.Event(), lambda _: None)
+        self.assertEqual(original_info["frame_count"], 48)
+        self.assertEqual(restored_info["frame_count"], 48)
+        self.assertEqual(restored_info["duration"], 2)
+        decoded = []
+        for path in (original_output, restored_output):
+            with av.open(str(path)) as video:
+                decoded.append([frame.to_ndarray(format="rgb24").tobytes() for frame in video.decode(video=0)])
+        self.assertEqual(len(decoded[0]), 48)
+        self.assertEqual(decoded[1], decoded[0])
+        for version in (1, 2, 3, 4, 5, 6):
+            with self.subTest(version=version):
+                await self.assert_rejected_atomically(self.repack(data, lambda value: value.update(version=version)))
+        await self.assert_clean()
+
+    async def test_explicit_default_text_styles_keep_v2_archives_and_legacy_versions_readable(self):
+        from test_editor_overlays import text_layer
+        defaults = {"stroke_width": 0, "stroke_color": "#000000", "fill_mode": "solid",
+                    "gradient_start": "#ffffff", "gradient_end": "#ff8a3d", "gradient_angle": 90}
+        self.project = self.store.update_project(self.project["id"], {**self.project,
+            "overlays": [text_layer(**defaults)]})
+        expected = self.project["overlays"][0]
+        for field in defaults:
+            self.assertNotIn(field, expected)
+        data = await self.archive()
+        manifest, _ = self.unpack(data)
+        self.assertEqual(manifest["version"], 2)
+        for version in (2, 3, 4, 5, 6):
+            with self.subTest(version=version):
+                response = await self.upload(self.repack(data, lambda value: value.update(version=version)))
+                self.assertEqual(response.status, 201, await response.text() if response.status != 201 else "")
+                self.assertEqual((await response.json())["project"]["overlays"], [expected])
 
     def repack(self, data, mutate=None, entries_change=None, compression=zipfile.ZIP_STORED):
         manifest, entries = self.unpack(data)

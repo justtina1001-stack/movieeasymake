@@ -18,7 +18,7 @@ class StudioEntrypointTests(unittest.TestCase):
         ):
             studio.main()
         select.assert_called_once_with(8787, auto_port=True,
-                                       required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks"))
+                                       required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style"))
         create.assert_not_called()
         browser.assert_called_once_with("http://127.0.0.1:8789/editor")
 
@@ -30,7 +30,7 @@ class StudioEntrypointTests(unittest.TestCase):
         ):
             studio.main()
         select.assert_called_once_with(8789, auto_port=False,
-                                       required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks"))
+                                       required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style"))
         browser.assert_not_called()
 
     def test_occupied_unresponsive_port_is_failure_without_startup_or_browser(self):

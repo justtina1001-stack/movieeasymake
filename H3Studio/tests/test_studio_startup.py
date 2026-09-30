@@ -159,6 +159,29 @@ class StudioStartupTests(unittest.TestCase):
         self.assertEqual((result.port, result.existing, result.sock, result.lock), (port, True, None, None))
         self.assertEqual(requests, ["/", "/api/editor/capabilities"])
 
+    def test_text_style_capability_is_required_before_reusing_a_loaded_editor(self):
+        required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style")
+        for flag in (None, False, 1, "true"):
+            with self.subTest(text_style=flag):
+                flags = {name: True for name in required[:-1]}
+                if flag is not None:
+                    flags["text_style"] = flag
+                port, requests = self.server(capabilities=json.dumps(flags).encode())
+                with patch.object(startup, "_try_lock", side_effect=AssertionError("stale service must not lock")), \
+                        patch.object(startup, "_reserve_port", side_effect=AssertionError("must not create a second Studio")):
+                    with self.assertRaisesRegex(RuntimeError, "文字描邊與漸層"):
+                        self.plan(port, required_editor_capabilities=required)
+                self.assertEqual(requests, ["/", "/api/editor/capabilities"])
+
+    def test_text_style_editor_reuses_the_same_ready_instance(self):
+        required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style")
+        port, requests = self.server(capabilities=json.dumps({name: True for name in required}).encode())
+        with patch.object(startup, "_try_lock", side_effect=AssertionError("reuse must not lock")), \
+                patch.object(startup, "_reserve_port", side_effect=AssertionError("reuse must not bind")):
+            result = self.plan(port, required_editor_capabilities=required)
+        self.assertEqual((result.port, result.existing, result.sock, result.lock), (port, True, None, None))
+        self.assertEqual(requests, ["/", "/api/editor/capabilities"])
+
     def test_loaded_position_animation_cannot_hide_missing_or_false_speed_curve_capability(self):
         # A restarted process from the previous feature release is healthy and
         # supports position animation, but still cannot save/render speed ramps.

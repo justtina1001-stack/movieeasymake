@@ -25,6 +25,25 @@ MAX_ACTIVE = 12
 MAX_TEXT_PIXELS = 16 * 1024 * 1024
 RASTER_CACHE_BYTES = 192 * 1024 * 1024
 COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
+TEXT_STYLE_DEFAULTS = {"stroke_width": 0, "stroke_color": "#000000", "fill_mode": "solid",
+                       "gradient_start": "#FFFFFF", "gradient_end": "#FF8A3D", "gradient_angle": 90}
+
+
+def _validate_text_style(layer):
+    """Keep legacy text snapshots unchanged and retain inactive editor choices."""
+    style = {"stroke_width": number(layer.get("stroke_width", 0), "文字描邊寬度", 0, .25),
+             "gradient_angle": number(layer.get("gradient_angle", 90), "文字漸層角度", 0, 360)}
+    mode = layer.get("fill_mode", "solid")
+    if not isinstance(mode, str) or mode not in ("solid", "linear_gradient"):
+        raise EditorError("文字填色模式只能使用純色或線性漸層。")
+    style["fill_mode"] = mode
+    for key, label in (("stroke_color", "描邊顏色"), ("gradient_start", "漸層起始色"),
+                       ("gradient_end", "漸層結束色")):
+        value = layer.get(key, TEXT_STYLE_DEFAULTS[key])
+        if not isinstance(value, str) or not COLOR.fullmatch(value):
+            raise EditorError(f"文字{label}需使用 #RRGGBB。")
+        style[key] = value.upper()
+    return {key: value for key, value in style.items() if value != TEXT_STYLE_DEFAULTS[key]}
 
 
 def validate_layer(layer, fps=24, ids=None):
@@ -36,6 +55,8 @@ def validate_layer(layer, fps=24, ids=None):
     kind = layer.get("kind")
     if kind not in ("text", "image", "video"):
         raise EditorError("圖層只能使用文字、圖片或影片。")
+    if kind != "text" and any(key in layer for key in TEXT_STYLE_DEFAULTS):
+        raise EditorError("文字描邊與漸層設定只能使用文字圖層。")
     start = number(layer.get("start"), "圖層起點", 0, 600)
     end = number(layer.get("end"), "圖層終點", 0, 600)
     if end - start + 1e-9 < 1 / fps:
@@ -93,6 +114,7 @@ def validate_layer(layer, fps=24, ids=None):
         clean.update(text=text, font_size=number(layer.get("font_size", .06), "字級", .01, .3),
                      color=color.upper(), background=background if background == "transparent" else background.upper(),
                      bold=bold, align=align)
+        clean.update(_validate_text_style(layer))
     if ids is not None:
         ids.add(layer_id)
     return clean
@@ -200,7 +222,10 @@ def raster_text(layer, width, height):
     for character in set(layer["text"]):
         if not character.isspace() and not _has_glyph(character, layer["bold"]):
             raise EditorError("目前字型缺少這段文字的字元。請改用支援的文字或安裝 Noto Sans CJK／微軟正黑體。", 422)
-    padding = max(1, round(size * .18))
+    stroke_width = round(size * layer.get("stroke_width", 0))
+    # Outlines expand glyph bounds rather than increasing font advances. Reserve
+    # their full radius on every side before wrapping and allocating the raster.
+    padding = max(1, round(size * .18)) + stroke_width
     available = box_width - 2 * padding
     lines = []
     for explicit in layer["text"].replace("\t", "    ").split("\n"):
@@ -217,18 +242,86 @@ def raster_text(layer, width, height):
         if len(lines) > 10:
             raise EditorError("文字換行後超過 10 行，請加寬圖層、縮小字級或減少文字。", 422)
     ascent, descent = font.getmetrics()
-    line_height = ascent + descent + max(1, round(size * .12))
+    line_height = ascent + descent + max(1, round(size * .12)) + 2 * stroke_width
     box_height = len(lines) * line_height + 2 * padding
     if box_width > 8192 or box_height > 8192 or box_width * box_height > MAX_TEXT_PIXELS:
         raise EditorError("文字圖層尺寸過大，請縮小字級或減少行數。", 422)
     background = (0, 0, 0, 0) if layer["background"] == "transparent" else layer["background"]
     result = Image.new("RGBA", (box_width, box_height), background)
-    draw = ImageDraw.Draw(result)
+    positions = []
     for index, line in enumerate(lines):
         length = font.getlength(line)
         x = padding if layer["align"] == "left" else box_width - padding - length if layer["align"] == "right" else (box_width - length) / 2
-        draw.text((x, padding + index * line_height + ascent), line, font=font, fill=layer["color"], anchor="ls")
+        positions.append(((x, padding + index * line_height + ascent), line))
+    if layer.get("fill_mode", "solid") == "linear_gradient":
+        _draw_gradient_text(result, positions, font, stroke_width, layer)
+    else:
+        draw = ImageDraw.Draw(result)
+        for position, line in positions:
+            draw.text(position, line, font=font, fill=layer["color"], anchor="ls",
+                      stroke_width=stroke_width, stroke_fill=layer.get("stroke_color", "#000000"))
     return result
+
+
+def _rgb(color):
+    return tuple(int(color[index:index + 2], 16) for index in (1, 3, 5))
+
+
+def _draw_gradient_text(result, positions, font, stroke_width, layer):
+    """Apply one continuous linear fill to glyph coverage, with a uniform outline.
+
+    Work in short row blocks: even a maximum-size text box never needs a full
+    float RGB/projection array. Alpha is applied once before compositing onto the
+    optional text background; fades and layer opacity remain compositor duties.
+    """
+    with Image.new("L", result.size) as fill_mask:
+        fill_draw = ImageDraw.Draw(fill_mask)
+        for position, line in positions:
+            fill_draw.text(position, line, font=font, fill=255, anchor="ls")
+        bounds = fill_mask.getbbox()
+        if bounds is None:
+            return
+        outline_mask = Image.new("L", result.size) if stroke_width else fill_mask
+        try:
+            if stroke_width:
+                outline_draw = ImageDraw.Draw(outline_mask)
+                for position, line in positions:
+                    outline_draw.text(position, line, font=font, fill=255, anchor="ls",
+                                      stroke_width=stroke_width, stroke_fill=255)
+            paint_bounds = outline_mask.getbbox()
+            left, top, right, bottom = bounds
+            radians = math.radians(layer.get("gradient_angle", 90))
+            cosine, sine = math.cos(radians), math.sin(radians)
+            # Remove floating residuals at axis-aligned angles.
+            cosine = 0 if abs(cosine) < 1e-12 else cosine
+            sine = 0 if abs(sine) < 1e-12 else sine
+            projections = [x * cosine + y * sine for x in (left, right - 1) for y in (top, bottom - 1)]
+            low, high = min(projections), max(projections)
+            span = max(high - low, 1)
+            start = np.asarray(_rgb(layer.get("gradient_start", "#FFFFFF")), dtype=np.float32)
+            end = np.asarray(_rgb(layer.get("gradient_end", "#FF8A3D")), dtype=np.float32)
+            stroke = np.asarray(_rgb(layer.get("stroke_color", "#000000")), dtype=np.float32)
+            px_left, px_top, px_right, px_bottom = paint_bounds
+            xs = np.arange(px_left, px_right, dtype=np.float32)[None, :]
+            for row in range(px_top, px_bottom, 32):
+                row_end = min(row + 32, px_bottom)
+                crop = (px_left, row, px_right, row_end)
+                with fill_mask.crop(crop) as fill, outline_mask.crop(crop) as outline:
+                    fill_alpha = np.asarray(fill, dtype=np.float32)
+                    alpha = np.maximum(np.asarray(outline, dtype=np.float32), fill_alpha)
+                    fraction = np.divide(fill_alpha, alpha, out=np.zeros_like(alpha), where=alpha > 0)
+                    ys = np.arange(row, row_end, dtype=np.float32)[:, None]
+                    ramp = np.clip((xs * cosine + ys * sine - low) / span, 0, 1)
+                    colors = start + ramp[:, :, None] * (end - start)
+                    colors = stroke + fraction[:, :, None] * (colors - stroke)
+                    pixels = np.empty((*alpha.shape, 4), dtype=np.uint8)
+                    pixels[:, :, :3] = np.clip(np.rint(colors), 0, 255).astype(np.uint8)
+                    pixels[:, :, 3] = alpha.astype(np.uint8)
+                    with Image.fromarray(pixels, mode="RGBA") as paint:
+                        result.alpha_composite(paint, (px_left, row))
+        finally:
+            if outline_mask is not fill_mask:
+                outline_mask.close()
 
 
 def text_png(layer, width, height):
@@ -297,6 +390,12 @@ class OverlayCompositor:
 
     def _cached(self, layer, source_only=False):
         key = ("source", layer["id"]) if source_only else layer["id"]
+        if layer["kind"] == "text":
+            # IDs remain stable while text settings change. Include source
+            # styles without frame-local fade or animated-position values.
+            source_key = tuple(layer.get(name, TEXT_STYLE_DEFAULTS.get(name)) for name in
+                               ("text", "width", "font_size", "color", "background", "bold", "align", *TEXT_STYLE_DEFAULTS))
+            key = (key, source_key) if source_only else (key, source_key, layer["x"], layer["y"], layer["rotation"], layer["opacity"])
         if key in self.cache:
             self.cache.move_to_end(key)
             return self.cache[key], True

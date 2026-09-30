@@ -19,6 +19,27 @@
   const mainDuration = project => project.clips.reduce((sum, clip) => sum + duration(clip), 0);
   const totalDuration = project => Math.max(mainDuration(project), ...overlays(project).filter(layer => layer.kind === "video").map(layer => layer.end), 0);
   const nonzeroFades = item => ({ ...((item.fade_in ?? 0) !== 0 ? { fade_in: item.fade_in } : {}), ...((item.fade_out ?? 0) !== 0 ? { fade_out: item.fade_out } : {}) });
+  const TEXT_STYLE_DEFAULTS = Object.freeze({ stroke_width: 0, stroke_color: "#000000", fill_mode: "solid", gradient_start: "#ffffff", gradient_end: "#ff8a3d", gradient_angle: 90 });
+  function canonicalTextStyle(layer) {
+    if (layer.kind !== "text") return {};
+    const fields = {};
+    for (const [field, fallback] of Object.entries(TEXT_STYLE_DEFAULTS)) {
+      const value = layer[field] === undefined ? fallback : typeof layer[field] === "string" && field !== "fill_mode" ? layer[field].toLowerCase() : layer[field];
+      if (value !== fallback) fields[field] = value;
+    }
+    return fields;
+  }
+  function validateTextStyle(layer) {
+    if (layer.kind !== "text") {
+      if (Object.keys(TEXT_STYLE_DEFAULTS).some(field => Object.hasOwn(layer, field))) throw new Error("描邊與漸層填色只適用於文字圖層。");
+      return;
+    }
+    const style = { ...TEXT_STYLE_DEFAULTS, ...canonicalTextStyle(layer) };
+    if (!Number.isFinite(style.stroke_width) || style.stroke_width < 0 || style.stroke_width > 0.25 || !Number.isFinite(style.gradient_angle) || style.gradient_angle < 0 || style.gradient_angle > 360 || !["solid", "linear_gradient"].includes(style.fill_mode) || ![style.stroke_color, style.gradient_start, style.gradient_end].every(color => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color))) throw new Error("文字描邊寬度為字級 0–25%，漸層角度為 0–360 度，請使用有效的六位數顏色。");
+  }
+  function requireTextStyleSupport(value, ready) {
+    if (!ready && overlays(value).some(layer => Object.keys(canonicalTextStyle(layer)).length)) throw new Error("目前 Studio 尚未載入文字描邊與漸層更新，文字樣式尚未送出儲存、草稿仍保留。請保留此頁，重新啟動 Studio 後按「重新檢查」再儲存。");
+  }
   function editableContent(project) {
     const video = clip => ({ id: clip.id, media_id: clip.media_id, in: clip.in, out: clip.out, volume: clip.volume, speed: speedOf(clip), ...curveFields(clip), ...nonzeroFades(clip) });
     return { name: project.name, clips: project.clips.map(video), audio_clips: audioClips(project).map(clip => ({ ...video(clip), start: clip.start, track: clip.track, fade_in: clip.fade_in, fade_out: clip.fade_out })), overlays: overlays(project).map(canonicalOverlay), width: project.width, height: project.height, fps: project.fps };
@@ -27,7 +48,7 @@
     const common = { id: layer.id, kind: layer.kind, start: layer.start, end: layer.kind === "video" ? layer.start + duration(layer) : layer.end, x: layer.x, y: layer.y, width: layer.width, rotation: layer.rotation, opacity: layer.opacity, ...nonzeroFades(layer) };
     if (Object.hasOwn(layer, "track_id")) common.track_id = layer.track_id;
     if (positionKeyframes(layer).length) common.position_keyframes = canonicalPositionKeyframes(layer);
-    return layer.kind === "text" ? { ...common, text: typeof layer.text === "string" ? layer.text.replace(/\r\n?/g, "\n") : layer.text, font_size: layer.font_size, color: layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align } : layer.kind === "video" ? { ...common, media_id: layer.media_id, in: layer.in, out: layer.out, speed: speedOf(layer), ...curveFields(layer), volume: layer.volume } : { ...common, media_id: layer.media_id };
+    return layer.kind === "text" ? { ...common, text: typeof layer.text === "string" ? layer.text.replace(/\r\n?/g, "\n") : layer.text, font_size: layer.font_size, color: layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align, ...canonicalTextStyle(layer) } : layer.kind === "video" ? { ...common, media_id: layer.media_id, in: layer.in, out: layer.out, speed: speedOf(layer), ...curveFields(layer), volume: layer.volume } : { ...common, media_id: layer.media_id };
   }
   function validateOverlays(project, media = null) {
     if (project.overlays !== undefined && !Array.isArray(project.overlays)) throw new Error("圖層資料格式無效。");
@@ -43,6 +64,7 @@
       if (!tracks.has(track)) tracks.set(track, []);
       tracks.get(track).push(layer); previousTrack = track;
       validatePositionKeyframes(layer);
+      validateTextStyle(layer);
       validateSpeedCurve(layer, layer.kind === "video" ? media?.get(layer.media_id)?.duration : undefined);
       if (layer.kind !== "video" && speedCurve(layer).length) throw new Error("曲線變速只適用於影片或音訊片段。");
       if (!["text", "image", "video"].includes(layer.kind) || ![layer.start, layer.end, layer.x, layer.y, layer.width, layer.rotation, layer.opacity].every(Number.isFinite) || layer.start < 0 || layer.end > 600 || layer.end - layer.start < 1 / project.fps - 1e-9 || layer.x < 0 || layer.x > 1 || layer.y < 0 || layer.y > 1 || layer.width < 0.02 || layer.width > 2 || layer.rotation < -180 || layer.rotation > 180 || layer.opacity < 0 || layer.opacity > 1) throw new Error("圖層至少顯示一個影格，時間為 0–600 秒，位置為 0–100%，寬度為 2–200%，透明度為 0–100%。");
@@ -65,7 +87,10 @@
     active = 0; for (const [, change] of videoEvents.sort((a, b) => a[0] - b[0] || a[1] - b[1])) { active += change; if (active > 3) throw new Error("同一時間最多疊加 3 個影片圖層。"); }
   }
   function overlayRasterKey(layer, width, height) {
-    return JSON.stringify({ text: layer.text.replace(/\r\n?/g, "\n"), font_size: layer.font_size, color: layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align, boxWidth: layer.width, width, height });
+    const style = { ...TEXT_STYLE_DEFAULTS, ...canonicalTextStyle(layer) }, gradient = style.fill_mode === "linear_gradient";
+    return JSON.stringify({ text: layer.text.replace(/\r\n?/g, "\n"), font_size: layer.font_size, color: gradient ? undefined : layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align, boxWidth: layer.width, width, height,
+      ...(style.stroke_width > 0 ? { stroke_width: style.stroke_width, stroke_color: style.stroke_color } : {}),
+      ...(gradient ? { fill_mode: style.fill_mode, gradient_start: style.gradient_start, gradient_end: style.gradient_end, gradient_angle: style.gradient_angle } : {}) });
   }
   class PreviewRequestQueue {
     constructor(limit = 2) { this.limit = limit; this.active = 0; this.waiting = []; }
@@ -433,6 +458,7 @@
             if (expected.some(clip => JSON.stringify(canonicalSpeedCurve(clip)) !== JSON.stringify(canonicalSpeedCurve(actual.find(item => item.id === clip.id) || {})))) throw new Error("Studio 後端未完整保存曲線變速，請重新啟動 Studio；目前草稿仍保留。");
           }
           if (snapshot.clips.some(clip => JSON.stringify(nonzeroFades(clip)) !== JSON.stringify(nonzeroFades(saved.clips.find(item => item.id === clip.id) || {})))) throw new Error("Studio 後端未保存影片淡入淡出，請重新啟動 Studio；目前草稿仍保留。");
+          if (overlays(snapshot).some(layer => JSON.stringify(canonicalTextStyle(layer)) !== JSON.stringify(canonicalTextStyle(overlays(saved).find(item => item.id === layer.id) || {})))) throw new Error("Studio 後端未完整保存文字描邊／漸層設定，請重新啟動 Studio 後再儲存；文字樣式草稿仍保留在此頁。");
           if (overlays(snapshot).length && JSON.stringify(overlays(snapshot).map(canonicalOverlay)) !== JSON.stringify(overlays(saved).map(canonicalOverlay))) throw new Error("Studio 後端未完整保存文字／圖片圖層，請重新啟動 Studio；圖層草稿仍保留在此頁。");
           const unchanged = signature(this.project) === signature(snapshot);
           if (unchanged) { this.project = clone(saved); this.project.audio_clips ||= []; this.project.overlays ||= []; }
@@ -600,7 +626,7 @@
     if (!(Number(capabilities.schema_version) >= 2)) throw outdated();
     return capabilities;
   }
-  const core = { ...motion, ...speedMath, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities };
+  const core = { ...motion, ...speedMath, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities };
   const trackDragModule = typeof module !== "undefined" && module.exports ? require("./editor_track_drag.js") : root.H3EditorTrackDrag;
   Object.assign(core, trackDragModule.createTrackDragCore(core));
   if (typeof module !== "undefined" && module.exports) module.exports = core;
@@ -614,7 +640,7 @@
     exportJob: null, exportTimer: null, jobPage: 1, jobsLoading: false, draft: null, audio: null, mixer: null, toastTimer: null,
     previews: new Map(), previewRequests: new Set(), previewTimers: new Map(), buffering: false, audioBuffering: false, backendReady: false,
     trimDrag: null, trimSuppressUntil: 0, recoveries: [], archivesReady: false, overlayDrag: null, trackDrag: null,
-    textOverlaysReady: false, imageOverlaysReady: false, videoOverlaysReady: false, visualFadesReady: false, positionKeyframesReady: false, positionChecking: false, speedCurvesReady: false, overlayTracksReady: false, speedDrag: null,
+    textOverlaysReady: false, textStyleReady: false, textStyleChecking: false, imageOverlaysReady: false, videoOverlaysReady: false, visualFadesReady: false, positionKeyframesReady: false, positionChecking: false, speedCurvesReady: false, overlayTracksReady: false, speedDrag: null,
     layerBuffering: false, lastPlaybackTick: null, rasterCache: new Map(), rasterNodes: new Map(), rasterQueue: new PreviewRequestQueue(2) };
   let video = $("previewVideo");
   const videoElements = [video, $("previewVideoNext")];
@@ -796,6 +822,7 @@
     session.draftOwner = uid();
     session.autosaver = new ProjectAutoSaver(session, snapshot => {
       validateProject(snapshot, state.media);
+      requireTextStyleSupport(snapshot, state.textStyleReady);
       if (overlays(snapshot).some(layer => layer.kind === "text" ? !state.textOverlaysReady : layer.kind === "video" ? !state.videoOverlaysReady : !state.imageOverlaysReady)) throw new Error("Studio 後端尚未載入圖層更新，請重新啟動 Studio 後再儲存；目前圖層草稿仍保留。");
       if (!state.overlayTracksReady && overlays(snapshot).some(layer => Object.hasOwn(layer, "track_id"))) throw new Error("Studio 尚未載入同軌剪輯更新，請重新啟動 Studio；目前草稿仍保留。");
       if (!state.visualFadesReady && [...snapshot.clips, ...overlays(snapshot)].some(item => (item.fade_in ?? 0) > 0 || (item.fade_out ?? 0) > 0)) throw new Error("Studio 後端尚未載入淡入淡出更新，請重新啟動 Studio 後再儲存。");
@@ -882,6 +909,8 @@
     $("showPositionAnimation").disabled = locked();
     $("showSpeedCurve").disabled = locked() || !selectedSpeedVideo();
     $("checkPositionSupport").disabled = !state.backendReady || state.busy || state.positionChecking;
+    $("checkTextStyleSupport").disabled = !state.backendReady || state.busy || state.textStyleChecking;
+    renderTextStyleControls(isOverlay && selected?.kind === "text" ? selected : null);
     for (const id of ["clipFadeIn", "clipFadeOut", "overlayFadeIn", "overlayFadeOut"]) $(id).disabled = locked() || !state.visualFadesReady;
     for (const id of ["moveToLayer", "copyToLayer"]) $(id).disabled = locked() || !selected || state.selectedKind !== "video" || !state.videoOverlaysReady;
     $("addTextOverlay").disabled = locked() || !state.textOverlaysReady; $("addImageOverlay").disabled = locked() || !state.imageOverlaysReady;
@@ -1244,6 +1273,7 @@
       set("overlayText", layer.text); set("overlayFontSize", layer.font_size * 100); set("overlayColor", layer.color); set("overlayBackground", layer.background === "transparent" ? "#000000" : layer.background); set("overlayAlign", layer.align);
       $("overlayBold").checked = layer.bold; $("overlayTransparent").checked = layer.background === "transparent"; $("overlayBackground").disabled = layer.background === "transparent";
       $("overlayTextCount").textContent = `${Array.from(layer.text).length} / 500 字`;
+      renderTextStyleControls(layer);
     }
     $("overlayTimingNote").textContent = `${(layer.end - layer.start).toFixed(2)} 秒 · ${layer.end > totalDuration(project()) ? "超過影片尾端的部分不會匯出。" : "以完整輸出畫布定位，包含補黑邊的區域。"}`;
     $("overlayRasterStatus").textContent = state.rasterNodes.get(layer.id)?.error || "";
@@ -1284,6 +1314,24 @@
     state.positionKeyframesReady = capabilities.position_keyframes === true;
     $("positionSupportBanner").classList.toggle("hidden", state.positionKeyframesReady);
     $("positionSupportMessage").textContent = state.positionKeyframesReady ? "位置關鍵幀已啟用。" : "目前執行中的 Studio 尚未載入位置動畫。請先儲存專案，關閉 Studio 啟動視窗，再執行 start_h3_studio.bat 並按「重新檢查」。啟動視窗未關閉時，再點啟動檔只會開啟原本的 Studio。";
+  }
+  function applyTextStyleCapability(capabilities) {
+    state.textStyleReady = capabilities.text_style === true;
+    $("textStyleSupport").classList.toggle("hidden", state.textStyleReady);
+    $("textStyleSupportMessage").textContent = state.textStyleReady ? "" : "文字描邊與漸層需載入新版 Studio。請先儲存專案，關閉 Studio 啟動視窗，再執行 start_h3_studio.bat 後按「重新檢查」。原有文字與剪輯仍可編輯。";
+  }
+  function renderTextStyleControls(layer, force = false) {
+    const blocked = locked() || !state.textStyleReady || !layer;
+    for (const id of ["overlayFillMode", "overlayGradientStart", "overlayGradientEnd", "overlayGradientAngle", "swapGradientColors", "gradientHorizontal", "gradientVertical", "overlayStrokeWidth", "overlayStrokeColor"]) $(id).disabled = blocked;
+    if (!layer) return;
+    const style = { ...TEXT_STYLE_DEFAULTS, ...canonicalTextStyle(layer) }, gradient = style.fill_mode === "linear_gradient";
+    for (const [id, field, factor] of [["overlayFillMode", "fill_mode", 1], ["overlayGradientStart", "gradient_start", 1], ["overlayGradientEnd", "gradient_end", 1], ["overlayGradientAngle", "gradient_angle", 1], ["overlayStrokeColor", "stroke_color", 1], ["overlayStrokeWidth", "stroke_width", 100]]) {
+      if (force || document.activeElement !== $(id)) $(id).value = typeof style[field] === "number" ? Number((style[field] * factor).toFixed(6)) : style[field];
+    }
+    $("overlayGradientFields").classList.toggle("hidden", !gradient);
+    $("overlaySolidColorField").classList.toggle("hidden", gradient);
+    $("gradientColorPreview").style.background = `linear-gradient(${style.gradient_angle + 90}deg, ${style.gradient_start}, ${style.gradient_end})`;
+    for (const [id, angle] of [["gradientHorizontal", 0], ["gradientVertical", 90]]) $(id).setAttribute("aria-pressed", String(style.gradient_angle === angle));
   }
   function textRaster(layer, value) {
     const key = overlayRasterKey(layer, value.width, value.height);
@@ -1339,6 +1387,13 @@
         return;
       }
       if (!state.textOverlaysReady) { item.placeholder.textContent = "請重啟 Studio 載入文字圖層"; return; }
+      if (!state.textStyleReady && Object.keys(canonicalTextStyle(layer)).length) {
+        clearTimeout(item.timer); item.timer = null; item.key = null; item.img.removeAttribute("src");
+        item.error = "這個文字樣式需重新啟動 Studio 後預覽；草稿仍保留。";
+        item.placeholder.textContent = "請重啟 Studio 載入文字樣式"; item.placeholder.hidden = false;
+        if (state.selected === layer.id) $("overlayRasterStatus").textContent = item.error;
+        return;
+      }
       const key = overlayRasterKey(layer, value.width, value.height);
       if (item.key === key) return;
       clearTimeout(item.timer); item.key = key; item.error = null; item.placeholder.hidden = Boolean(item.img.getAttribute("src"));
@@ -1539,6 +1594,7 @@
     if (!session) return;
     if (!session.project.name.trim()) session.change(p => { p.name = "未命名專案"; });
     validateProject(session.project, state.media);
+    requireTextStyleSupport(session.project, state.textStyleReady);
     try {
       const saved = await (session.autosaver ? session.autosaver.flush() : session.save(snapshot => api(`/api/editor/projects/${snapshot.id}`, json("PUT", snapshot))));
       if (state.session === session) { state.projects = state.projects.map(item => item.id === saved.id ? saved : item); renderProjectList(); renderStatus(); }
@@ -1559,6 +1615,7 @@
       if (!copy) await saveProject();
       else { rememberDraft(); state.session.autosaver?.cancel(); }
       const payload = copy ? { ...editableContent(previous), name: `${previous.name} 副本`.slice(0, 200) } : { name: "未命名專案" };
+      requireTextStyleSupport(payload, state.textStyleReady);
       const response = await api("/api/editor/projects", json("POST", payload));
       const value = response.project || response;
       state.projects.unshift(value); installProject(value);
@@ -1578,6 +1635,7 @@
     state.busy = true; renderDisabled();
     try {
       if (!state.session.conflict) await saveProject(); else rememberDraft();
+      requireTextStyleSupport(draft, state.textStyleReady);
       const response = await api("/api/editor/projects", json("POST", { ...editableContent(draft), name: `${draft.name || "草稿"} 恢復副本`.slice(0, 200) }));
       const saved = response.project || response;
       if (item.key) storagePut(item.key, { ...item, dismissed: true });
@@ -1715,6 +1773,7 @@
     state.overlayTracksReady = capabilities.overlay_tracks === true;
     state.textOverlaysReady = capabilities.text_overlays === true; state.imageOverlaysReady = capabilities.image_overlays === true; state.videoOverlaysReady = capabilities.video_overlays === true; state.visualFadesReady = capabilities.visual_fades === true; state.positionKeyframesReady = capabilities.position_keyframes === true; state.speedCurvesReady = capabilities.speed_curves === true;
     applyMotionCapability(capabilities);
+    applyTextStyleCapability(capabilities);
     $("overlaySupport").textContent = state.textOverlaysReady && state.imageOverlaysReady ? state.videoOverlaysReady && state.visualFadesReady ? state.overlayTracksReady ? "按住片段拖到軌道中央可放入同一軌；上下邊緣可新增層級。影片最多同時 3 個上層。" : "同軌拖曳更新需重新啟動 Studio；原有圖層仍可編輯。" : "影片分層與淡入淡出更新需重新啟動 Studio；文字／圖片仍可編輯。" : "文字／圖片圖層需重新啟動 Studio 後重新整理，現有剪輯仍可使用。";
     $("archiveStatus").textContent = state.archivesReady ? "" : "完整備份需重新啟動 Studio 載入更新；一般儲存與開啟仍可使用。";
     const data = await Promise.all([api("/api/editor/media"), api("/api/editor/projects")]);
@@ -1873,6 +1932,7 @@
     state.positionChecking = true; renderDisabled();
     try {
       const capabilities = await requireCapabilities(api); applyMotionCapability(capabilities); state.speedCurvesReady = capabilities.speed_curves === true; state.overlayTracksReady = capabilities.overlay_tracks === true;
+      applyTextStyleCapability(capabilities);
       renderInspector();
       showPositionFeedback(state.positionKeyframesReady ? "位置關鍵幀已啟用，選取文字或圖片即可加入。" : "目前仍執行未載入位置動畫的 Studio。請先儲存並關閉 Studio 啟動視窗，再重新執行 start_h3_studio.bat；完成後按「重新檢查」。");
     } finally { state.positionChecking = false; renderDisabled(); }
@@ -1920,6 +1980,25 @@
   }));
   $("overlayText").oninput = action(() => overlayEdit(layer => { layer.text = $("overlayText").value; }, `overlay-text:${state.selected}`));
   $("overlayText").onchange = () => { if (state.session) state.session.group = null; };
+  function editTextStyle(update) {
+    if (locked() || state.selectedKind !== "overlay" || selectedClip()?.kind !== "text") return;
+    if (!state.textStyleReady) throw new Error("請先儲存專案並重新啟動 Studio，以載入文字描邊與漸層功能。");
+    try { overlayEdit(update); } finally { renderInspector(); renderTextStyleControls(selectedClip(), true); renderDisabled(); }
+  }
+  for (const [id, field] of [["overlayFillMode", "fill_mode"], ["overlayGradientStart", "gradient_start"], ["overlayGradientEnd", "gradient_end"], ["overlayStrokeColor", "stroke_color"]]) $(id).onchange = action(() => editTextStyle(layer => { layer[field] = $(id).value; }));
+  for (const [id, field, factor] of [["overlayStrokeWidth", "stroke_width", 100], ["overlayGradientAngle", "gradient_angle", 1]]) $(id).onchange = action(() => editTextStyle(layer => { layer[field] = Number($(id).value) / factor; }));
+  $("swapGradientColors").onclick = action(() => editTextStyle(layer => { const style = { ...TEXT_STYLE_DEFAULTS, ...canonicalTextStyle(layer) }; layer.gradient_start = style.gradient_end; layer.gradient_end = style.gradient_start; }));
+  for (const [id, angle] of [["gradientHorizontal", 0], ["gradientVertical", 90]]) $(id).onclick = action(() => editTextStyle(layer => { layer.gradient_angle = angle; }));
+  $("checkTextStyleSupport").onclick = action(async () => {
+    if (state.textStyleChecking) return;
+    state.textStyleChecking = true; renderDisabled();
+    try {
+      applyTextStyleCapability(await requireCapabilities(api));
+      if (state.textStyleReady) { renderOverlayPreview(); notify("文字描邊與漸層已啟用，選取文字後可調整。"); }
+      else notify("目前仍執行舊版 Studio。請先儲存專案並關閉啟動視窗，再重新啟動後檢查。");
+      renderInspector();
+    } finally { state.textStyleChecking = false; renderDisabled(); }
+  });
   for (const [id, field] of [["overlayColor", "color"], ["overlayBackground", "background"], ["overlayAlign", "align"]]) $(id).onchange = action(() => overlayEdit(layer => { layer[field] = $(id).value; }));
   $("overlayBold").onchange = action(() => overlayEdit(layer => { layer.bold = $("overlayBold").checked; }));
   $("overlayTransparent").onchange = action(() => overlayEdit(layer => { layer.background = $("overlayTransparent").checked ? "transparent" : $("overlayBackground").value; }));

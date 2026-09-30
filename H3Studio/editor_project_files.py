@@ -85,6 +85,11 @@ def _archive_version(project):
     # for visual fades, even when there are no extra layers to trigger v2.
     layers = project.get("overlays", [])
     visuals = project.get("clips", []) + layers
+    text_defaults = {"stroke_width": 0, "stroke_color": "#000000", "fill_mode": "solid",
+                     "gradient_start": "#ffffff", "gradient_end": "#ff8a3d", "gradient_angle": 90}
+    if any(any((str(layer.get(key, default)).lower() if isinstance(default, str) else layer.get(key, default)) != default
+               for key, default in text_defaults.items()) for layer in layers if layer.get("kind") == "text"):
+        return 7
     if any("track_id" in layer for layer in layers):
         return 6
     if any(item.get("speed_curve") for item in visuals + project.get("audio_clips", [])):
@@ -224,7 +229,7 @@ def _prepare_import(store, archive_path, staging, cancel):
             _read_entry(archive, entries["project.json"], manifest_path, MAX_MANIFEST_BYTES, total, cancel)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object,
                                   parse_constant=lambda _: (_ for _ in ()).throw(EditorError("專案資訊含無效數值。")))
-            if not isinstance(manifest, dict) or set(manifest) != {"format", "version", "project", "media"} or manifest.get("format") != FORMAT or type(manifest.get("version")) is not int or manifest["version"] not in (1, 2, 3, 4, 5, 6):
+            if not isinstance(manifest, dict) or set(manifest) != {"format", "version", "project", "media"} or manifest.get("format") != FORMAT or type(manifest.get("version")) is not int or manifest["version"] not in (1, 2, 3, 4, 5, 6, 7):
                 raise EditorError("不支援這個專案格式或版本。")
             project, records = manifest["project"], manifest["media"]
             if not isinstance(project, dict) or set(project) - PROJECT_FIELDS or not {"name", "clips", "width", "height", "fps"} <= set(project):
@@ -240,7 +245,7 @@ def _prepare_import(store, archive_path, staging, cancel):
             if any(not isinstance(clip, dict) for clip in project["clips"] + project.get("audio_clips", [])):
                 raise EditorError("專案片段格式錯誤。")
             if _archive_version(project) > manifest["version"]:
-                raise EditorError("共用圖層軌道需要第 6 版備份；曲線變速需要第 5 版，位置動畫需要第 4 版，影片疊層與淡入淡出需要第 3 版。")
+                raise EditorError("文字描邊與漸層設定需要第 7 版備份；共用圖層軌道需要第 6 版，曲線變速需要第 5 版，位置動畫需要第 4 版，影片疊層與淡入淡出需要第 3 版。")
             clips = _source_clips(project)
             if any(not isinstance(clip, dict) for clip in clips):
                 raise EditorError("專案片段格式錯誤。")
