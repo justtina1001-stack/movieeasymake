@@ -649,6 +649,9 @@
   const locked = () => !state.backendReady || state.busy || exporting() || !state.session || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag);
   const canSwitch = () => !locked();
   const selectedClip = () => (state.selectedKind === "overlay" ? overlays(project() || {}) : state.selectedKind === "audio" ? audioClips(project() || {}) : project()?.clips || []).find(clip => clip.id === state.selected);
+  const previewViewport = root.H3EditorPreview.mountPreviewViewport({ stage: $("videoStage"), canvas: $("videoCanvas"),
+    zoomSelect: $("previewZoom"), zoomIn: $("previewZoomIn"), zoomOut: $("previewZoomOut"), fitButton: $("previewFit"), handButton: $("previewHand") },
+    { window: root, document, isBlocked: () => !state.session || state.busy || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) });
   const trackDragUI = root.H3EditorTrackDragUI.mountTrackDrag($("timelineCanvas"));
   const speedEditor = root.H3EditorSpeedUI.mountSpeedEditor($("speedEditor"), {
     onChangeCurve: points => applySelectedSpeed({ speed_curve: points }),
@@ -884,6 +887,7 @@
     $("recoveryCount").textContent = state.recoveries.length;
   }
   function renderDisabled() {
+    previewViewport.render();
     const noClips = !project() || totalDuration(project()) <= 0, selected = selectedClip(), index = project()?.clips.indexOf(selected) ?? -1;
     const isOverlay = state.selectedKind === "overlay", tracks = project() ? core.overlayTrackGroups(project()) : [], layerIndex = selected && isOverlay ? tracks.findIndex(track => track.id === core.overlayTrackId(selected)) : -1;
     ["uploadZone", "addAudio", "emptyAddMedia", "projectName", "outputSize", "outputFps", "saveCopy", "conflictSaveCopy", "reloadProject"].forEach(id => $(id).disabled = locked());
@@ -1414,11 +1418,13 @@
   }
   function fitCanvas() {
     const value = project(); if (!value) return;
-    const stage = $("videoStage"), style = getComputedStyle(stage);
-    const width = stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-    const height = stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-    const fitted = Math.max(0, Math.min(width, height * value.width / value.height));
-    $("videoCanvas").style.width = `${fitted}px`; $("videoCanvas").style.height = `${fitted * value.height / value.width}px`;
+    previewViewport.update({ width: value.width, height: value.height, key: value.id });
+  }
+  function resizePreview() {
+    // Layer drags measure the canvas once at pointerdown. Cancel rather than
+    // committing coordinates measured against a previous viewport size.
+    if (state.overlayDrag?.mode === "position") finishOverlayGesture(false);
+    fitCanvas();
   }
   function render() {
     if (!project()) return;
@@ -2125,8 +2131,8 @@
   root.addEventListener("blur", () => { finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); });
   document.addEventListener("visibilitychange", () => { if (document.hidden) { pause(); finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); } });
   root.addEventListener("beforeunload", event => { finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); if (state.session?.dirty || state.session?.inFlight) { rememberDraft(); event.preventDefault(); event.returnValue = ""; } });
-  root.addEventListener("resize", () => { fitCanvas(); renderTimeline(); });
-  if (root.ResizeObserver) new ResizeObserver(fitCanvas).observe($("videoStage"));
+  root.addEventListener("resize", () => { previewViewport.cancelPan(); resizePreview(); renderTimeline(); });
+  if (root.ResizeObserver) new ResizeObserver(() => { previewViewport.cancelPan(); resizePreview(); }).observe($("videoStage"));
   requestAnimationFrame(playbackTick);
   boot().catch(error => { state.busy = false; errorNotice(error); renderDisabled(); });
 })(typeof window !== "undefined" ? window : globalThis);

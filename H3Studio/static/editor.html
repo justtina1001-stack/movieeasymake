@@ -4,14 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>剪輯室 · H3 Studio</title>
-  <link rel="stylesheet" href="/static/editor.css?v=20260930-text-style1">
-  <script defer src="/static/editor_speed.js?v=20260930-text-style1"></script>
-  <script defer src="/static/editor_layers.js?v=20260930-text-style1"></script>
-  <script defer src="/static/editor_motion.js?v=20260930-text-style1"></script>
-  <script defer src="/static/editor_speed_ui.js?v=20260930-text-style1"></script>
-  <script defer src="/static/editor_track_drag.js?v=20260930-text-style1"></script>
-  <script defer src="/static/editor_track_drag_ui.js?v=20260930-text-style1"></script>
-  <script defer src="/static/editor.js?v=20260930-text-style1"></script>
+  <link rel="stylesheet" href="/static/editor.css?v=20260930-preview-zoom1">
+  <script defer src="/static/editor_speed.js?v=20260930-preview-zoom1"></script>
+  <script defer src="/static/editor_layers.js?v=20260930-preview-zoom1"></script>
+  <script defer src="/static/editor_motion.js?v=20260930-preview-zoom1"></script>
+  <script defer src="/static/editor_speed_ui.js?v=20260930-preview-zoom1"></script>
+  <script defer src="/static/editor_track_drag.js?v=20260930-preview-zoom1"></script>
+  <script defer src="/static/editor_track_drag_ui.js?v=20260930-preview-zoom1"></script>
+  <script defer src="/static/editor_preview.js?v=20260930-preview-zoom1"></script>
+  <script defer src="/static/editor.js?v=20260930-preview-zoom1"></script>
 </head>
 <body>
   <header class="editor-topbar">
@@ -48,7 +49,9 @@
     </aside>
     <section class="viewer panel" aria-label="影片預覽">
       <div class="viewer-heading"><span class="eyebrow">PREVIEW</span><span id="previewClipName" class="subtle">專案預覽</span><span id="canvasBadge" class="badge">1280 × 720</span></div>
-      <div class="video-stage" id="videoStage"><div class="video-canvas" id="videoCanvas"><video id="previewVideo" playsinline preload="auto" aria-label="剪輯預覽影片"></video><video id="previewVideoNext" playsinline preload="auto" muted hidden aria-label="下一片段預載"></video><div id="previewEmpty" class="preview-empty"><span class="empty-reels" aria-hidden="true">▤</span><h2>從第一個片段開始</h2><p>上傳影片，或從左側「生成作品」加入素材。<br>加入音訊、裁切與變速後，在這裡連續預覽。</p><button id="emptyAddMedia" class="button secondary">＋ 加入影片</button></div><div id="overlayCanvas" class="overlay-canvas" aria-label="文字、圖片與影片圖層"></div></div></div>
+      <div class="preview-view-tools" role="toolbar" aria-label="預覽檢視"><button id="previewZoomOut" type="button" class="button ghost small" aria-label="縮小預覽" title="縮小預覽">−</button><label class="sr-only" for="previewZoom">預覽比例</label><select id="previewZoom" aria-label="預覽比例" title="100% 表示輸出每個像素對應畫面 1 像素"><option value="fit">適合視窗</option><option value="0.25">25%</option><option value="0.5">50%</option><option value="0.75">75%</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option><option value="3">300%</option><option value="4">400%</option><option value="custom" data-preview-custom hidden disabled></option></select><button id="previewZoomIn" type="button" class="button ghost small" aria-label="放大預覽" title="放大預覽">＋</button><button id="previewFit" type="button" class="button ghost small" title="置中並適合視窗">適合視窗</button><button id="previewHand" type="button" class="button ghost small" aria-label="手形平移" aria-pressed="false" title="手形模式：按住左鍵拖曳查看放大的畫面；一般模式可拖曳圖層">✋ 平移</button></div>
+      <p id="previewViewHelp" class="sr-only">預覽縮放只影響觀看。Ctrl 或 Command 加滾輪，以游標位置縮放；中鍵拖曳可平移。開啟手形模式後可用左鍵或方向鍵平移，Shift 加方向鍵加大步幅；舞台焦點下按 Home 或 0 適合視窗，Esc 取消平移並退出手形模式。空白鍵播放。</p>
+      <div class="video-stage" id="videoStage" tabindex="0" role="region" aria-label="剪輯預覽" aria-describedby="previewViewHelp" title="Ctrl／Command＋滾輪縮放；按住中鍵拖曳平移"><div class="video-canvas" id="videoCanvas"><video id="previewVideo" playsinline preload="auto" aria-label="剪輯預覽影片"></video><video id="previewVideoNext" playsinline preload="auto" muted hidden aria-label="下一片段預載"></video><div id="previewEmpty" class="preview-empty"><span class="empty-reels" aria-hidden="true">▤</span><h2>從第一個片段開始</h2><p>上傳影片，或從左側「生成作品」加入素材。<br>加入音訊、裁切與變速後，在這裡連續預覽。</p><button id="emptyAddMedia" class="button secondary">＋ 加入影片</button></div><div id="overlayCanvas" class="overlay-canvas" aria-label="文字、圖片與影片圖層"></div></div></div>
       <div class="preview-cache-bar"><span id="previewCacheStatus" class="subtle">預先準備下一片段，減少切換等待。</span><button id="buildPreview" class="button ghost small">建立流暢預覽</button></div>
       <div class="transport"><button id="jumpStart" class="icon-button" aria-label="回到開頭" title="回到開頭">|◀</button><button id="playPause" class="play-button" aria-label="播放" title="播放／暫停（空白鍵）">▶</button><output id="timeDisplay">00:00.00 <span>/ 00:00.00</span></output><span id="playbackStatus" class="subtle"></span></div>
       <input id="previewSeek" class="preview-seek" type="range" min="0" max="0" step="0.01" value="0" aria-label="預覽播放位置">
