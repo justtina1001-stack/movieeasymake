@@ -163,12 +163,14 @@ def _existing_plan(port, required_editor_capabilities):
                 capabilities = json.loads(body)
             except (ValueError, UnicodeDecodeError):
                 pass
-        if not isinstance(capabilities, dict) or any(
-                capabilities.get(name) is not True for name in required_editor_capabilities):
+        missing_capabilities = ([name for name in required_editor_capabilities
+                                 if capabilities.get(name) is not True]
+                                if isinstance(capabilities, dict) else required_editor_capabilities)
+        if missing_capabilities:
             labels = {"position_keyframes": "位置動畫", "speed_curves": "曲線變速",
                       "overlay_tracks": "共用圖層軌道", "text_style": "文字描邊與漸層"}
             features = "、".join(labels.get(name, name)
-                               for name in required_editor_capabilities)
+                               for name in missing_capabilities)
             raise RuntimeError(
                 f"Studio 仍在 http://127.0.0.1:{port} 執行，但未載入目前版本的{features}。"
                 "再次執行啟動檔只會開啟原有服務，不會重新啟動它。"

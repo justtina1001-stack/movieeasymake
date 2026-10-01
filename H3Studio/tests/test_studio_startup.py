@@ -161,17 +161,56 @@ class StudioStartupTests(unittest.TestCase):
 
     def test_text_style_capability_is_required_before_reusing_a_loaded_editor(self):
         required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style")
-        for flag in (None, False, 1, "true"):
-            with self.subTest(text_style=flag):
+        for present, flag in ((False, None), (True, None), (True, False), (True, 0),
+                              (True, 1), (True, "true"), (True, []), (True, {})):
+            with self.subTest(present=present, text_style=flag):
                 flags = {name: True for name in required[:-1]}
-                if flag is not None:
+                if present:
                     flags["text_style"] = flag
                 port, requests = self.server(capabilities=json.dumps(flags).encode())
                 with patch.object(startup, "_try_lock", side_effect=AssertionError("stale service must not lock")), \
                         patch.object(startup, "_reserve_port", side_effect=AssertionError("must not create a second Studio")):
-                    with self.assertRaisesRegex(RuntimeError, "文字描邊與漸層"):
+                    with self.assertRaisesRegex(RuntimeError, "文字描邊與漸層") as error:
                         self.plan(port, required_editor_capabilities=required)
+                for loaded_label in ("位置動畫", "曲線變速", "共用圖層軌道"):
+                    self.assertNotIn(loaded_label, str(error.exception))
                 self.assertEqual(requests, ["/", "/api/editor/capabilities"])
+                self.assertTrue(startup._has_listener(port))
+                self.assertFalse(self.lock_file.exists())
+
+    def test_capability_diagnostic_lists_only_missing_features_in_required_order(self):
+        required = ("text_style", "position_keyframes", "speed_curves", "overlay_tracks", "future_feature")
+        flags = {"position_keyframes": True, "overlay_tracks": True,
+                 "text_style": False, "future_feature": False}
+        port, requests = self.server(capabilities=json.dumps(flags).encode())
+        with patch.object(startup, "_try_lock", side_effect=AssertionError("stale service must not lock")), \
+                patch.object(startup, "_reserve_port", side_effect=AssertionError("must not create a second Studio")):
+            with self.assertRaises(RuntimeError) as error:
+                self.plan(port, required_editor_capabilities=required)
+        self.assertEqual(str(error.exception).split("。", 1)[0],
+                         f"Studio 仍在 http://127.0.0.1:{port} 執行，但未載入目前版本的文字描邊與漸層、曲線變速、future_feature")
+        self.assertEqual(requests, ["/", "/api/editor/capabilities"])
+        self.assertTrue(startup._has_listener(port))
+        self.assertFalse(self.lock_file.exists())
+
+    def test_unreadable_capability_response_still_lists_all_required_features(self):
+        required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style")
+        valid_body = json.dumps({name: True for name in required}).encode()
+        responses = ((b"[]", 200), (b"null", 200), (b"true", 200),
+                     (b"not json", 200), (b"\xff", 200),
+                     (valid_body + b" " * 8192, 200), (valid_body, 404), (valid_body, 502))
+        for body, status in responses:
+            with self.subTest(body=body[:80], status=status):
+                port, requests = self.server(capabilities=body, capability_status=status)
+                with patch.object(startup, "_try_lock", side_effect=AssertionError("stale service must not lock")), \
+                        patch.object(startup, "_reserve_port", side_effect=AssertionError("must not create a second Studio")):
+                    with self.assertRaises(RuntimeError) as error:
+                        self.plan(port, required_editor_capabilities=required)
+                self.assertEqual(str(error.exception).split("。", 1)[0],
+                                 f"Studio 仍在 http://127.0.0.1:{port} 執行，但未載入目前版本的位置動畫、曲線變速、共用圖層軌道、文字描邊與漸層")
+                self.assertEqual(requests, ["/", "/api/editor/capabilities"])
+                self.assertTrue(startup._has_listener(port))
+                self.assertFalse(self.lock_file.exists())
 
     def test_text_style_editor_reuses_the_same_ready_instance(self):
         required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style")
@@ -200,6 +239,7 @@ class StudioStartupTests(unittest.TestCase):
                 self.assertIn("儲存專案", str(error.exception))
                 self.assertIn("確認服務已停止後重新啟動", str(error.exception))
                 self.assertIn("再次執行啟動檔只會開啟原有服務", str(error.exception))
+                self.assertNotIn("位置動畫", str(error.exception))
                 self.assertEqual(requests, ["/", "/api/editor/capabilities"])
                 self.assertTrue(startup._has_listener(old))
 
