@@ -168,7 +168,8 @@ def _existing_plan(port, required_editor_capabilities):
                                 if isinstance(capabilities, dict) else required_editor_capabilities)
         if missing_capabilities:
             labels = {"position_keyframes": "位置動畫", "speed_curves": "曲線變速",
-                      "overlay_tracks": "共用圖層軌道", "text_style": "文字描邊與漸層"}
+                      "overlay_tracks": "共用圖層軌道", "text_style": "文字描邊與漸層",
+                      "generated_video_thumbnails": "生成作品縮圖"}
             features = "、".join(labels.get(name, name)
                                for name in missing_capabilities)
             raise RuntimeError(

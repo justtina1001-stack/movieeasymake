@@ -52,6 +52,7 @@ from video_editor import register_editor_routes
 from editor_media_io import register_editor_media_io
 from editor_project_files import register_editor_project_files
 from editor_overlays import register_editor_overlays
+from job_thumbnails import register_job_thumbnails
 from shortfilm import (
     ShortFilmError,
     ShortFilmStore,
@@ -2086,6 +2087,7 @@ def create_app() -> web.Application:
     app["voice_jobs"] = voice_jobs
     app["shared_gateway"] = gateway
     app["shortfilms"] = shortfilms
+    register_job_thumbnails(app, OUTPUT_DIR)
     image_jobs = register_image_routes(app, STATIC_DIR, DATA_DIR)
     register_editor_routes(app, STATIC_DIR, DATA_DIR)
     register_editor_media_io(app)
@@ -3135,7 +3137,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         launch = plan_startup(args.port, auto_port=args.auto_port,
-                              required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style"))
+                              required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails"))
     except (ValueError, RuntimeError) as error:
         print(f"[ERROR] {error}", flush=True)
         raise SystemExit(1) from error

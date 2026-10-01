@@ -212,6 +212,28 @@ class StudioStartupTests(unittest.TestCase):
                 self.assertTrue(startup._has_listener(port))
                 self.assertFalse(self.lock_file.exists())
 
+    def test_generated_thumbnails_require_a_loaded_endpoint_before_reusing_studio(self):
+        required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style",
+                    "generated_video_thumbnails")
+        for ready in (False, True):
+            with self.subTest(thumbnails_ready=ready):
+                flags = {name: True for name in required[:-1]}
+                if ready:
+                    flags["generated_video_thumbnails"] = True
+                port, requests = self.server(capabilities=json.dumps(flags).encode())
+                with patch.object(startup, "_try_lock", side_effect=AssertionError("must not lock a running Studio")), \
+                        patch.object(startup, "_reserve_port", side_effect=AssertionError("must not start a second Studio")):
+                    if ready:
+                        self.assertTrue(self.plan(port, required_editor_capabilities=required).existing)
+                    else:
+                        with self.assertRaises(RuntimeError) as error:
+                            self.plan(port, required_editor_capabilities=required)
+                        self.assertEqual(str(error.exception).split("。", 1)[0],
+                                         f"Studio 仍在 http://127.0.0.1:{port} 執行，但未載入目前版本的生成作品縮圖")
+                self.assertEqual(requests, ["/", "/api/editor/capabilities"])
+                self.assertTrue(startup._has_listener(port))
+                self.assertFalse(self.lock_file.exists())
+
     def test_text_style_editor_reuses_the_same_ready_instance(self):
         required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style")
         port, requests = self.server(capabilities=json.dumps({name: True for name in required}).encode())

@@ -1744,7 +1744,20 @@
     try {
       const data = await api(`/api/jobs?page=${state.jobPage}&page_size=12`), items = list(data, "jobs");
       const completed = items.filter(job => job.status === "completed" && job.output);
-      $("jobList").innerHTML = completed.map(job => `<article class="media-card"><span class="media-icon" aria-hidden="true">▸</span><div><strong title="${escape(job.name || job.id)}">${escape(job.name || "生成作品 " + job.id.slice(0, 8))}</strong><small>${escape(new Date(job.created_at).toLocaleDateString("zh-TW"))} · ${job.width || "—"}×${job.height || "—"}</small></div><button class="button ghost small" data-import-job="${escape(job.id)}">＋ 匯入並加入</button></article>`).join("") || '<p class="empty-note">這一頁還沒有可匯入的完成影片。可翻頁找其他作品，或直接上傳影片。</p>';
+      $("jobList").innerHTML = completed.map(job => {
+        const name = job.name || "生成作品 " + job.id.slice(0, 8);
+        const thumbnail = `/api/jobs/${encodeURIComponent(job.id)}/thumbnail?v=${encodeURIComponent(job.updated_at || job.created_at || "")}`;
+        return `<article class="media-card generated-job-card"><div class="job-thumbnail"><img data-job-thumbnail data-thumbnail-src="${escape(thumbnail)}" alt="${escape(name)}的影片縮圖" loading="lazy" decoding="async" width="320" height="180"><span class="job-thumbnail-placeholder" aria-hidden="true"><span>▸</span><small>縮圖載入中…</small></span></div><div><strong title="${escape(name)}">${escape(name)}</strong><small>${escape(new Date(job.created_at).toLocaleDateString("zh-TW"))} · ${job.width || "—"}×${job.height || "—"}</small></div><button class="button ghost small" data-import-job="${escape(job.id)}">＋ 匯入並加入</button></article>`;
+      }).join("") || '<p class="empty-note">這一頁還沒有可匯入的完成影片。可翻頁找其他作品，或直接上傳影片。</p>';
+      $("jobList").querySelectorAll("[data-job-thumbnail]").forEach(image => {
+        const frame = image.closest(".job-thumbnail");
+        image.addEventListener("load", () => frame.classList.add("is-ready"), { once: true });
+        image.addEventListener("error", () => {
+          frame.classList.add("is-unavailable");
+          frame.querySelector("small").textContent = "無法取得縮圖";
+        }, { once: true });
+        image.src = image.dataset.thumbnailSrc;
+      });
       $("jobsPrevious").disabled = state.jobPage <= 1;
       const pages = Number(data.total_pages || data.pages || (data.total ? Math.ceil(data.total / 12) : 0));
       $("jobsNext").disabled = pages ? state.jobPage >= pages : items.length < 12;
