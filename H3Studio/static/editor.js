@@ -639,20 +639,29 @@
     playing: false, previewIndex: -1, loadedMedia: null, pendingSeek: null, seekSerial: 0, selectedKind: "video", queuedSeek: null,
     exportJob: null, exportTimer: null, jobPage: 1, jobsLoading: false, draft: null, audio: null, mixer: null, toastTimer: null,
     previews: new Map(), previewRequests: new Set(), previewTimers: new Map(), buffering: false, audioBuffering: false, backendReady: false,
-    trimDrag: null, trimSuppressUntil: 0, recoveries: [], archivesReady: false, overlayDrag: null, trackDrag: null,
+    trimDrag: null, trimSuppressUntil: 0, recoveries: [], archivesReady: false, overlayDrag: null, trackDrag: null, layoutDragging: false,
     textOverlaysReady: false, textStyleReady: false, textStyleChecking: false, imageOverlaysReady: false, videoOverlaysReady: false, visualFadesReady: false, positionKeyframesReady: false, positionChecking: false, speedCurvesReady: false, overlayTracksReady: false, speedDrag: null,
     layerBuffering: false, lastPlaybackTick: null, rasterCache: new Map(), rasterNodes: new Map(), rasterQueue: new PreviewRequestQueue(2) };
   let video = $("previewVideo");
   const videoElements = [video, $("previewVideoNext")];
   const project = () => state.speedDrag?.preview || state.overlayDrag?.transaction.preview || state.trimDrag?.transaction.preview || state.session?.project;
   const exporting = () => ["queued", "running"].includes(state.exportJob?.status);
-  const locked = () => !state.backendReady || state.busy || exporting() || !state.session || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag);
+  const locked = () => !state.backendReady || state.busy || exporting() || !state.session || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
   const canSwitch = () => !locked();
   const selectedClip = () => (state.selectedKind === "overlay" ? overlays(project() || {}) : state.selectedKind === "audio" ? audioClips(project() || {}) : project()?.clips || []).find(clip => clip.id === state.selected);
   const previewViewport = root.H3EditorPreview.mountPreviewViewport({ stage: $("videoStage"), canvas: $("videoCanvas"),
     zoomSelect: $("previewZoom"), zoomIn: $("previewZoomIn"), zoomOut: $("previewZoomOut"), fitButton: $("previewFit"), handButton: $("previewHand") },
-    { window: root, document, isBlocked: () => !state.session || state.busy || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) });
+    { window: root, document, isBlocked: () => !state.session || state.busy || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) });
   const trackDragUI = root.H3EditorTrackDragUI.mountTrackDrag($("timelineCanvas"));
+  const layoutController = root.H3EditorLayout.mountEditorLayout({ shell: $("editorShell"), viewer: $("previewPanel"), stage: $("videoStage"),
+    timeline: $("timelinePanel"), library: $("libraryPanel"), inspector: $("inspectorPanel"),
+    librarySeparator: $("layoutLibrarySeparator"), inspectorSeparator: $("layoutInspectorSeparator"), viewerSeparator: $("layoutViewerSeparator"),
+    maximizeButton: $("previewMaximize"), resetButton: $("layoutReset") }, {
+    window: root, document,
+    isBlocked: () => Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || previewViewport.isPanning),
+    onDragState: active => { state.layoutDragging = active; renderDisabled(); },
+    onResize: () => { previewViewport.cancelPan(); resizePreview(); },
+  });
   const speedEditor = root.H3EditorSpeedUI.mountSpeedEditor($("speedEditor"), {
     onChangeCurve: points => applySelectedSpeed({ speed_curve: points }),
     onChangeMode: mode => {
@@ -888,6 +897,7 @@
   }
   function renderDisabled() {
     previewViewport.render();
+    layoutController.render();
     const noClips = !project() || totalDuration(project()) <= 0, selected = selectedClip(), index = project()?.clips.indexOf(selected) ?? -1;
     const isOverlay = state.selectedKind === "overlay", tracks = project() ? core.overlayTrackGroups(project()) : [], layerIndex = selected && isOverlay ? tracks.findIndex(track => track.id === core.overlayTrackId(selected)) : -1;
     ["uploadZone", "addAudio", "emptyAddMedia", "projectName", "outputSize", "outputFps", "saveCopy", "conflictSaveCopy", "reloadProject"].forEach(id => $(id).disabled = locked());
@@ -920,8 +930,8 @@
     $("addTextOverlay").disabled = locked() || !state.textOverlaysReady; $("addImageOverlay").disabled = locked() || !state.imageOverlaysReady;
     $("layerDown").disabled = locked() || !isOverlay || layerIndex <= 0; $("layerUp").disabled = locked() || !isOverlay || layerIndex >= tracks.length - 1;
     if (isOverlay && selected) renderPositionControls(selected);
-    $("playPause").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag); $("jumpStart").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag); $("previewSeek").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag);
-    $("timelineZoom").disabled = Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag);
+    $("playPause").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging); $("jumpStart").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging); $("previewSeek").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
+    $("timelineZoom").disabled = Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
     document.querySelectorAll("[data-add-media],[data-add-audio],[data-import-job]").forEach(button => button.disabled = locked());
     document.querySelectorAll("[data-add-video-layer]").forEach(button => button.disabled = locked() || !state.videoOverlaysReady);
     document.querySelectorAll(".audio-clip").forEach(button => button.draggable = !locked());
@@ -2078,7 +2088,7 @@
     if (state.trimDrag || Date.now() < state.trimSuppressUntil || event.target.closest("[data-trim-edge]")) { event.preventDefault(); event.stopImmediatePropagation(); }
   }, true);
   $("timelineCanvas").addEventListener("dragstart", event => { if (state.trimDrag || event.target.closest("[data-trim-edge]")) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
-  $("timelineCanvas").onclick = event => { if (!project() || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return; const clip = event.target.closest("[data-clip-id]"), audio = event.target.closest("[data-audio-id]"); if (audio) { state.selected = audio.dataset.audioId; state.selectedKind = "audio"; } else if (clip) { state.selected = clip.dataset.clipId; state.selectedKind = "video"; } const rect = $("timelineCanvas").getBoundingClientRect(); queueSeek((event.clientX - rect.left) / state.zoom); renderTimeline(); renderInspector(); renderDisabled(); };
+  $("timelineCanvas").onclick = event => { if (!project() || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) return; const clip = event.target.closest("[data-clip-id]"), audio = event.target.closest("[data-audio-id]"); if (audio) { state.selected = audio.dataset.audioId; state.selectedKind = "audio"; } else if (clip) { state.selected = clip.dataset.clipId; state.selectedKind = "video"; } const rect = $("timelineCanvas").getBoundingClientRect(); queueSeek((event.clientX - rect.left) / state.zoom); renderTimeline(); renderInspector(); renderDisabled(); };
   $("timelineScroll").onscroll = () => { $("trackLabels").style.transform = `translateY(${-$("timelineScroll").scrollTop}px)`; if (state.trimDrag) queueTrimPreview(); if (state.overlayDrag && state.overlayDrag.mode !== "position" && state.overlayDrag.frame === null) state.overlayDrag.frame = requestAnimationFrame(flushOverlayGesture); if (state.trackDrag && state.trackDrag.frame === null) state.trackDrag.frame = requestAnimationFrame(flushTrackGesture); };
   $("audioTracks").ondragstart = event => { const clip = event.target.closest("[data-audio-id]"); if (!clip || locked()) { event.preventDefault(); return; } const value = audioClips(project()).find(item => item.id === clip.dataset.audioId); state.audioDragOffset = (event.clientX - clip.getBoundingClientRect().left) / state.zoom; event.dataTransfer.setData("application/x-h3-editor-audio", value.id); event.dataTransfer.effectAllowed = "move"; };
   $("audioTracks").ondragover = event => { if (!locked() && [...event.dataTransfer.types].includes("application/x-h3-editor-audio")) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } };
@@ -2087,6 +2097,8 @@
   $("exportProject").onclick = action(startExport);
   $("cancelExport").onclick = action(async () => { if (!exporting()) return; $("cancelExport").disabled = true; try { await api(`/api/editor/exports/${state.exportJob.id}/cancel`, json("POST")); await pollExport(); } finally { $("cancelExport").disabled = false; } });
   document.addEventListener("keydown", action(async event => {
+    if (event.defaultPrevented) return;
+    if (state.layoutDragging) { event.preventDefault(); return; }
     if (state.trackDrag) { if (event.key === "Escape") finishTrackGesture(false); event.preventDefault(); return; }
     if (state.speedDrag) { event.preventDefault(); return; }
     if (state.overlayDrag) { if (event.key === "Escape") finishOverlayGesture(false); event.preventDefault(); return; }

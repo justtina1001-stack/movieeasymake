@@ -70,3 +70,72 @@
 .track-drag-ghost>strong{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.track-drag-ghost>small{font-size:9px;color:#bbd9d8;font-variant-numeric:tabular-nums;white-space:nowrap}.track-drag-ghost.invalid{border-color:#ff7586;background:#4c2b38e6;color:#ffe3e7}.track-drag-ghost.invalid>small{color:#f7b8c2}
 .track-drag-ghost.join-track{padding:3px 9px;gap:1px;font-size:10px;line-height:1.2}.track-drag-ghost.join-track>small{font-size:8px}
 @media(prefers-reduced-motion:no-preference){.track-drop-new{transition:background .12s,border-color .12s}}
+
+/* Resizable workspace: CSS variables describe pane sizes, never video pixels. */
+.layout-separator{display:none;position:relative;align-items:center;justify-content:center;touch-action:none;user-select:none;outline:none;border-radius:5px}
+.layout-separator>span{display:block;border-radius:3px;background:#8994a356;pointer-events:none}
+.layout-separator-vertical{cursor:col-resize}
+.layout-separator-vertical>span{width:3px;height:40px}
+.layout-separator-horizontal{cursor:row-resize}
+.layout-separator-horizontal>span{width:44px;height:3px}
+.layout-separator:hover,.layout-separator:focus-visible,.layout-separator.is-resizing{background:#55d7d017}
+.layout-separator:hover>span,.layout-separator:focus-visible>span,.layout-separator.is-resizing>span{background:var(--cyan)}
+.layout-separator:focus-visible{outline:2px solid var(--cyan);outline-offset:-2px}
+.layout-separator[aria-disabled=true]{cursor:default;opacity:.45}
+body.is-layout-resizing,body.is-layout-resizing *{user-select:none!important}
+body.layout-resize-horizontal,body.layout-resize-horizontal *{cursor:col-resize!important}
+body.layout-resize-vertical,body.layout-resize-vertical *{cursor:row-resize!important}
+.preview-layout-divider{height:17px;border-left:1px solid var(--line);margin:0 2px}
+.viewer>:not(.video-stage):not(.sr-only){flex-shrink:0}
+.viewer-heading{min-width:0}
+.editor-shell>.inspector>.panel-heading{flex-wrap:wrap;gap:8px}
+.viewer .video-stage{flex:1 1 0;min-height:100px}
+.viewer .export-actions{flex-wrap:wrap}
+.viewer .export-actions>.subtle{flex:1 1 150px}
+.timeline{display:flex;flex-direction:column}
+.timeline>.timeline-toolbar,.timeline>.timeline-foot{flex-shrink:0}
+.timeline>.track-layout{flex:1 1 0;min-height:0;height:auto}
+.timeline-scroll{min-height:0}
+
+/* Desktop has explicit tracks for all three separators. The timeline shares
+   the preview/settings width; only the library spans the entire workspace. */
+@media(min-width:851px){
+  .editor-shell{grid-template-columns:var(--layout-library-width,250px) 10px minmax(0,1fr) 10px var(--layout-inspector-width,246px);grid-template-rows:var(--layout-viewer-height,430px) 10px minmax(200px,var(--layout-timeline-height,260px));gap:0;height:calc(var(--layout-height,700px) + 24px);min-height:0}
+  .editor-shell>.library{grid-column:1;grid-row:1/4;min-height:0;overflow-y:auto}
+  .editor-shell>.library>:not(#mediaPanel):not(#jobsPanel){flex-shrink:0}
+  .editor-shell>.library>#mediaPanel,.editor-shell>.library>#jobsPanel{min-height:140px}
+  .editor-shell>.viewer{grid-column:3;grid-row:1;min-height:0;overflow-y:auto}
+  .editor-shell>.inspector{grid-column:5;grid-row:1;min-height:0}
+  .editor-shell>.timeline{grid-column:3/6;grid-row:3;min-height:0}
+  .editor-shell>.layout-separator{display:flex}
+  #layoutLibrarySeparator{grid-column:2;grid-row:1/4}
+  #layoutInspectorSeparator{grid-column:4;grid-row:1}
+  #layoutViewerSeparator{grid-column:3/6;grid-row:2}
+}
+@media(min-width:851px) and (max-width:1150px){
+  .editor-topbar{height:auto;flex-wrap:wrap;padding-top:12px;padding-bottom:12px}
+}
+
+/* Compact layouts keep normal document flow and consume no hidden separator
+   tracks. Saved desktop dimensions resume when the window is wide again. */
+@media(min-width:571px) and (max-width:850px){
+  .editor-shell{display:grid;grid-template-columns:200px minmax(0,1fr);grid-template-rows:max(430px,var(--layout-viewer-min-height,430px)) auto auto;gap:10px;height:auto;min-height:0}
+  .editor-shell>.library{grid-column:1;grid-row:1/3;min-height:0;max-height:max(430px,var(--layout-height,600px));overflow-y:auto;contain:size}
+  .editor-shell>.library>:not(#mediaPanel):not(#jobsPanel){flex-shrink:0}
+  .editor-shell>.library>#mediaPanel,.editor-shell>.library>#jobsPanel{min-height:140px}
+  .editor-shell>.viewer{grid-column:2;grid-row:1;min-height:0;height:100%;overflow-y:auto}
+  .editor-shell>.inspector{grid-column:2;grid-row:2}
+  .editor-shell>.timeline{grid-column:1/3;grid-row:3}
+}
+@media(max-width:570px){
+  .editor-shell{display:flex;flex-direction:column;height:auto;min-height:0;gap:10px}
+  .editor-shell>.viewer{min-height:410px;overflow-y:visible}
+  .editor-shell>.layout-separator{display:none}
+  .preview-view-tools{justify-content:center;padding-left:8px;padding-right:8px}
+}
+
+/* Enlarged preview uses the same live stage and controls on every breakpoint. */
+.editor-shell.preview-maximized{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);height:calc(var(--layout-height,600px) + 24px);min-height:0;gap:0}
+.editor-shell.preview-maximized>.viewer{grid-column:1;grid-row:1;min-height:0;overflow-y:auto}
+.editor-shell.preview-maximized>.library,.editor-shell.preview-maximized>.inspector,.editor-shell.preview-maximized>.timeline,.editor-shell.preview-maximized>.layout-separator{display:none}
+#previewMaximize[aria-pressed=true]{border-color:var(--cyan);color:#b5fff6;background:#55d7d012}
