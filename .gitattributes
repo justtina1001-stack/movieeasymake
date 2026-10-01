@@ -5,4 +5,6 @@
 *.html text eol=lf
 *.md text eol=lf
 *.json text eol=lf
-*.bat text eol=crlf
+# Preserve CRLF in Git blobs and download archives as well as working trees.
+# cmd.exe can fail to locate batch subroutine labels in LF-only scripts.
+*.bat -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
