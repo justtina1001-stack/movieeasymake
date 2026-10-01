@@ -25,6 +25,7 @@ import numpy as np
 from aiohttp import web
 
 from editor_speed import clip_duration, source_at, validate_speed_curve
+from editor_animations import MainTransitionCompositor, animate_main_frame, validate_animations, validate_transition_pairs, validate_transition_setting
 
 
 LOGGER = logging.getLogger(__name__)
@@ -574,10 +575,12 @@ def render_project(project, media_paths, output_path, cancel_event, progress_cal
             timeline.callback(mixer.close)
             layer_mixer = AudioMixer(video_layer_audio(project.get("overlays", [])), media_paths, cancel_event, tracks=3)
             timeline.callback(layer_mixer.close)
+            transitions = MainTransitionCompositor(project["clips"], media_paths, width, height, fps, cancel_event)
+            timeline.callback(transitions.close)
             compositor = None
             if project.get("overlays"):
                 from editor_overlays import OverlayCompositor
-                compositor = OverlayCompositor(project["overlays"], media_paths, width, height, cancel_event=cancel_event)
+                compositor = OverlayCompositor(project["overlays"], media_paths, width, height, cancel_event=cancel_event, fps=fps)
                 timeline.callback(compositor.close)
             video = output.add_stream("libx264", rate=fps)
             video.width, video.height, video.pix_fmt = width, height, "yuv420p"
@@ -608,6 +611,8 @@ def render_project(project, media_paths, output_path, cancel_event, progress_cal
                             if gain < 1:
                                 pixels = np.rint(frame.to_ndarray(format="rgb24") * gain).astype(np.uint8)
                                 frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+                            frame = animate_main_frame(frame, clip, frame_index / fps, duration, width, height)
+                            frame = transitions.apply(frame, clip, video_index / fps)
                         if compositor is not None:
                             frame = compositor.apply(frame, video_index / fps)
                         frame.pts, frame.time_base = video_index, Fraction(1, fps)
@@ -812,10 +817,13 @@ class EditorStore:
                 raise EditorError("淡入與淡出總長度不能超過影片片段長度。")
             clean.append({"id": clip_id, "media_id": media["id"], "in": start, "out": end,
                           "volume": volume, "speed": speed, "fade_in": fade_in, "fade_out": fade_out})
+            clean[-1].update(validate_animations(clip, length))
+            clean[-1].update(validate_transition_setting(clip))
             if points:
                 clean[-1]["speed_curve"] = points
         if duration > 600 + 1e-6:
             raise EditorError("時間軸總長度最多 10 分鐘。")
+        validate_transition_pairs(clean)
         audio_clips = payload.get("audio_clips", current.get("audio_clips", []))
         if not isinstance(audio_clips, list) or len(audio_clips) > 50:
             raise EditorError("配樂軌最多 50 個音訊片段。")
@@ -838,6 +846,8 @@ class EditorStore:
             end = min(end, media["duration"])
             points = validate_speed_curve(clip, media["duration"])
             length = clip_duration({"in": start, "out": end, "speed": speed, "speed_curve": points})
+            if validate_animations(clip, length) or validate_transition_setting(clip):
+                raise EditorError("進場、退場與影片轉場只能使用文字、圖片或影片，音訊請使用淡入／淡出。")
             if length + 1e-9 < 1 / fps or length > 600 + 1e-6:
                 raise EditorError("音訊片段調速後需至少一幀，且最長 10 分鐘。")
             fade_in = number(clip.get("fade_in", 0), "淡入", 0, length)

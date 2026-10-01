@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const {
   clone, duration, totalDuration, signature, locateTime, validateProject,
   splitAt, reorder, ProjectSession, speedOf, audioGain, audioClips, freeAudioTrack,
-  splitAudioAt, detachAudio, audioPreviewCandidates, VideoDeck, AudioPreview, requireCapabilities, requireTextStyleSupport,
+  splitAudioAt, detachAudio, audioPreviewCandidates, VideoDeck, AudioPreview, requireCapabilities, requireTextStyleSupport, requireAnimationSupport,
 } = require("../static/editor.js");
 
 const project = () => ({ id: "project-a", name: "測試", width: 1280, height: 720, fps: 24, updated_at: "r1",
@@ -370,7 +370,7 @@ test("browser save completion cannot re-render an old project after a session sw
   previous.change(p => { p.name = "舊專案儲存中"; });
   const state = { session: previous, media: new Map([["shared", { duration: 12 }]]), projects: [project(), nextProject] };
   let renderCount = 0;
-  const context = vm.createContext({ state, validateProject, requireTextStyleSupport, json: (method, snapshot) => snapshot,
+  const context = vm.createContext({ state, validateProject, requireTextStyleSupport, requireAnimationSupport, json: (method, snapshot) => snapshot,
     api: (_path, snapshot) => pending.promise.then(() => ({ ...snapshot, updated_at: "r2" })),
     render: () => { renderCount++; }, renderStatus() {},
   });

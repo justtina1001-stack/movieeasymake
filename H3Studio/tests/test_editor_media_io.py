@@ -53,7 +53,9 @@ class EditorMediaIOTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_direct_upload_saves_one_independent_copy_without_generic_assets(self):
         capabilities = await (await self.client.get("/api/editor/capabilities")).json()
-        self.assertEqual(capabilities["schema_version"], 7)
+        self.assertEqual(capabilities["schema_version"], 8)
+        self.assertIs(capabilities["clip_animations"], True)
+        self.assertIs(capabilities["clip_transitions"], True)
         self.assertIs(capabilities["text_style"], True)
         self.assertTrue(capabilities["overlay_tracks"])
         self.assertEqual(capabilities["audio_tracks"], 4)

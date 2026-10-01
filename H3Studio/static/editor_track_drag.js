@@ -3,7 +3,7 @@
   "use strict";
   function createTrackDragCore(core) {
     const { clone, duration, speedOf, speedCurve, canonicalSpeedCurve, nonzeroFades,
-      canonicalOverlay, validateProject, signature, overlays } = core;
+      canonicalOverlay, canonicalAnimations, normalizeProjectAnimations, validateProject, signature, overlays } = core;
     const epsilon = 1e-9;
     const overlayTrackId = layer => layer.track_id || layer.id;
     // Projects created before shared tracks have one implicit track per layer.
@@ -79,7 +79,7 @@
       return { id: item.id, media_id: item.media_id, in: item.in, out: item.out,
         volume: item.volume, speed: speedOf(item),
         ...(speedCurve(item).length ? { speed_curve: canonicalSpeedCurve(item) } : {}),
-        ...nonzeroFades(item) };
+        ...nonzeroFades(item), ...canonicalAnimations(item) };
     }
     function transformTrackDrag(project, from, target, media = null) {
       if (!from || !target || !["video", "overlay"].includes(from.kind) || !["video", "overlay"].includes(target.kind)) throw new Error("請將片段拖到影片軌或圖層軌。");
@@ -136,7 +136,7 @@
         next.overlays = flattenOverlayTracks(groups);
       }
       if (target.kind === "video" && from.kind === "overlay") normalizeOverlayTracks(next);
-      validateProject(next, media);
+      normalizeProjectAnimations(next, project); validateProject(next, media);
       return { project: next, changed: signature(next) !== signature(project), selectedKind: target.kind,
         selectedId: moved.id, start, end: start + (target.kind === "video" ? duration(moved) : moved.end - moved.start), layoutReset };
     }

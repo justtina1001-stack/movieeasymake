@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const { fadeEnvelope, clampFades, VideoLayersController } = require("../static/editor_layers.js");
+const animationMath = require("../static/editor_animations.js");
 const {
   clone, clamp, speedOf, speedAtSource, timelineAt, duration, mainDuration, totalDuration, locateTime, validateProject, overlays,
   signature, canonicalSavedSignature, resolveDraft, editableContent,
@@ -421,22 +422,49 @@ test("the shipped V1 gain function resets opacity on a new clip and applies exac
   value.clips.push({ id: "next", media_id: "source", in: 0, out: 2, speed: 1, volume: 1.5 });
   const first = new FakeMedia(), second = new FakeMedia(), firstGain = { gain: { value: 1 } }, secondGain = { gain: { value: 1 } };
   const state = { playhead: 0.25, audio: { gains: new Map([[first, firstGain], [second, secondGain]]) } };
-  const context = vm.createContext({ state, video: first, project: () => value, clamp, speedOf, speedAtSource, timelineAt, duration, fadeEnvelope, $: () => ({}) });
+  const context = vm.createContext({ state, video: first, project: () => value, clamp, speedOf, speedAtSource, timelineAt, duration, fadeEnvelope, animationMath, $: () => ({}) });
   loadBrowserFunction(context, "applyVolume"); context.applyVolume(value.clips[0]);
   close(first.style.opacity, 0.25); close(firstGain.gain.value, 0.2); assert.equal(first.volume, 1);
   second.style.opacity = 0.01; context.video = second; state.playhead = 4.5;
   context.applyVolume(value.clips[1]); assert.equal(second.style.opacity, 1); assert.equal(secondGain.gain.value, 1.5);
 });
 
+test("the shipped V1 entry opacity and exit translation affect pictures while original audio follows only its existing fade", () => {
+  const value = project(), clip = value.clips[0];
+  Object.assign(clip, { fade_in: 1, fade_out: 1, animation_in: { type: "fade", duration: 1 }, animation_out: { type: "slide_left", duration: 1 } });
+  const video = new FakeMedia(), gain = { gain: { value: 1 } }, state = { playhead: 0.25, audio: { gains: new Map([[video, gain]]) } };
+  const context = vm.createContext({ state, video, project: () => value, clamp, speedAtSource, duration, fadeEnvelope, animationMath, $: () => ({}) });
+  loadBrowserFunction(context, "applyVolume"); context.applyVolume(clip);
+  close(video.style.opacity, 0.25 * 0.15625); close(gain.gain.value, clip.volume * 0.25); assert.equal(video.volume, 1);
+  state.playhead = 3.5; context.applyVolume(clip);
+  close(video.style.opacity, 0.5); close(gain.gain.value, clip.volume * 0.5); assert.match(video.style.transform, /translate\(-50%, 0%\) scale\(1\)/);
+});
+
+test("the shipped text/image preview adds entry movement to position keyframes and scales its raster without requesting new text", () => {
+  const image = title({ id: "image", kind: "image", media_id: "picture", start: 1, end: 5, width: 0.4,
+    animation_in: { type: "slide_left", duration: 1 }, position_keyframes: [{ time: 0, x: 0.2, y: 0.5 }, { time: 4, x: 0.8, y: 0.5 }] });
+  const text = title({ id: "text", start: 1, end: 5, width: 0.5, opacity: 0.5, animation_in: { type: "zoom_in", duration: 1 } });
+  const value = project([image, text]), nodes = new Map();
+  for (const layer of [image, text]) nodes.set(layer.id, { node: { style: {}, classList: { toggle() {} } }, img: {}, placeholder: {}, key: layer.kind === "text" ? overlayRasterKey(layer, value.width, value.height) : "/picture.png" });
+  let transitionSyncs = 0;
+  const state = { playhead: 1.25, playing: false, selected: null, rasterNodes: nodes, textOverlaysReady: true, textStyleReady: true, media: new Map([["picture", { url: "/picture.png" }]]) };
+  const context = vm.createContext({ state, project: () => value, overlays, animationMath, positionAt: require("../static/editor_motion.js").positionAt, fadeEnvelope, overlayRasterKey, canonicalTextStyle: () => ({}),
+    pruneRasterCache() {}, videoLayers: { release() {} }, syncTransitionPreview() { transitionSyncs++; }, clearTimeout() {}, setTimeout() { throw new Error("Placement/animation changes must reuse the existing text raster"); } });
+  loadBrowserFunction(context, "renderOverlayPreview"); context.renderOverlayPreview();
+  close(parseFloat(nodes.get("image").node.style.left), (0.2375 + 0.84375) * 100); close(parseFloat(nodes.get("image").node.style.top), 50);
+  close(parseFloat(nodes.get("text").node.style.width), 0.5 * 0.2828125 * 100); close(nodes.get("text").node.style.opacity, 0.5); assert.equal(transitionSyncs, 1);
+});
+
 function clockFixture(value) {
-  const controls = { layersReady: true, audioReady: true, layerPauses: 0, audioPauses: 0, frames: 0 };
+  const controls = { layersReady: true, audioReady: true, transitionsReady: true, layerPauses: 0, audioPauses: 0, transitionPauses: 0, frames: 0 };
   const video = new FakeMedia(); video.readyState = 4;
   const state = { playing: true, playhead: 0, previewIndex: -1, lastPlaybackTick: null,
-    buffering: false, audioBuffering: false, layerBuffering: false, media: media(), trimDrag: null, overlayDrag: null };
+    buffering: false, audioBuffering: false, layerBuffering: false, transitionBuffering: false, media: media(), trimDrag: null, overlayDrag: null };
   const deck = { pending: null, held: false, hold(value) { this.held = value; }, pause() {}, clear() {} };
   const videoLayers = { sync: () => controls.layersReady, pause() { controls.layerPauses++; } };
   state.mixer = { sync: () => controls.audioReady, pause() { controls.audioPauses++; } };
   const context = vm.createContext({ state, deck, video, videoLayers, project: () => value, overlays, totalDuration, speedOf, speedAtSource, timelineAt, duration, clamp,
+    syncTransitionPreview: () => controls.transitionsReady, transitionPreview: { pause() { controls.transitionPauses++; } },
     requestAnimationFrame() { controls.frames++; }, updatePlayhead() {}, applyVolume() {}, renderPlaybackStatus() {},
     $: () => ({ setAttribute() {} }), seek(time) { state.playhead = time; state.previewIndex = locateTime(value, time)?.index ?? -1; },
   });
@@ -464,6 +492,16 @@ test("the shipped clock holds for any audio buffer and crosses the V1 end into a
   f.controls.audioReady = true; f.context.playbackTick(2000); f.video._time = 10; f.context.playbackTick(2020);
   assert.equal(f.state.playhead, 4); assert.equal(f.state.previewIndex, -1); assert.equal(f.state.playing, true);
   f.context.playbackTick(2070); close(f.state.playhead, 4.05);
+});
+
+test("the shipped clock holds every audio/video transport for transition buffering and resumes without a time jump", () => {
+  const value = project([layer({ start: 1, end: 5 })]); value.clips = [];
+  const f = clockFixture(value); f.context.playbackTick(0); f.context.playbackTick(50); close(f.state.playhead, 0.05);
+  f.controls.transitionsReady = false; f.context.playbackTick(100); const stopped = f.state.playhead;
+  assert.equal(f.state.transitionBuffering, true); assert.equal(f.deck.held, true); assert.ok(f.controls.transitionPauses > 0);
+  f.context.playbackTick(1000); assert.equal(f.state.playhead, stopped);
+  f.controls.transitionsReady = true; f.context.playbackTick(2000); assert.equal(f.state.playhead, stopped); assert.equal(f.state.transitionBuffering, false);
+  f.context.playbackTick(2050); close(f.state.playhead, stopped + 0.05); assert.equal(f.deck.held, false);
 });
 
 test("V1 canplay after a mid-clip waiting event releases the shared buffering hold", () => {

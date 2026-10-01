@@ -234,6 +234,27 @@ class StudioStartupTests(unittest.TestCase):
                 self.assertTrue(startup._has_listener(port))
                 self.assertFalse(self.lock_file.exists())
 
+    def test_clip_animations_and_transitions_require_loaded_renderers_before_reuse(self):
+        required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style",
+                    "generated_video_thumbnails", "clip_animations", "clip_transitions")
+        for missing in ("clip_animations", "clip_transitions", None):
+            with self.subTest(missing=missing):
+                flags = {name: True for name in required}
+                if missing:
+                    flags.pop(missing)
+                port, requests = self.server(capabilities=json.dumps(flags).encode())
+                with patch.object(startup, "_try_lock", side_effect=AssertionError("must not lock a running Studio")), \
+                        patch.object(startup, "_reserve_port", side_effect=AssertionError("must not start a second Studio")):
+                    if missing is None:
+                        self.assertTrue(self.plan(port, required_editor_capabilities=required).existing)
+                    else:
+                        with self.assertRaises(RuntimeError) as error:
+                            self.plan(port, required_editor_capabilities=required)
+                        self.assertIn("入場與退場動畫" if missing == "clip_animations" else "影片轉場", str(error.exception))
+                self.assertEqual(requests, ["/", "/api/editor/capabilities"])
+                self.assertTrue(startup._has_listener(port))
+                self.assertFalse(self.lock_file.exists())
+
     def test_text_style_editor_reuses_the_same_ready_instance(self):
         required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style")
         port, requests = self.server(capabilities=json.dumps({name: True for name in required}).encode())

@@ -241,6 +241,59 @@ class ProjectFileTests(unittest.IsolatedAsyncioTestCase):
                 await self.assert_rejected_atomically(self.repack(data, lambda value: value.update(version=version)))
         await self.assert_clean()
 
+    async def test_v8_animation_and_bound_transition_roundtrip_preserves_editable_settings_and_export(self):
+        from test_editor_overlays import text_layer
+        entry, exit = {"type": "slide_left", "duration": .2}, {"type": "zoom_out", "duration": .2}
+        main = [{"id": "left", "media_id": self.video_id, "in": 0, "out": .75, "speed": 1, "volume": .25,
+                 "animation_in": entry, "animation_out": exit,
+                 "transition_out": {"type": "crossfade", "duration": .5, "next_id": "right"}},
+                {"id": "right", "media_id": self.video_id, "in": 1, "out": 1.75, "speed": 1, "volume": 0}]
+        video = {"kind": "video", "media_id": self.video_id, "in": 0, "out": .75, "speed": 1, "volume": 0,
+                 "track_id": "shared", "x": .7, "y": .5, "width": .4, "rotation": 0, "opacity": .7}
+        layers = [{**video, "id": "layer-left", "start": 0, "end": .75,
+                   "animation_in": {"type": "fade", "duration": .2},
+                   "transition_out": {"type": "wipe_left", "duration": .5, "next_id": "layer-right"}},
+                  {**video, "id": "layer-right", "start": .75, "end": 1.5, "in": 1, "out": 1.75,
+                   "animation_out": {"type": "slide_down", "duration": .2}},
+                  text_layer(id="title", end=1.5, text="Scene", font_size=.08,
+                             animation_in={"type": "zoom_in", "duration": .25},
+                             animation_out={"type": "fade", "duration": .25})]
+        self.project = self.store.update_project(self.project["id"], {**self.project, "clips": main,
+            "audio_clips": [], "overlays": layers})
+        original = self.root / "original-animations.mp4"
+        expected_info = await asyncio.to_thread(render_project, self.project,
+            {self.video_id: self.store.media_path(self.video_id)}, original, threading.Event(), lambda _: None)
+        data = await self.archive()
+        manifest, _ = self.unpack(data)
+        self.assertEqual(manifest["version"], 8)
+        self.assertEqual(manifest["project"]["clips"], self.project["clips"])
+        self.assertEqual(manifest["project"]["overlays"], self.project["overlays"])
+        response = await self.upload(data)
+        self.assertEqual(response.status, 201, await response.text() if response.status != 201 else "")
+        restored = (await response.json())["project"]
+        for collection in ("clips", "overlays"):
+            for previous, following in zip(self.project[collection], restored[collection]):
+                self.assertEqual({key: value for key, value in previous.items() if key != "media_id"},
+                                 {key: value for key, value in following.items() if key != "media_id"})
+        self.assertEqual(restored["clips"][0]["transition_out"]["next_id"], restored["clips"][1]["id"])
+        self.assertEqual(restored["overlays"][0]["transition_out"]["next_id"], restored["overlays"][1]["id"])
+        new_id = restored["clips"][0]["media_id"]
+        self.assertNotEqual(new_id, self.video_id)
+        self.assertEqual({layer["media_id"] for layer in restored["overlays"] if layer["kind"] == "video"}, {new_id})
+        self.store.media_path(self.video_id).unlink()
+        output = self.root / "restored-animations.mp4"
+        actual_info = await asyncio.to_thread(render_project, restored,
+            {new_id: self.restored.media_path(new_id)}, output, threading.Event(), lambda _: None)
+        self.assertEqual(actual_info, expected_info)
+        self.assertEqual(actual_info["frame_count"], 36)
+        decoded = []
+        for path in (original, output):
+            with av.open(str(path)) as source:
+                decoded.append([frame.to_ndarray(format="rgb24").tobytes() for frame in source.decode(video=0)])
+        self.assertEqual(decoded[0], decoded[1])
+        await self.assert_rejected_atomically(self.repack(data, lambda value: value.update(version=7)))
+        await self.assert_clean()
+
     async def test_explicit_default_text_styles_keep_v2_archives_and_legacy_versions_readable(self):
         from test_editor_overlays import text_layer
         defaults = {"stroke_width": 0, "stroke_color": "#000000", "fill_mode": "solid",

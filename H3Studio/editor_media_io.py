@@ -255,7 +255,7 @@ def register_editor_media_io(app):
         return await upload_media(request, store)
 
     async def capabilities(request):
-        return web.json_response({"schema_version": 7, "generated_video_thumbnails": True, "text_style": True, "overlay_tracks": True, "audio_tracks": 4, "speed_min": 0.25,
+        return web.json_response({"schema_version": 8, "clip_animations": True, "clip_transitions": True, "generated_video_thumbnails": True, "text_style": True, "overlay_tracks": True, "audio_tracks": 4, "speed_min": 0.25,
                                   "speed_max": 4, "preview_cache": True, "direct_upload": True,
                                   "project_archives": True, "text_overlays": True,
                                   "image_overlays": True, "max_overlays": 50,

@@ -4,6 +4,8 @@
   const { fadeEnvelope, clampFades, VideoLayersController } = typeof module !== "undefined" && module.exports ? require("./editor_layers.js") : root.H3EditorLayers;
   const motion = typeof module !== "undefined" && module.exports ? require("./editor_motion.js") : root.H3EditorMotion;
   const speedMath = typeof module !== "undefined" && module.exports ? require("./editor_speed.js") : root.H3EditorSpeed;
+  const animationsCore = typeof module !== "undefined" && module.exports ? require("./editor_animations.js") : root.H3EditorAnimations;
+  const { canonicalAnimations, validateAnimations, clampAnimations, splitAnimations, validateTransitions } = animationsCore;
   const { speedCurve, canonicalSpeedCurve, validateSpeedCurve, clipDuration, sourceAt, sourceAtExtended, timelineAt, speedAtSource } = speedMath;
   const { positionKeyframes, canonicalPositionKeyframes, validatePositionKeyframes, positionAt, keyframeIndexAt, upsertPositionKeyframe, positionChanges, retimePositionKeyframes } = motion;
   const clone = value => JSON.parse(JSON.stringify(value));
@@ -19,6 +21,38 @@
   const mainDuration = project => project.clips.reduce((sum, clip) => sum + duration(clip), 0);
   const totalDuration = project => Math.max(mainDuration(project), ...overlays(project).filter(layer => layer.kind === "video").map(layer => layer.end), 0);
   const nonzeroFades = item => ({ ...((item.fade_in ?? 0) !== 0 ? { fade_in: item.fade_in } : {}), ...((item.fade_out ?? 0) !== 0 ? { fade_out: item.fade_out } : {}) });
+  const visualLength = item => item.kind && item.kind !== "video" ? item.end - item.start : duration(item);
+  function transitionNeighbor(value, item) {
+    const index = value.clips.findIndex(clip => clip.id === item.id);
+    if (index >= 0) return value.clips[index + 1] || null;
+    const peers = overlays(value).filter(layer => (layer.track_id || layer.id) === (item.track_id || item.id)).sort((a, b) => a.start - b.start);
+    const next = peers[peers.findIndex(layer => layer.id === item.id) + 1];
+    return item.kind === "video" && next?.kind === "video" && Math.abs(item.end - next.start) <= 1e-6 ? next : null;
+  }
+  function normalizeProjectAnimations(value, before) {
+    if (!before) return value;
+    const originalItems = new Map([...before.clips, ...overlays(before)].map(item => [item.id, item]));
+    const same = (first, second) => JSON.stringify(first) === JSON.stringify(second);
+    for (const item of [...value.clips, ...overlays(value)]) {
+      const original = originalItems.get(item.id); if (!original) continue;
+      const length = visualLength(item), oldLength = visualLength(original);
+      // Existing edge effects adapt to shortening; explicitly edited settings
+      // still reach strict validation so invalid input cannot silently disappear.
+      if (Number.isFinite(length) && length > 0 && length < oldLength - 1e-9 && same(item.animation_in, original.animation_in) && same(item.animation_out, original.animation_out)) clampAnimations(item, length);
+      const transition = item.transition_out;
+      if (!transition || !same(transition, original.transition_out) || !canonicalAnimations(original).transition_out) continue;
+      const oldNext = transitionNeighbor(before, original);
+      if (oldNext?.id !== transition.next_id) continue;
+      const next = transitionNeighbor(value, item);
+      if (next?.id !== transition.next_id) { delete item.transition_out; continue; }
+      const nextOriginal = originalItems.get(next.id);
+      if (length < oldLength - 1e-9 || nextOriginal && visualLength(next) < visualLength(nextOriginal) - 1e-9) item.transition_out = { ...transition, duration: Math.min(transition.duration, length, visualLength(next)) };
+    }
+    return value;
+  }
+  function requireAnimationSupport(value, ready) {
+    if (!ready && [...value.clips, ...overlays(value)].some(item => Object.keys(canonicalAnimations(item)).length)) throw new Error("目前 Studio 尚未載入進退場動畫與轉場更新，動畫設定尚未送出儲存、草稿仍保留。請重新啟動 Studio 後再儲存。");
+  }
   const TEXT_STYLE_DEFAULTS = Object.freeze({ stroke_width: 0, stroke_color: "#000000", fill_mode: "solid", gradient_start: "#ffffff", gradient_end: "#ff8a3d", gradient_angle: 90 });
   function canonicalTextStyle(layer) {
     if (layer.kind !== "text") return {};
@@ -41,11 +75,11 @@
     if (!ready && overlays(value).some(layer => Object.keys(canonicalTextStyle(layer)).length)) throw new Error("目前 Studio 尚未載入文字描邊與漸層更新，文字樣式尚未送出儲存、草稿仍保留。請保留此頁，重新啟動 Studio 後按「重新檢查」再儲存。");
   }
   function editableContent(project) {
-    const video = clip => ({ id: clip.id, media_id: clip.media_id, in: clip.in, out: clip.out, volume: clip.volume, speed: speedOf(clip), ...curveFields(clip), ...nonzeroFades(clip) });
+    const video = clip => ({ id: clip.id, media_id: clip.media_id, in: clip.in, out: clip.out, volume: clip.volume, speed: speedOf(clip), ...curveFields(clip), ...nonzeroFades(clip), ...canonicalAnimations(clip) });
     return { name: project.name, clips: project.clips.map(video), audio_clips: audioClips(project).map(clip => ({ ...video(clip), start: clip.start, track: clip.track, fade_in: clip.fade_in, fade_out: clip.fade_out })), overlays: overlays(project).map(canonicalOverlay), width: project.width, height: project.height, fps: project.fps };
   }
   function canonicalOverlay(layer) {
-    const common = { id: layer.id, kind: layer.kind, start: layer.start, end: layer.kind === "video" ? layer.start + duration(layer) : layer.end, x: layer.x, y: layer.y, width: layer.width, rotation: layer.rotation, opacity: layer.opacity, ...nonzeroFades(layer) };
+    const common = { id: layer.id, kind: layer.kind, start: layer.start, end: layer.kind === "video" ? layer.start + duration(layer) : layer.end, x: layer.x, y: layer.y, width: layer.width, rotation: layer.rotation, opacity: layer.opacity, ...nonzeroFades(layer), ...canonicalAnimations(layer) };
     if (Object.hasOwn(layer, "track_id")) common.track_id = layer.track_id;
     if (positionKeyframes(layer).length) common.position_keyframes = canonicalPositionKeyframes(layer);
     return layer.kind === "text" ? { ...common, text: typeof layer.text === "string" ? layer.text.replace(/\r\n?/g, "\n") : layer.text, font_size: layer.font_size, color: layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align, ...canonicalTextStyle(layer) } : layer.kind === "video" ? { ...common, media_id: layer.media_id, in: layer.in, out: layer.out, speed: speedOf(layer), ...curveFields(layer), volume: layer.volume } : { ...common, media_id: layer.media_id };
@@ -65,6 +99,7 @@
       tracks.get(track).push(layer); previousTrack = track;
       validatePositionKeyframes(layer);
       validateTextStyle(layer);
+      validateAnimations(layer, layer.end - layer.start);
       validateSpeedCurve(layer, layer.kind === "video" ? media?.get(layer.media_id)?.duration : undefined);
       if (layer.kind !== "video" && speedCurve(layer).length) throw new Error("曲線變速只適用於影片或音訊片段。");
       if (!["text", "image", "video"].includes(layer.kind) || ![layer.start, layer.end, layer.x, layer.y, layer.width, layer.rotation, layer.opacity].every(Number.isFinite) || layer.start < 0 || layer.end > 600 || layer.end - layer.start < 1 / project.fps - 1e-9 || layer.x < 0 || layer.x > 1 || layer.y < 0 || layer.y > 1 || layer.width < 0.02 || layer.width > 2 || layer.rotation < -180 || layer.rotation > 180 || layer.opacity < 0 || layer.opacity > 1) throw new Error("圖層至少顯示一個影格，時間為 0–600 秒，位置為 0–100%，寬度為 2–200%，透明度為 0–100%。");
@@ -116,7 +151,7 @@
     }
     if (layer.end - layer.start < oldDuration - 1e-9) clampFades(layer, layer.end - layer.start);
     next.overlays = core.overlayTrackGroups(next).flatMap(track => [...track.clips].sort((a, b) => a.start - b.start));
-    validateProject(next, media);
+    normalizeProjectAnimations(next, project); validateProject(next, media);
     return { project: next, layer, changed: signature(next) !== signature(project) };
   }
   function shiftOverlayTime(project, id, mode, delta, media = null) {
@@ -135,12 +170,14 @@
   function splitOverlayAt(project, id, time, makeId = uid) {
     const index = overlays(project).findIndex(item => item.id === id), layer = overlays(project)[index], minimum = 1 / project.fps;
     if (!layer || time - layer.start < minimum - 1e-9 || layer.end - time < minimum - 1e-9) throw new Error("圖層分割點前後至少各留一個影格。");
-    const { fade_in: fadeIn, fade_out: fadeOut, ...base } = layer;
+    const before = clone(project);
+    const { fade_in: fadeIn, fade_out: fadeOut, animation_in, animation_out, transition_out, ...base } = layer;
+    const edgeAnimations = splitAnimations(layer, time - layer.start, layer.end - time);
     base.track_id = layer.track_id || layer.id;
-    const first = { ...base, end: time, ...nonzeroFades({ fade_in: Math.min(fadeIn ?? 0, time - layer.start) }) }, second = { ...base, id: makeId(), start: time, ...nonzeroFades({ fade_out: Math.min(fadeOut ?? 0, layer.end - time) }) };
+    const first = { ...base, end: time, ...edgeAnimations.first, ...nonzeroFades({ fade_in: Math.min(fadeIn ?? 0, time - layer.start) }) }, second = { ...base, id: makeId(), start: time, ...edgeAnimations.second, ...nonzeroFades({ fade_out: Math.min(fadeOut ?? 0, layer.end - time) }) };
     if (layer.kind === "video") { const sourceTime = sourceAt(layer, time - layer.start); first.out = sourceTime; second.in = sourceTime; Object.assign(first, curveFields(layer)); Object.assign(second, curveFields(layer)); }
     if (positionKeyframes(layer).length) { first.position_keyframes = canonicalPositionKeyframes(layer); second.position_keyframes = retimePositionKeyframes(layer, time); }
-    project.overlays.splice(index, 1, first, second); validateProject(project); return second.id;
+    project.overlays.splice(index, 1, first, second); normalizeProjectAnimations(project, before); validateProject(project); return second.id;
   }
   class OverlayTransaction {
     constructor(session, id, media = null) { this.session = session; this.id = id; this.media = media; this.original = clone(session.project); this.originalSignature = signature(session.project); this.preview = clone(this.original); this.result = null; this.closed = false; }
@@ -179,7 +216,7 @@
         follower.start += durationDelta; follower.end += durationDelta; rippleCount++;
       }
     }
-    clampFades(clip, length); validateProject(next, media);
+    clampFades(clip, length); normalizeProjectAnimations(next, project); validateProject(next, media);
     return { project: next, clip, changed: signature(next) !== signature(project), rippleCount, durationDelta };
   }
   class SpeedCurveTransaction {
@@ -244,6 +281,8 @@
       ids.add(clip.id);
       const source = media?.get(clip.media_id);
       validateSpeedCurve(clip, source?.duration);
+      validateAnimations(clip, duration(clip));
+      if (isAudio && Object.keys(canonicalAnimations(clip)).length) throw new Error("進退場動畫與轉場只適用於文字、圖片與影片。");
       if (![clip.in, clip.out, clip.volume, speedOf(clip)].every(Number.isFinite) || speedOf(clip) < 0.25 || speedOf(clip) > 4 || clip.in < 0 || duration(clip) < 1 / Number(project.fps || 24) - 1e-9 || clip.volume < 0 || clip.volume > 2) throw new Error("每個片段至少保留一個影格，速度為 0.25–4 倍，音量須在 0–200% 之間。");
       if (media && !source) throw new Error("有片段找不到來源素材，請重新加入素材。");
       if (source && clip.out > Number(source.duration) + 0.001) throw new Error("出點不能超過來源影片長度。");
@@ -258,6 +297,7 @@
     }
     if (totalDuration(project) > 600.001) throw new Error("專案總長度最多 10 分鐘，請先縮短片段。");
     validateOverlays(project, media);
+    validateTransitions(project, duration);
   }
   function freeAudioTrack(project, start, length) {
     const track = [0, 1, 2, 3].find(value => !audioClips(project).some(item => item.track === value && item.start < start + length - 1e-6 && item.start + duration(item) > start + 1e-6));
@@ -308,10 +348,13 @@
     const point = locateTime(project, time);
     const minimum = 1 / Number(project.fps || 24);
     if (!point || time - point.start < minimum - 1e-7 || point.end - time < minimum - 1e-7) throw new Error("請將播放游標放在片段內，前後至少各留一個影格。");
-    const { fade_in: fadeIn, fade_out: fadeOut, ...base } = point.clip;
-    const first = { ...base, ...curveFields(base), out: point.sourceTime, ...nonzeroFades({ fade_in: Math.min(fadeIn ?? 0, time - point.start) }) };
-    const second = { ...base, ...curveFields(base), id: makeId(), in: point.sourceTime, ...nonzeroFades({ fade_out: Math.min(fadeOut ?? 0, point.end - time) }) };
+    const before = clone(project);
+    const { fade_in: fadeIn, fade_out: fadeOut, animation_in, animation_out, transition_out, ...base } = point.clip;
+    const edgeAnimations = splitAnimations(point.clip, time - point.start, point.end - time);
+    const first = { ...base, ...curveFields(base), out: point.sourceTime, ...edgeAnimations.first, ...nonzeroFades({ fade_in: Math.min(fadeIn ?? 0, time - point.start) }) };
+    const second = { ...base, ...curveFields(base), id: makeId(), in: point.sourceTime, ...edgeAnimations.second, ...nonzeroFades({ fade_out: Math.min(fadeOut ?? 0, point.end - time) }) };
     project.clips.splice(point.index, 1, first, second);
+    normalizeProjectAnimations(project, before);
     validateProject(project);
     return second.id;
   }
@@ -319,17 +362,20 @@
     const from = project.clips.findIndex(c => c.id === id);
     const to = project.clips.findIndex(c => c.id === targetId);
     if (from < 0 || to < 0 || id === targetId) return;
+    const before = clone(project);
     const [clip] = project.clips.splice(from, 1);
     const target = project.clips.findIndex(c => c.id === targetId);
     project.clips.splice(target + (after ? 1 : 0), 0, clip);
+    normalizeProjectAnimations(project, before);
   }
   function promoteClip(project, id, move = false, makeId = uid) {
     const index = project.clips.findIndex(clip => clip.id === id), clip = project.clips[index];
     if (!clip) throw new Error("請先選擇 V1 的影片片段。");
+    const before = clone(project), animations = canonicalAnimations(clip); delete animations.transition_out;
     const start = project.clips.slice(0, index).reduce((sum, item) => sum + duration(item), 0);
-    const layer = { id: makeId(), kind: "video", media_id: clip.media_id, in: clip.in, out: clip.out, speed: speedOf(clip), ...curveFields(clip), volume: move ? clip.volume : 0, start, end: start + duration(clip), x: 0.5, y: 0.5, width: 1, rotation: 0, opacity: 1, fade_in: clip.fade_in ?? 0, fade_out: clip.fade_out ?? 0 };
+    const layer = { id: makeId(), kind: "video", media_id: clip.media_id, in: clip.in, out: clip.out, speed: speedOf(clip), ...curveFields(clip), ...animations, volume: move ? clip.volume : 0, start, end: start + duration(clip), x: 0.5, y: 0.5, width: 1, rotation: 0, opacity: 1, fade_in: clip.fade_in ?? 0, fade_out: clip.fade_out ?? 0 };
     (project.overlays ||= []).push(layer); if (move) project.clips.splice(index, 1);
-    validateProject(project); return layer.id;
+    normalizeProjectAnimations(project, before); validateProject(project); return layer.id;
   }
   function trimTimelineClip(project, { kind, id, edge, delta }, media) {
     if (!["video", "audio"].includes(kind) || !["left", "right"].includes(edge) || !Number.isFinite(delta)) throw new Error("裁切參數無效。");
@@ -375,7 +421,7 @@
       }
       clampFades(clip, duration(clip));
     } else appliedDelta = 0;
-    validateProject(next, media);
+    normalizeProjectAnimations(next, project); validateProject(next, media);
     const clamped = Math.abs(delta - appliedDelta) > 1e-9;
     return { project: next, clip, changed: signature(next) !== signature(project), clamped, requestedDelta: delta, appliedDelta,
       reason: clamped ? (delta < lower[0] ? lower[1] : upper[1]) : "" };
@@ -419,6 +465,7 @@
     change(mutate, group = null) {
       const before = clone(this.project), next = clone(this.project);
       mutate(next);
+      normalizeProjectAnimations(next, before);
       validateProject(next);
       if (signature(before) === signature(next)) return false;
       if (!group || group !== this.group) this.undoStack.push(before);
@@ -458,6 +505,7 @@
             if (expected.some(clip => JSON.stringify(canonicalSpeedCurve(clip)) !== JSON.stringify(canonicalSpeedCurve(actual.find(item => item.id === clip.id) || {})))) throw new Error("Studio 後端未完整保存曲線變速，請重新啟動 Studio；目前草稿仍保留。");
           }
           if (snapshot.clips.some(clip => JSON.stringify(nonzeroFades(clip)) !== JSON.stringify(nonzeroFades(saved.clips.find(item => item.id === clip.id) || {})))) throw new Error("Studio 後端未保存影片淡入淡出，請重新啟動 Studio；目前草稿仍保留。");
+          if ([...snapshot.clips, ...overlays(snapshot)].some(item => JSON.stringify(canonicalAnimations(item)) !== JSON.stringify(canonicalAnimations([...saved.clips, ...overlays(saved)].find(actual => actual.id === item.id) || {})))) throw new Error("Studio 後端未完整保存進退場動畫／轉場，請重新啟動 Studio 後再儲存；目前草稿仍保留。");
           if (overlays(snapshot).some(layer => JSON.stringify(canonicalTextStyle(layer)) !== JSON.stringify(canonicalTextStyle(overlays(saved).find(item => item.id === layer.id) || {})))) throw new Error("Studio 後端未完整保存文字描邊／漸層設定，請重新啟動 Studio 後再儲存；文字樣式草稿仍保留在此頁。");
           if (overlays(snapshot).length && JSON.stringify(overlays(snapshot).map(canonicalOverlay)) !== JSON.stringify(overlays(saved).map(canonicalOverlay))) throw new Error("Studio 後端未完整保存文字／圖片圖層，請重新啟動 Studio；圖層草稿仍保留在此頁。");
           const unchanged = signature(this.project) === signature(snapshot);
@@ -626,7 +674,7 @@
     if (!(Number(capabilities.schema_version) >= 2)) throw outdated();
     return capabilities;
   }
-  const core = { ...motion, ...speedMath, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities };
+  const core = { ...motion, ...speedMath, ...animationsCore, normalizeProjectAnimations, requireAnimationSupport, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities };
   const trackDragModule = typeof module !== "undefined" && module.exports ? require("./editor_track_drag.js") : root.H3EditorTrackDrag;
   Object.assign(core, trackDragModule.createTrackDragCore(core));
   if (typeof module !== "undefined" && module.exports) module.exports = core;
@@ -634,6 +682,7 @@
   if (typeof document === "undefined") return;
 
   const $ = id => document.getElementById(id);
+  const animationMath = root.H3EditorAnimations;
   const escape = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const state = { session: null, media: new Map(), projects: [], selected: null, playhead: 0, zoom: 60, busy: true,
     playing: false, previewIndex: -1, loadedMedia: null, pendingSeek: null, seekSerial: 0, selectedKind: "video", queuedSeek: null,
@@ -641,7 +690,8 @@
     previews: new Map(), previewRequests: new Set(), previewTimers: new Map(), buffering: false, audioBuffering: false, backendReady: false,
     trimDrag: null, trimSuppressUntil: 0, recoveries: [], archivesReady: false, overlayDrag: null, trackDrag: null, layoutDragging: false,
     textOverlaysReady: false, textStyleReady: false, textStyleChecking: false, imageOverlaysReady: false, videoOverlaysReady: false, visualFadesReady: false, positionKeyframesReady: false, positionChecking: false, speedCurvesReady: false, overlayTracksReady: false, speedDrag: null,
-    layerBuffering: false, lastPlaybackTick: null, rasterCache: new Map(), rasterNodes: new Map(), rasterQueue: new PreviewRequestQueue(2) };
+    clipAnimationsReady: false, clipTransitionsReady: false, animationChecking: false, animationPreviewEnd: null, playRequest: 0,
+    transitionBuffering: false, transitionCanvases: new Map(), layerBuffering: false, lastPlaybackTick: null, rasterCache: new Map(), rasterNodes: new Map(), rasterQueue: new PreviewRequestQueue(2) };
   let video = $("previewVideo");
   const videoElements = [video, $("previewVideoNext")];
   const project = () => state.speedDrag?.preview || state.overlayDrag?.transaction.preview || state.trimDrag?.transaction.preview || state.session?.project;
@@ -649,6 +699,75 @@
   const locked = () => !state.backendReady || state.busy || exporting() || !state.session || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
   const canSwitch = () => !locked();
   const selectedClip = () => (state.selectedKind === "overlay" ? overlays(project() || {}) : state.selectedKind === "audio" ? audioClips(project() || {}) : project()?.clips || []).find(clip => clip.id === state.selected);
+  const animationEditor = root.H3EditorAnimationUI.mountAnimationEditor($("animationEditor"), {
+    onChoose: (type, tab) => { try { setSelectedAnimation(type, tab); } catch (error) { errorNotice(error); renderAnimationControls(); } },
+    onDuration: (length, tab) => { try { setSelectedAnimationDuration(length, tab); } catch (error) { errorNotice(error); renderAnimationControls(); } },
+    onPreview: tab => previewSelectedAnimation(tab).catch(errorNotice),
+    onRecheck: () => checkAnimationSupport().catch(errorNotice),
+  });
+  function animationNext(item = selectedClip()) {
+    if (!item || state.selectedKind === "audio") return null;
+    const tracks = animationMath.transitionTracks(project(), duration), track = tracks.find(group => group.kind === state.selectedKind && group.items.some(entry => entry.clip.id === item.id));
+    const index = track?.items.findIndex(entry => entry.clip.id === item.id), current = track?.items[index], next = track?.items[index + 1];
+    if (!next || Math.abs(current.end - next.start) > 1e-6 || (state.selectedKind === "overlay" && (item.kind !== "video" || next.clip.kind !== "video"))) return null;
+    return { item: next.clip, length: next.length, cut: next.start, name: state.media.get(next.clip.media_id)?.name || "下一片段" };
+  }
+  function renderAnimationControls() {
+    const item = selectedClip(), visual = item && state.selectedKind !== "audio";
+    animationEditor.render({ item: visual ? item : null, kind: state.selectedKind,
+      length: visual ? state.selectedKind === "overlay" ? item.end - item.start : duration(item) : 0,
+      next: visual ? animationNext(item) : null, disabled: locked(), supported: state.clipAnimationsReady,
+      transitionSupported: state.clipTransitionsReady, checking: state.animationChecking });
+  }
+  function setSelectedAnimation(type, tab) {
+    if (locked() || !selectedClip() || state.selectedKind === "audio") return;
+    if (!(tab === "transition" ? state.clipTransitionsReady : state.clipAnimationsReady)) throw new Error("請先儲存並重新啟動 Studio，以載入動畫與轉場。");
+    const next = tab === "transition" ? animationNext() : null;
+    if (tab === "transition" && !next) throw new Error("轉場需要同軌相鄰的兩段影片。");
+    const field = tab === "transition" ? "transition_out" : `animation_${tab}`;
+    pause();
+    edit(value => {
+      const item = (state.selectedKind === "overlay" ? overlays(value) : value.clips).find(entry => entry.id === state.selected);
+      const length = state.selectedKind === "overlay" ? item.end - item.start : duration(item);
+      if (type === "none") delete item[field];
+      else {
+        const limit = tab === "transition" ? Math.min(5, length, next.length) : Math.min(5, length);
+        item[field] = { type, duration: Math.min(item[field]?.duration || 0.6, limit), ...(next ? { next_id: next.item.id } : {}) };
+        animationMath.clampAnimations(item, length);
+      }
+    }, null, false);
+    renderAnimationControls();
+  }
+  function setSelectedAnimationDuration(seconds, tab) {
+    if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("動畫時長需大於 0 秒。");
+    const item = selectedClip(), field = tab === "transition" ? "transition_out" : `animation_${tab}`;
+    if (!item?.[field] || locked()) return;
+    const length = state.selectedKind === "overlay" ? item.end - item.start : duration(item), next = animationNext(item);
+    const other = tab === "in" ? item.animation_out?.duration || 0 : item.animation_in?.duration || 0;
+    const limit = tab === "transition" ? Math.min(5, length, next?.length || 0) : Math.min(5, length - other);
+    const adjusted = Math.min(seconds, limit); if (adjusted <= 0) return;
+    pause(); edit(value => { const current = (state.selectedKind === "overlay" ? overlays(value) : value.clips).find(entry => entry.id === item.id); current[field] = { ...current[field], duration: adjusted }; }, null, false);
+    if (adjusted < seconds) notify("動畫時長已縮限到片段可用範圍。");
+  }
+  async function previewSelectedAnimation(tab) {
+    const item = selectedClip(), field = tab === "transition" ? "transition_out" : `animation_${tab}`;
+    if (!item?.[field] || locked()) return;
+    const session = state.session;
+    const length = state.selectedKind === "overlay" ? item.end - item.start : duration(item), start = clipTimelineStart(project(), state.selectedKind, item.id);
+    const next = animationNext(item), durationValue = item[field].duration;
+    const previewStart = tab === "transition" ? next.cut - durationValue / 2 : tab === "out" ? start + length - durationValue : start;
+    const previewEnd = tab === "transition" ? next.cut + durationValue / 2 : tab === "out" ? start + length : start + durationValue;
+    pause(); seek(previewStart, false);
+    const playback = togglePlay(), request = state.playRequest;
+    if (!await playback || state.session !== session || state.playRequest !== request || !state.playing) return;
+    state.animationPreviewEnd = Math.min(totalDuration(project()), previewEnd);
+  }
+  async function checkAnimationSupport() {
+    if (state.animationChecking) return;
+    state.animationChecking = true; renderAnimationControls();
+    try { const capabilities = await requireCapabilities(api); state.clipAnimationsReady = capabilities.clip_animations === true; state.clipTransitionsReady = capabilities.clip_transitions === true; notify(state.clipAnimationsReady && state.clipTransitionsReady ? "入場、退場動畫與影片轉場已啟用。" : "目前仍是舊版 Studio，請儲存剪輯後關閉啟動視窗並重新啟動。"); }
+    finally { state.animationChecking = false; renderAnimationControls(); }
+  }
   const previewViewport = root.H3EditorPreview.mountPreviewViewport({ stage: $("videoStage"), canvas: $("videoCanvas"),
     zoomSelect: $("previewZoom"), zoomIn: $("previewZoomIn"), zoomOut: $("previewZoomOut"), fitButton: $("previewFit"), handButton: $("previewHand") },
     { window: root, document, isBlocked: () => !state.session || state.busy || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) });
@@ -758,6 +877,67 @@
       pause(); errorNotice(error);
     },
   });
+  const transitionPreview = new root.H3EditorTransitionPreview.TransitionPreviewController(() => {
+    const element = document.createElement("video"); element.playsInline = true; element.muted = true; element.preload = "auto"; return element;
+  }, { resolveUrl: clip => previewUrl(clip.media_id), onError(error, clip, url) {
+    const cached = state.previews.get(clip?.media_id);
+    if (cached?.url === url) { state.previews.set(clip.media_id, { ...cached, status: "failed", error: "轉場預覽快取無法播放，已改用原始素材。" }); return; }
+    pause(); errorNotice(error);
+  } });
+  function clearTransitionPreview() {
+    transitionPreview.clear(); for (const item of state.transitionCanvases.values()) item.canvas.remove(); state.transitionCanvases.clear();
+    videoElements.forEach(element => { element.style.visibility = ""; }); state.transitionBuffering = false;
+  }
+  function drawTransitionSource(canvas, element, clip, local, length, kind) {
+    const context = canvas.getContext("2d"), width = canvas.width, height = canvas.height;
+    context.clearRect(0, 0, width, height);
+    if (kind === "video") { context.fillStyle = "#000"; context.fillRect(0, 0, width, height); }
+    if (!element?.videoWidth || !element.videoHeight || element.readyState < 2) return;
+    const transform = animationMath.animationTransformAt(clip, local, length);
+    const position = kind === "overlay" ? positionAt(clip, local) : { x: 0.5, y: 0.5 };
+    const ratio = element.videoWidth / element.videoHeight;
+    const fittedWidth = kind === "overlay" ? clip.width * width : Math.min(width, height * ratio), fittedHeight = fittedWidth / ratio;
+    context.save(); context.translate((position.x + transform.x) * width, (position.y + transform.y) * height);
+    context.rotate((kind === "overlay" ? clip.rotation : 0) * Math.PI / 180); context.scale(transform.scale, transform.scale);
+    context.globalAlpha = transform.opacity * fadeEnvelope(clip, local, length) * (kind === "overlay" ? clip.opacity : 1);
+    context.drawImage(element, -fittedWidth / 2, -fittedHeight / 2, fittedWidth, fittedHeight); context.restore();
+  }
+  function syncTransitionPreview(playing) {
+    const value = project(); if (!value) return true;
+    const pairs = animationMath.transitionPairs(value, duration), active = animationMath.transitionAt(value, state.playhead, duration);
+    const ready = transitionPreview.sync(pairs, state.playhead, playing, value.fps), keep = new Set(active.map(pair => pair.id));
+    for (const [id, item] of state.transitionCanvases) if (!keep.has(id)) { item.canvas.remove(); state.transitionCanvases.delete(id); }
+    videoElements.forEach(element => { element.style.visibility = active.some(pair => pair.kind === "video") ? "hidden" : ""; });
+    for (const item of state.rasterNodes.values()) item.node.style.visibility = "";
+    for (const pair of active) {
+      let item = state.transitionCanvases.get(pair.id);
+      if (!item) {
+        const canvas = document.createElement("canvas"); canvas.className = `preview-transition ${pair.kind === "video" ? "preview-main-transition" : "preview-layer-transition"}`; canvas.setAttribute("aria-hidden", "true");
+        (pair.kind === "video" ? $("videoCanvas") : $("overlayCanvas")).append(canvas);
+        item = { canvas, from: document.createElement("canvas"), to: document.createElement("canvas") }; state.transitionCanvases.set(pair.id, item);
+      }
+      const width = Math.max(1, Math.min(value.width, 1280, Math.ceil($("videoCanvas").clientWidth * (root.devicePixelRatio || 1)))), height = Math.max(1, Math.round(width * value.height / value.width));
+      for (const canvas of [item.canvas, item.from, item.to]) if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+      if (pair.kind === "overlay") {
+        const index = Math.min(overlays(value).indexOf(pair.from), overlays(value).indexOf(pair.to)); item.canvas.style.zIndex = index + 1;
+        for (const id of [pair.from.id, pair.to.id]) { const node = state.rasterNodes.get(id)?.node; if (node) node.style.visibility = "hidden"; }
+      }
+      const elements = transitionPreview.get(pair.id); if (!elements) continue;
+      const drawKey = [state.playhead, width, height, elements.from.readyState, elements.from.currentTime, elements.from.seeking, elements.to.readyState, elements.to.currentTime, elements.to.seeking].join("|");
+      if (!playing && ready && item.lastDrawProject === value && item.lastDrawKey === drawKey) continue;
+      drawTransitionSource(item.from, elements.from, pair.from, pair.fromLocal, pair.fromLength, pair.kind);
+      drawTransitionSource(item.to, elements.to, pair.to, pair.toLocal, pair.toLength, pair.kind);
+      const context = item.canvas.getContext("2d"), visual = animationMath.transitionVisualAt(pair.type, pair.progress);
+      context.clearRect(0, 0, width, height);
+      for (const [role, source] of [["from", item.from], ["to", item.to]]) {
+        context.save(); context.beginPath(); context.rect(visual[role].left * width, 0, (visual[role].right - visual[role].left) * width, height); context.clip();
+        context.globalAlpha = visual[role].opacity; context.globalCompositeOperation = pair.type === "crossfade" && role === "to" ? "lighter" : "source-over";
+        context.drawImage(source, 0, 0); context.restore();
+      }
+      item.lastDrawProject = ready ? value : null; item.lastDrawKey = ready ? drawKey : null;
+    }
+    return ready;
+  }
   function notify(message) {
     $("toast").textContent = message; $("toast").classList.remove("hidden");
     clearTimeout(state.toastTimer); state.toastTimer = setTimeout(() => $("toast").classList.add("hidden"), 4200);
@@ -829,12 +1009,13 @@
   }
   function installProject(value) {
     state.session?.autosaver?.cancel();
-    pause(); deck.clear(); state.mixer?.clear(); videoLayers.clear();
+    pause(); deck.clear(); state.mixer?.clear(); videoLayers.clear(); clearTransitionPreview();
     const session = new ProjectSession(value);
     session.draftOwner = uid();
     session.autosaver = new ProjectAutoSaver(session, snapshot => {
       validateProject(snapshot, state.media);
       requireTextStyleSupport(snapshot, state.textStyleReady);
+      requireAnimationSupport(snapshot, state.clipAnimationsReady && state.clipTransitionsReady);
       if (overlays(snapshot).some(layer => layer.kind === "text" ? !state.textOverlaysReady : layer.kind === "video" ? !state.videoOverlaysReady : !state.imageOverlaysReady)) throw new Error("Studio 後端尚未載入圖層更新，請重新啟動 Studio 後再儲存；目前圖層草稿仍保留。");
       if (!state.overlayTracksReady && overlays(snapshot).some(layer => Object.hasOwn(layer, "track_id"))) throw new Error("Studio 尚未載入同軌剪輯更新，請重新啟動 Studio；目前草稿仍保留。");
       if (!state.visualFadesReady && [...snapshot.clips, ...overlays(snapshot)].some(item => (item.fade_in ?? 0) > 0 || (item.fade_out ?? 0) > 0)) throw new Error("Studio 後端尚未載入淡入淡出更新，請重新啟動 Studio 後再儲存。");
@@ -943,6 +1124,7 @@
     document.querySelectorAll(".timeline-clip").forEach(button => button.draggable = false);
     document.querySelectorAll("[data-trim-edge]").forEach(handle => handle.setAttribute("aria-disabled", String(locked() || Boolean(state.session?.inFlight))));
     renderSpeedControls();
+    renderAnimationControls();
   }
   function overlaySupported(kind) { return kind === "text" ? state.textOverlaysReady : kind === "video" ? state.videoOverlaysReady : state.imageOverlaysReady; }
   function renderMedia() {
@@ -965,6 +1147,18 @@
   function positionDiamonds(layer) {
     return positionKeyframes(layer).filter(point => point.time >= 0 && point.time <= layer.end - layer.start).map(point => `<span class="position-diamond" role="button" tabindex="0" data-position-time="${point.time}" data-position-layer="${escape(layer.id)}" style="left:${point.time * state.zoom}px" aria-label="跳至位置關鍵幀 ${(layer.start + point.time).toFixed(2)} 秒" title="位置關鍵幀 ${(layer.start + point.time).toFixed(2)} 秒">◆</span>`).join("");
   }
+  function animationMark(item) {
+    const settings = [item.animation_in ? "入" : "", item.animation_out ? "出" : ""].filter(Boolean);
+    return settings.length ? `<span class="clip-animation-mark" title="已套用${settings.map(label => label === "入" ? "入場" : "退場").join("／")}動畫"> ✦ ${settings.join("／")}</span>` : "";
+  }
+  function transitionButtons(value, kind, trackId = "V1") {
+    const track = animationMath.transitionTracks(value, duration).find(item => item.kind === kind && item.track_id === trackId); if (!track) return "";
+    return track.items.slice(0, -1).map((previous, index) => {
+      const next = track.items[index + 1]; if (Math.abs(previous.end - next.start) > 1e-6 || (kind === "overlay" && (previous.clip.kind !== "video" || next.clip.kind !== "video"))) return "";
+      const setting = previous.clip.transition_out, label = setting ? `${root.H3EditorAnimationUI.effectLabel(setting.type, "transition")} ${setting.duration.toFixed(2)} 秒` : "加入轉場";
+      return `<button type="button" class="timeline-transition ${setting ? "has-transition" : ""}" style="left:${next.start * state.zoom}px" data-transition-for="${escape(previous.clip.id)}" data-transition-kind="${kind}" aria-label="${setting ? "調整" : "加入"}轉場：${escape(state.media.get(previous.clip.media_id)?.name || "影片")} 接至 ${escape(state.media.get(next.clip.media_id)?.name || "下一影片")}" title="${escape(label)}" ${locked() ? "disabled" : ""}>⋈</button>`;
+    }).join("");
+  }
   function overlayClipMarkup(layer) {
     return `<button class="overlay-clip ${layer.kind === "video" ? "video-layer" : ""} ${state.selectedKind === "overlay" && layer.id === state.selected ? "selected" : ""} ${layer.start * state.zoom < 8 ? "at-timeline-start" : ""}" data-overlay-id="${escape(layer.id)}" style="left:${layer.start * state.zoom}px;width:${(layer.end - layer.start) * state.zoom}px" title="按住片段上下換層、左右定位；兩端調整顯示時間"><span class="overlay-clip-name">${layer.kind === "text" ? "T " + escape(layer.text || "空白文字") : (layer.kind === "video" ? "▸ " : "▧ ") + escape(state.media.get(layer.media_id)?.name || "素材")}</span><i class="fade-in" style="width:${(layer.fade_in || 0) * state.zoom}px"></i><i class="fade-out" style="width:${(layer.fade_out || 0) * state.zoom}px"></i>${["left", "right"].map(edge => `<span class="overlay-time-handle ${edge}" data-overlay-edge="${edge}" tabindex="0" role="slider" aria-label="圖層${edge === "left" ? "開始" : "結束"}時間" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="600" aria-valuenow="${edge === "left" ? layer.start : layer.end}" aria-valuetext="${(edge === "left" ? layer.start : layer.end).toFixed(3)} 秒"><i></i></span>`).join("")}${positionDiamonds(layer)}</button>`;
   }
@@ -982,12 +1176,16 @@
     for (let second = 0; second <= Math.min(1200, Math.max(visualEnd, 10)); second += step) marks += `<span style="left:${second * state.zoom}px">${formatTime(second).slice(0, 5)}</span>`;
     $("timeRuler").innerHTML = marks;
     $("clipTrack").innerHTML = value.clips.map((clip, index) => `<button type="button" role="listitem" class="timeline-clip ${clip.id === state.selected && state.selectedKind === "video" ? "selected" : ""}" style="width:${duration(clip) * state.zoom}px" data-clip-id="${escape(clip.id)}" draggable="false" aria-label="片段 ${index + 1}：${escape(state.media.get(clip.media_id)?.name || "找不到素材")}，${duration(clip).toFixed(2)} 秒" aria-pressed="${clip.id === state.selected}"><strong>${index + 1} · ${escape(state.media.get(clip.media_id)?.name || "找不到素材")}</strong><small>${duration(clip).toFixed(2)}s · ${speedLabel(clip)} · ${Math.round(clip.volume * 100)}%</small><i class="fade-in" style="width:${(clip.fade_in || 0) * state.zoom}px"></i><i class="fade-out" style="width:${(clip.fade_out || 0) * state.zoom}px"></i>${trimHandles(clip, "video")}</button>`).join("");
+    $("clipTrack").insertAdjacentHTML("beforeend", transitionButtons(value, "video"));
+    for (const node of $("clipTrack").querySelectorAll("[data-clip-id]")) { const clip = value.clips.find(item => item.id === node.dataset.clipId); node.querySelector("small").insertAdjacentHTML("beforeend", animationMark(clip)); }
     let labels = '<div style="height:31px"></div><div class="track-label track-drop-new-label" style="height:32px"><span>＋</span><small>新增上層</small></div>';
     $("overlayTracks").innerHTML = '<div id="trackDropNew" class="track-drop-new" data-track-drop="new"><span>＋ 拖曳片段至此新增上層</span></div>' + [...core.overlayTrackGroups(value)].reverse().map((track, index) => {
       const kind = track.clips.every(layer => layer.kind === track.clips[0].kind) ? track.clips[0].kind : "mixed";
       labels += `<div class="track-label overlay-label ${kind === "video" ? "video-layer" : ""}" style="height:38px" title="同軌 ${track.clips.length} 個片段"><span>L${core.overlayTrackGroups(value).length - index}</span><small>${kind === "text" ? "文字" : kind === "video" ? "影片" : kind === "image" ? "圖片" : "混合"}</small></div>`;
       return `<div class="overlay-track" data-track-id="${escape(track.id)}" data-layer-id="${escape(track.clips[0].id)}" role="list" aria-label="圖層軌 L${core.overlayTrackGroups(value).length - index}，${track.clips.length} 個片段">${track.clips.map(overlayClipMarkup).join("")}</div>`;
     }).join("");
+    for (const track of core.overlayTrackGroups(value)) { const node = [...$("overlayTracks").querySelectorAll("[data-track-id]")].find(item => item.dataset.trackId === track.id); node?.insertAdjacentHTML("beforeend", transitionButtons(value, "overlay", track.id)); }
+    for (const node of $("overlayTracks").querySelectorAll("[data-overlay-id]")) { const clip = overlays(value).find(item => item.id === node.dataset.overlayId); node.querySelector(".overlay-clip-name").insertAdjacentHTML("beforeend", animationMark(clip)); }
     labels += '<div class="track-label" style="height:74px"><span>V1</span><strong>影片／原聲</strong></div>';
     $("audioTracks").innerHTML = [0, 1, 2, 3].map(track => {
       const lanes = audioLanes(audioClips(value), track); labels += `<div class="track-label audio-label" style="height:${lanes.height}px"><span>A${track + 1}</span><small>音訊</small></div>`;
@@ -1000,7 +1198,7 @@
     updatePlayhead();
   }
   function beginTrackGesture(event) {
-    if (event.target.closest("[data-trim-edge],[data-overlay-edge],[data-position-time]")) return;
+    if (event.target.closest("[data-trim-edge],[data-overlay-edge],[data-position-time],[data-transition-for]")) return;
     const node = event.target.closest("[data-clip-id],[data-overlay-id]");
     if (!node || locked() || state.session.inFlight || event.button !== 0 || event.isPrimary === false) return;
     const from = { kind: node.dataset.clipId ? "video" : "overlay", id: node.dataset.clipId || node.dataset.overlayId };
@@ -1260,6 +1458,7 @@
     $("inspectorEmpty").classList.toggle("hidden", Boolean(clip)); $("clipFields").classList.toggle("hidden", !clip || isOverlay);
     $("overlayFields").classList.toggle("hidden", !clip || !isOverlay);
     renderSpeedControls();
+    renderAnimationControls();
     if (!clip) return;
     if (isOverlay) { renderOverlayInspector(clip); return; }
     $("selectedClipName").textContent = media?.name || "找不到來源素材";
@@ -1395,9 +1594,9 @@
         placeholder.className = "overlay-placeholder"; placeholder.textContent = "準備預覽…";
         node.append(img || layerVideo, placeholder); $("overlayCanvas").append(node); item = { node, img, video: layerVideo, placeholder, key: null, timer: null, error: null }; state.rasterNodes.set(layer.id, item);
       }
-      const position = positionAt(layer, state.playhead - layer.start);
-      item.node.style.left = `${position.x * 100}%`; item.node.style.top = `${position.y * 100}%`; item.node.style.width = `${layer.width * 100}%`;
-      item.node.style.transform = `translate(-50%, -50%) rotate(${layer.rotation}deg)`; item.node.style.opacity = layer.opacity * fadeEnvelope(layer, state.playhead - layer.start, layer.end - layer.start); item.node.style.zIndex = index + 1;
+      const position = positionAt(layer, state.playhead - layer.start), effect = animationMath.animationTransformAt(layer, state.playhead - layer.start, layer.end - layer.start);
+      item.node.style.left = `${(position.x + effect.x) * 100}%`; item.node.style.top = `${(position.y + effect.y) * 100}%`; item.node.style.width = `${layer.width * effect.scale * 100}%`;
+      item.node.style.transform = `translate(-50%, -50%) rotate(${layer.rotation}deg)`; item.node.style.opacity = layer.opacity * fadeEnvelope(layer, state.playhead - layer.start, layer.end - layer.start) * effect.opacity; item.node.style.zIndex = index + 1;
       item.node.classList.toggle("selected", state.selectedKind === "overlay" && state.selected === layer.id);
       if (layer.kind === "video") { item.placeholder.hidden = true; if (!state.trimDrag && !state.overlayDrag) checkPreview(layer.media_id); return; }
       if (layer.kind === "image") {
@@ -1430,6 +1629,7 @@
         });
       }, 220);
     });
+    if (!state.playing) syncTransitionPreview(false);
   }
   function fitCanvas() {
     const value = project(); if (!value) return;
@@ -1458,8 +1658,8 @@
     if (state.selectedKind === "overlay" && selectedClip()) renderPositionControls(selectedClip());
     renderSpeedControls();
   }
-  function pause() { state.playing = false; state.lastPlaybackTick = null; deck.pause(); videoLayers.pause(); state.mixer?.pause(); state.audioBuffering = false; state.layerBuffering = false; $("playPause").textContent = "▶"; $("playPause").setAttribute("aria-label", "播放"); renderPlaybackStatus(); }
-  function renderPlaybackStatus() { $("playbackStatus").textContent = state.buffering ? "正在準備這個時間點…" : state.layerBuffering ? "影片圖層緩衝中…" : state.audioBuffering ? "音訊緩衝中…" : ""; }
+  function pause() { state.playRequest = (state.playRequest || 0) + 1; state.playing = false; state.animationPreviewEnd = null; state.lastPlaybackTick = null; deck.pause(); videoLayers.pause(); transitionPreview.pause(); state.mixer?.pause(); state.audioBuffering = false; state.layerBuffering = false; state.transitionBuffering = false; $("playPause").textContent = "▶"; $("playPause").setAttribute("aria-label", "播放"); renderPlaybackStatus(); }
+  function renderPlaybackStatus() { $("playbackStatus").textContent = state.buffering ? "正在準備這個時間點…" : state.transitionBuffering ? "轉場影片緩衝中…" : state.layerBuffering ? "影片圖層緩衝中…" : state.audioBuffering ? "音訊緩衝中…" : ""; }
   async function prepareAudio() {
     const AudioContext = root.AudioContext || root.webkitAudioContext;
     if (!AudioContext) return;
@@ -1476,7 +1676,8 @@
     const index = project()?.clips.findIndex(item => item.id === clip.id) ?? -1;
     const start = index >= 0 ? project().clips.slice(0, index).reduce((sum, item) => sum + duration(item), 0) : 0;
     const local = clamp(state.playhead - start, 0, Math.max(0, duration(clip) - 1e-8));
-    const envelope = fadeEnvelope(clip, local, duration(clip)); video.style.opacity = envelope;
+    const envelope = fadeEnvelope(clip, local, duration(clip)), effect = animationMath.animationTransformAt(clip, local, duration(clip)); video.style.opacity = envelope * effect.opacity;
+    video.style.transform = `translate(${effect.x * 100}%, ${effect.y * 100}%) scale(${effect.scale})`;
     const gain = clip.volume * envelope;
     if (state.audio) { video.volume = 1; state.audio.gains.get(video).gain.value = gain; }
     else { video.volume = Math.min(1, gain); if (clip.volume > 1) $("playbackStatus").textContent = "按播放以啟用增益預覽"; }
@@ -1503,7 +1704,7 @@
     if (state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return;
     const value = project(); state.playhead = value ? clamp(Number(time) || 0, 0, totalDuration(value)) : 0;
     const point = value && locateTime(value, state.playhead);
-    state.lastPlaybackTick = null; state.mixer?.seek(); videoLayers.seek(); state.audioBuffering = false; state.layerBuffering = false;
+    state.lastPlaybackTick = null; state.mixer?.seek(); videoLayers.seek(); transitionPreview.seek(); state.audioBuffering = false; state.layerBuffering = false; state.transitionBuffering = false;
     updatePlayhead();
     $("previewEmpty").classList.toggle("hidden", Boolean(value && totalDuration(value)));
     if (!point) {
@@ -1520,13 +1721,16 @@
     checkPreview(media.id); deck.hold(false); deck.request(point, previewUrl(media.id), play); renderCacheStatus();
   }
   async function togglePlay() {
-    if (!project() || !totalDuration(project()) || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return;
-    if (state.playing) { pause(); return; }
+    if (!project() || !totalDuration(project()) || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return false;
+    if (state.playing) { pause(); return false; }
+    const session = state.session, playhead = state.playhead, request = state.playRequest = (state.playRequest || 0) + 1;
     await prepareAudio();
+    if (state.session !== session || state.playRequest !== request || state.playhead !== playhead || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return false;
     const at = locateTime(project(), state.playhead);
     if (!state.audio && ((at?.clip.volume || 0) > 1 || audioClips(project()).length || overlays(project()).some(layer => layer.kind === "video" && layer.volume > 1))) throw new Error("這個瀏覽器無法預覽音訊混音。請使用 Chrome／Edge。");
     state.playing = true; $("playPause").textContent = "Ⅱ"; $("playPause").setAttribute("aria-label", "暫停");
     seek(state.playhead >= totalDuration(project()) - 0.015 ? 0 : state.playhead, true);
+    return state.playing;
   }
   function nextPreviewClip() {
     if (!state.playing || deck.pending || !project() || state.previewIndex < 0) return;
@@ -1539,7 +1743,7 @@
     if (value && !gesture) {
       const elapsed = state.lastPlaybackTick === null ? 0 : Math.min(0.1, (now - state.lastPlaybackTick) / 1000);
       state.lastPlaybackTick = now;
-      const blocked = state.buffering || state.audioBuffering || state.layerBuffering || Boolean(deck.pending);
+      const blocked = state.buffering || state.audioBuffering || state.layerBuffering || state.transitionBuffering || Boolean(deck.pending);
       if (state.playing && !blocked) {
         const clip = value.clips[state.previewIndex];
         if (clip && !video.seeking) {
@@ -1550,14 +1754,19 @@
           if (state.playhead >= totalDuration(value)) pause();
         }
         updatePlayhead();
+        if (Number.isFinite(state.animationPreviewEnd) && state.playhead >= state.animationPreviewEnd - 1e-8) {
+          const end = Math.max(0, state.animationPreviewEnd - 1 / value.fps); pause(); seek(end, false);
+        }
       }
       const mainReady = !state.buffering && !deck.pending && (state.previewIndex < 0 || (!video.seeking && video.readyState >= 2));
       const layersReady = videoLayers.sync(overlays(value), state.playhead, state.playing && mainReady && !state.audioBuffering);
-      const audioReady = !state.mixer || state.mixer.sync(value, state.media, state.playhead, state.playing && mainReady && layersReady);
+      const transitionsReady = syncTransitionPreview(state.playing && mainReady && layersReady && !state.audioBuffering);
+      const audioReady = !state.mixer || state.mixer.sync(value, state.media, state.playhead, state.playing && mainReady && layersReady && transitionsReady);
       state.layerBuffering = state.playing && !layersReady; state.audioBuffering = state.playing && !audioReady;
-      const held = !mainReady || !layersReady || !audioReady;
+      state.transitionBuffering = state.playing && !transitionsReady;
+      const held = !mainReady || !layersReady || !transitionsReady || !audioReady;
       if (deck.held !== held) deck.hold(held);
-      if (held) { videoLayers.pause(); state.mixer?.pause(); state.lastPlaybackTick = null; }
+      if (held) { videoLayers.pause(); transitionPreview.pause(); state.mixer?.pause(); state.lastPlaybackTick = null; }
       const clip = value.clips[state.previewIndex]; if (clip) applyVolume(clip);
       renderPlaybackStatus();
     } else state.lastPlaybackTick = null;
@@ -1616,6 +1825,7 @@
     if (!session.project.name.trim()) session.change(p => { p.name = "未命名專案"; });
     validateProject(session.project, state.media);
     requireTextStyleSupport(session.project, state.textStyleReady);
+    requireAnimationSupport(session.project, state.clipAnimationsReady && state.clipTransitionsReady);
     try {
       const saved = await (session.autosaver ? session.autosaver.flush() : session.save(snapshot => api(`/api/editor/projects/${snapshot.id}`, json("PUT", snapshot))));
       if (state.session === session) { state.projects = state.projects.map(item => item.id === saved.id ? saved : item); renderProjectList(); renderStatus(); }
@@ -1637,6 +1847,7 @@
       else { rememberDraft(); state.session.autosaver?.cancel(); }
       const payload = copy ? { ...editableContent(previous), name: `${previous.name} 副本`.slice(0, 200) } : { name: "未命名專案" };
       requireTextStyleSupport(payload, state.textStyleReady);
+      requireAnimationSupport(payload, state.clipAnimationsReady && state.clipTransitionsReady);
       const response = await api("/api/editor/projects", json("POST", payload));
       const value = response.project || response;
       state.projects.unshift(value); installProject(value);
@@ -1657,6 +1868,7 @@
     try {
       if (!state.session.conflict) await saveProject(); else rememberDraft();
       requireTextStyleSupport(draft, state.textStyleReady);
+      requireAnimationSupport(draft, state.clipAnimationsReady && state.clipTransitionsReady);
       const response = await api("/api/editor/projects", json("POST", { ...editableContent(draft), name: `${draft.name || "草稿"} 恢復副本`.slice(0, 200) }));
       const saved = response.project || response;
       if (item.key) storagePut(item.key, { ...item, dismissed: true });
@@ -1844,6 +2056,7 @@
   async function boot() {
     renderDisabled();
     const capabilities = await requireCapabilities(api); state.backendReady = true; state.archivesReady = capabilities.project_archives === true;
+    state.clipAnimationsReady = capabilities.clip_animations === true; state.clipTransitionsReady = capabilities.clip_transitions === true;
     state.overlayTracksReady = capabilities.overlay_tracks === true;
     state.textOverlaysReady = capabilities.text_overlays === true; state.imageOverlaysReady = capabilities.image_overlays === true; state.videoOverlaysReady = capabilities.video_overlays === true; state.visualFadesReady = capabilities.visual_fades === true; state.positionKeyframesReady = capabilities.position_keyframes === true; state.speedCurvesReady = capabilities.speed_curves === true;
     applyMotionCapability(capabilities);
@@ -1933,7 +2146,7 @@
   $("playPause").onclick = action(togglePlay); $("jumpStart").onclick = () => seek(0);
   $("previewSeek").oninput = () => queueSeek(Number($("previewSeek").value));
   $("buildPreview").onclick = action(buildPreview);
-  function selectedEdit(update, reposition = true, group = null) { edit(p => { const clip = (state.selectedKind === "audio" ? audioClips(p) : p.clips).find(c => c.id === state.selected); if (clip) { const before = duration(clip); update(clip); if (duration(clip) < before) clampFades(clip, duration(clip)); } validateProject(p, state.media); }, group, reposition); }
+  function selectedEdit(update, reposition = true, group = null) { edit(p => { const original = clone(p), clip = (state.selectedKind === "audio" ? audioClips(p) : p.clips).find(c => c.id === state.selected); if (clip) { const before = duration(clip); update(clip); if (duration(clip) < before) clampFades(clip, duration(clip)); } normalizeProjectAnimations(p, original); validateProject(p, state.media); }, group, reposition); }
   function overlayEdit(update, group = null) {
     if (state.selectedKind !== "overlay") return;
     edit(value => {
@@ -2094,7 +2307,7 @@
   $("resetTrim").onclick = action(() => selectedEdit(clip => { clip.in = 0; clip.out = Number(state.media.get(clip.media_id).duration); }));
   function doSplit() { if (state.selectedKind === "overlay" && !state.overlayTracksReady) throw new Error("請重新啟動 Studio，以在同一軌道分割片段。"); let selected; edit(p => { selected = state.selectedKind === "overlay" ? splitOverlayAt(p, state.selected, state.playhead) : state.selectedKind === "audio" ? splitAudioAt(p, state.selected, state.playhead) : splitAt(p, state.playhead); }, null, state.selectedKind !== "overlay"); if (selected) { state.selected = selected; render(); } }
   $("splitClip").onclick = action(doSplit);
-  $("duplicateClip").onclick = action(() => { let next; edit(p => { const clips = state.selectedKind === "overlay" ? overlays(p) : state.selectedKind === "audio" ? audioClips(p) : p.clips, index = clips.findIndex(c => c.id === state.selected); if (index >= 0) { next = uid(); const copied = { ...clips[index], id: next }; if (state.selectedKind === "audio") { copied.start += duration(copied); copied.track = freeAudioTrack(p, copied.start, duration(copied)); } if (state.selectedKind === "overlay") { delete copied.track_id; copied.x = clamp(copied.x + 0.025, 0, 1); copied.y = clamp(copied.y + 0.025, 0, 1); let after = index; while (after + 1 < clips.length && core.overlayTrackId(clips[after + 1]) === core.overlayTrackId(clips[index])) after++; clips.splice(after + 1, 0, copied); } else clips.splice(index + 1, 0, copied); } }, null, state.selectedKind !== "overlay"); if (next) { state.selected = next; render(); } });
+  $("duplicateClip").onclick = action(() => { let next; edit(p => { const clips = state.selectedKind === "overlay" ? overlays(p) : state.selectedKind === "audio" ? audioClips(p) : p.clips, index = clips.findIndex(c => c.id === state.selected); if (index >= 0) { next = uid(); const copied = { ...clips[index], id: next }; if (state.selectedKind === "audio") { copied.start += duration(copied); copied.track = freeAudioTrack(p, copied.start, duration(copied)); } if (state.selectedKind === "overlay") { delete copied.transition_out; delete copied.track_id; copied.x = clamp(copied.x + 0.025, 0, 1); copied.y = clamp(copied.y + 0.025, 0, 1); let after = index; while (after + 1 < clips.length && core.overlayTrackId(clips[after + 1]) === core.overlayTrackId(clips[index])) after++; clips.splice(after + 1, 0, copied); } else clips.splice(index + 1, 0, copied); } }, null, state.selectedKind !== "overlay"); if (next) { state.selected = next; render(); } });
   function deleteSelected() { edit(p => { const clips = state.selectedKind === "overlay" ? overlays(p) : state.selectedKind === "audio" ? audioClips(p) : p.clips, index = clips.findIndex(c => c.id === state.selected); if (index >= 0) clips.splice(index, 1); }, null, state.selectedKind !== "overlay"); }
   $("deleteClip").onclick = action(deleteSelected);
   function moveSelected(delta) { edit(p => { if (state.selectedKind === "audio") { const clip = audioClips(p).find(item => item.id === state.selected); if (clip) clip.start = clamp(clip.start + delta, 0, 600); } else if (state.selectedKind === "overlay") { core.moveOverlayTrack(p, state.selected, delta); } else { const clips = p.clips, index = clips.findIndex(c => c.id === state.selected), target = index + delta; if (index >= 0 && target >= 0 && target < clips.length) { const [clip] = clips.splice(index, 1); clips.splice(target, 0, clip); } } }, null, state.selectedKind !== "overlay"); }
@@ -2146,7 +2359,18 @@
     if (state.trimDrag || Date.now() < state.trimSuppressUntil || event.target.closest("[data-trim-edge]")) { event.preventDefault(); event.stopImmediatePropagation(); }
   }, true);
   $("timelineCanvas").addEventListener("dragstart", event => { if (state.trimDrag || event.target.closest("[data-trim-edge]")) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
-  $("timelineCanvas").onclick = event => { if (!project() || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) return; const clip = event.target.closest("[data-clip-id]"), audio = event.target.closest("[data-audio-id]"); if (audio) { state.selected = audio.dataset.audioId; state.selectedKind = "audio"; } else if (clip) { state.selected = clip.dataset.clipId; state.selectedKind = "video"; } const rect = $("timelineCanvas").getBoundingClientRect(); queueSeek((event.clientX - rect.left) / state.zoom); renderTimeline(); renderInspector(); renderDisabled(); };
+  $("timelineCanvas").onclick = event => {
+    if (!project() || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) return;
+    const transition = event.target.closest("[data-transition-for]");
+    if (transition) {
+      event.preventDefault(); state.selected = transition.dataset.transitionFor; state.selectedKind = transition.dataset.transitionKind;
+      pause(); const next = animationNext(); if (next) seek(next.cut, false); renderTimeline(); renderInspector(); renderDisabled();
+      animationEditor.selectTab("transition"); $("animationEditor").scrollIntoView({ block: "nearest", behavior: "smooth" }); return;
+    }
+    const clip = event.target.closest("[data-clip-id]"), audio = event.target.closest("[data-audio-id]");
+    if (audio) { state.selected = audio.dataset.audioId; state.selectedKind = "audio"; } else if (clip) { state.selected = clip.dataset.clipId; state.selectedKind = "video"; }
+    const rect = $("timelineCanvas").getBoundingClientRect(); queueSeek((event.clientX - rect.left) / state.zoom); renderTimeline(); renderInspector(); renderDisabled();
+  };
   $("timelineScroll").onscroll = () => { $("trackLabels").style.transform = `translateY(${-$("timelineScroll").scrollTop}px)`; if (state.trimDrag) queueTrimPreview(); if (state.overlayDrag && state.overlayDrag.mode !== "position" && state.overlayDrag.frame === null) state.overlayDrag.frame = requestAnimationFrame(flushOverlayGesture); if (state.trackDrag && state.trackDrag.frame === null) state.trackDrag.frame = requestAnimationFrame(flushTrackGesture); };
   $("audioTracks").ondragstart = event => { const clip = event.target.closest("[data-audio-id]"); if (!clip || locked()) { event.preventDefault(); return; } const value = audioClips(project()).find(item => item.id === clip.dataset.audioId); state.audioDragOffset = (event.clientX - clip.getBoundingClientRect().left) / state.zoom; event.dataTransfer.setData("application/x-h3-editor-audio", value.id); event.dataTransfer.effectAllowed = "move"; };
   $("audioTracks").ondragover = event => { if (!locked() && [...event.dataTransfer.types].includes("application/x-h3-editor-audio")) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } };

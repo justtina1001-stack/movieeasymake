@@ -220,7 +220,8 @@ test("the shipped V1 clock inverts curved source time and updates the live playb
   const value = project(), ramp = value.clips[1], video = new FakeMedia(); video.readyState = 4; video.paused = false;
   const state = { playing: true, playhead: 1, previewIndex: 1, lastPlaybackTick: null, buffering: false, audioBuffering: false, layerBuffering: false, media: media(), audio: null };
   const deck = { pending: null, held: false, hold(value) { this.held = value; } }, videoLayers = { sync: () => true, pause() {} };
-  const environment = vm.createContext({ ...core, state, deck, video, videoLayers, project: () => value,
+  const environment = vm.createContext({ ...core, state, deck, video, videoLayers, animationMath: require("../static/editor_animations.js"), project: () => value,
+    syncTransitionPreview: () => true, transitionPreview: { pause() {} },
     nextPreviewClip() { throw new Error("Unexpected early clip transition"); }, updatePlayhead() {}, renderPlaybackStatus() {},
     requestAnimationFrame() {}, $: () => ({}),
   });

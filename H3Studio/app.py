@@ -3137,7 +3137,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         launch = plan_startup(args.port, auto_port=args.auto_port,
-                              required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails"))
+                              required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails", "clip_animations", "clip_transitions"))
     except (ValueError, RuntimeError) as error:
         print(f"[ERROR] {error}", flush=True)
         raise SystemExit(1) from error

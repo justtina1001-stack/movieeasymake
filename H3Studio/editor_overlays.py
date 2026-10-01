@@ -19,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from video_editor import CLIP_ID, EditorError, VideoReader, fade_gain, number
 from editor_motion import position_at, validate_position_keyframes
 from editor_speed import clip_duration, source_at, validate_speed_curve
+from editor_animations import animation_at, transition_pairs, transition_surface, validate_animations, validate_transition_pairs, validate_transition_setting
 
 MAX_LAYERS = 50
 MAX_ACTIVE = 12
@@ -77,6 +78,10 @@ def validate_layer(layer, fps=24, ids=None):
     if fade_in + fade_out > end - start + 1e-6:
         raise EditorError("淡入與淡出總長度不能超過圖層長度。")
     clean.update(fade_in=fade_in, fade_out=fade_out)
+    clean.update(validate_animations(layer, end - start))
+    clean.update(validate_transition_setting(layer))
+    if clean.get("transition_out") and kind != "video":
+        raise EditorError("轉場只能使用相鄰影片，文字與圖片請使用進場／退場動畫。")
     points = validate_position_keyframes(layer)
     if points:
         clean["position_keyframes"] = points
@@ -171,6 +176,7 @@ def validate_overlays(layers, store, fps, ids):
         active_video += delta
         if active_video > 3:
             raise EditorError("同一時間最多疊加 3 個影片圖層。")
+    validate_transition_pairs(clean, overlays=True)
     return clean
 
 
@@ -331,12 +337,14 @@ def text_png(layer, width, height):
 
 
 class OverlayCompositor:
-    def __init__(self, layers, media_paths, width, height, cache_bytes=RASTER_CACHE_BYTES, cancel_event=None):
+    def __init__(self, layers, media_paths, width, height, cache_bytes=RASTER_CACHE_BYTES, cancel_event=None, fps=24):
         self.layers, self.paths = layers, media_paths
         self.width, self.height = width, height
+        self.fps = fps
         self.cache, self.cache_bytes, self.used_bytes = OrderedDict(), cache_bytes, 0
         self.video_readers = {}
         self.cancel_event = cancel_event or threading.Event()
+        self.transitions = transition_pairs(layers, overlays=True)
 
     def _source(self, layer):
         if layer["kind"] == "text":
@@ -413,59 +421,89 @@ class OverlayCompositor:
         self.used_bytes += size
         return prepared, True
 
+    def _visual(self, layer, seconds):
+        local, duration = seconds - layer["start"], layer["end"] - layer["start"]
+        transform = animation_at(layer, local, duration)
+        gain = fade_gain(local, duration, layer) * transform["opacity"]
+        if gain <= 0 or layer["opacity"] <= 0:
+            return None, 0, 0, True, 0
+        position = position_at(layer, local)
+        animated = {**layer, "x": position["x"] + transform["x"],
+                    "y": position["y"] + transform["y"], "width": layer["width"] * transform["scale"]}
+        if layer["kind"] == "video":
+            source_time = source_at(layer, local)
+            if layer["id"] not in self.video_readers:
+                self.video_readers[layer["id"]] = VideoReader(self.paths[layer["media_id"]], source_time, self.cancel_event)
+            video = self.video_readers[layer["id"]].at(source_time)
+            ratio = min(1, max(self.width, self.height) / max(video.width, video.height))
+            pixels = video.reformat(width=max(1, round(video.width * ratio)), height=max(1, round(video.height * ratio)), format="rgba").to_ndarray()
+            raster, left, top = self._prepare(animated, Image.fromarray(pixels), video.width / video.height)
+            cached = False
+        elif layer.get("position_keyframes") or layer.get("animation_in") or layer.get("animation_out"):
+            # Keep one original source raster, never a cache entry per frame.
+            (source, _, _), source_cached = self._cached(layer, source_only=True)
+            try:
+                raster, left, top = self._prepare(animated, source, close_source=False)
+            finally:
+                if not source_cached:
+                    source.close()
+            cached = False
+        else:
+            (raster, left, top), cached = self._cached(layer)
+        return raster, left, top, cached, gain
+
+    def _paint(self, canvas, layer, seconds):
+        raster, left, top, cached, gain = self._visual(layer, seconds)
+        if raster is None:
+            return
+        faded = None
+        try:
+            if gain < 1:
+                faded = raster.copy()
+                with raster.getchannel("A") as alpha:
+                    with alpha.point([round(value * gain) for value in range(256)]) as adjusted:
+                        faded.putalpha(adjusted)
+            canvas.alpha_composite(faded if faded is not None else raster, (left, top))
+        finally:
+            if faded is not None:
+                faded.close()
+            if not cached:
+                raster.close()
+
     def apply(self, frame, seconds):
-        active = [layer for layer in self.layers if layer["start"] <= seconds < layer["end"] and layer["opacity"] > 0]
-        active_video = {layer["id"] for layer in active if layer["kind"] == "video"}
+        # A transition occupies the same single stacking level as its track.
+        # Its two RGBA surfaces are combined before compositing over lower tracks.
+        slots, paired, active_video = {}, set(), set()
+        indices = {layer["id"]: index for index, layer in enumerate(self.layers)}
+        for previous, following, cut, setting in self.transitions:
+            length = setting["duration"]
+            if cut - length / 2 <= seconds < cut + length / 2:
+                ratio = (seconds - cut + length / 2) / length
+                slots[min(indices[previous["id"]], indices[following["id"]])] = (previous, following, cut, setting, ratio)
+                paired.update((previous["id"], following["id"]))
+                active_video.update((previous["id"], following["id"]))
+        active = {layer["id"] for layer in self.layers if layer["start"] <= seconds < layer["end"] and layer["opacity"] > 0}
+        active_video.update(layer["id"] for layer in self.layers if layer["id"] in active and layer["kind"] == "video")
         for key in list(self.video_readers):
             if key not in active_video:
                 self.video_readers.pop(key).close()
-        if not active:
+        if not active and not slots:
             return frame
         with Image.fromarray(frame.to_ndarray(format="rgb24")) as rgb:
             canvas = rgb.convert("RGBA")
         try:
-            for layer in active:
-                gain = fade_gain(seconds - layer["start"], layer["end"] - layer["start"], layer)
-                if gain <= 0:
-                    continue
-                if layer["kind"] == "video":
-                    position = source_at(layer, seconds - layer["start"])
-                    if layer["id"] not in self.video_readers:
-                        self.video_readers[layer["id"]] = VideoReader(self.paths[layer["media_id"]], position, self.cancel_event)
-                    video = self.video_readers[layer["id"]].at(position)
-                    # Decode at source size but keep the RGBA intermediate bounded
-                    # to the output canvas; uniform scaling preserves geometry.
-                    ratio = min(1, max(self.width, self.height) / max(video.width, video.height))
-                    pixels = video.reformat(width=max(1, round(video.width * ratio)), height=max(1, round(video.height * ratio)), format="rgba").to_ndarray()
-                    raster, left, top = self._prepare(layer, Image.fromarray(pixels), video.width / video.height)
-                    cached = False
-                elif layer.get("position_keyframes"):
-                    # Cache the source once, not a new raster for every animated
-                    # position. The affine transform remains clipped to canvas.
-                    (source, _, _), source_cached = self._cached(layer, source_only=True)
-                    try:
-                        animated = {**layer, **position_at(layer, seconds - layer["start"])}
-                        raster, left, top = self._prepare(animated, source, close_source=False)
-                    finally:
-                        if not source_cached:
-                            source.close()
-                    cached = False
-                else:
-                    (raster, left, top), cached = self._cached(layer)
-                if raster is not None:
-                    faded = None
-                    try:
-                        if gain < 1:
-                            faded = raster.copy()
-                            with raster.getchannel("A") as alpha:
-                                with alpha.point([round(value * gain) for value in range(256)]) as adjusted:
-                                    faded.putalpha(adjusted)
-                        canvas.alpha_composite(faded if faded is not None else raster, (left, top))
-                    finally:
-                        if faded is not None:
-                            faded.close()
-                        if not cached:
-                            raster.close()
+            for index, layer in enumerate(self.layers):
+                if index in slots:
+                    previous, following, cut, setting, ratio = slots[index]
+                    with Image.new("RGBA", (self.width, self.height)) as left, Image.new("RGBA", (self.width, self.height)) as right:
+                        # Frozen edge frames keep the existing edit clock intact.
+                        last = previous["end"] - 1 / self.fps
+                        self._paint(left, previous, min(seconds, max(previous["start"], last)))
+                        self._paint(right, following, max(seconds, following["start"]))
+                        with transition_surface(left, right, setting["type"], ratio) as combined:
+                            canvas.alpha_composite(combined)
+                elif layer["id"] in active and layer["id"] not in paired:
+                    self._paint(canvas, layer, seconds)
             with canvas.convert("RGB") as result:
                 return av.VideoFrame.from_ndarray(np.asarray(result), format="rgb24")
         finally:
