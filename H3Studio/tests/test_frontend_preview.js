@@ -133,6 +133,7 @@ function editorHarness() {
   const h = harness(), nodes = { videoStage: h.elements.stage, videoCanvas: h.elements.canvas,
     previewZoom: h.elements.zoomSelect, previewZoomIn: h.elements.zoomIn, previewZoomOut: h.elements.zoomOut,
     previewFit: h.elements.fitButton, previewHand: h.elements.handButton };
+  nodes.exportDialog = new Surface(h.doc, "dialog"); nodes.exportDialog.open = false;
   for (const id of ["overlayCanvas", "timelineCanvas", "timelineScroll", "trimFeedback"]) nodes[id] = new Surface(h.doc);
   nodes.timelineScroll.scrollLeft = 0; nodes.trimFeedback.offsetWidth = 150; nodes.trimFeedback.offsetHeight = 20;
   h.elements.canvas.append(nodes.overlayCanvas);
@@ -141,7 +142,7 @@ function editorHarness() {
     selectedKind: "overlay", selected: "caption", zoom: 60, backendReady: true, busy: false, trimDrag: null,
     overlayDrag: null, speedDrag: null, trackDrag: null, positionKeyframesReady: true, queuedSeek: null,
     rasterCache: h.cache, rasterNodes: new Map([["caption", { img: h.caption, key: [...h.cache.keys()][0] }]]) };
-  const calls = { pause: 0, preview: 0, render: 0, seek: 0, play: 0, errors: [] }, frames = new Map(); let serial = 0;
+  const calls = { pause: 0, preview: 0, render: 0, seek: 0, play: 0, edits: 0, errors: [] }, frames = new Map(); let serial = 0;
   h.win.H3EditorPreview = preview;
   h.win.getComputedStyle = () => ({ paddingLeft: "24px", paddingRight: "24px", paddingTop: "12px", paddingBottom: "12px" });
   h.doc.querySelectorAll = () => [];
@@ -154,7 +155,8 @@ function editorHarness() {
     renderTimeline() {}, renderInspector() {}, renderOverlayPreview: () => { calls.preview++; },
     togglePlay: () => { calls.play++; }, jumpPositionKeyframe: () => false,
     requestAnimationFrame: callback => { frames.set(++serial, callback); return serial; }, cancelAnimationFrame: id => frames.delete(id),
-    finishTrim() {}, finishTrackGesture() {}, keyboardTrim() {}, saveProject() {}, overlayEdit() {}, travel() {}, doSplit() {}, deleteSelected() {} };
+    finishTrim() {}, finishTrackGesture() {}, keyboardTrim() {}, saveProject() { calls.edits++; }, overlayEdit() {},
+    travel() { calls.edits++; }, doSplit() { calls.edits++; }, deleteSelected() { calls.edits++; } };
   vm.createContext(sandbox);
   const projectBinding = browserSource.match(/^  const project = .+;$/m); assert.ok(projectBinding); vm.runInContext(projectBinding[0], sandbox);
   const mountStart = browserSource.indexOf("  const previewViewport = root.H3EditorPreview.mountPreviewViewport(");
@@ -378,7 +380,7 @@ test("the shipped fitCanvas binding changes only viewport geometry and keeps med
   const h = editorHarness(); h.select(2); h.controller.model.panBy(80, -20); h.controller.render(); const before = h.snapshot();
   for (let index = 0; index < 5; index++) h.sandbox.fitCanvas();
   near(h.snapshot().scale, before.scale); near(h.snapshot().x, before.x); near(h.snapshot().y, before.y);
-  assert.deepEqual(h.calls, { pause: 0, preview: 0, render: 0, seek: 0, play: 0, errors: [] });
+  assert.deepEqual(h.calls, { pause: 0, preview: 0, render: 0, seek: 0, play: 0, edits: 0, errors: [] });
   h.unchanged(); h.controller.destroy();
 });
 
@@ -430,5 +432,21 @@ test("normal Space reaches the shipped playback shortcut in hand mode and repeat
   assert.equal(playback.defaultPrevented, true); assert.equal(h.calls.play, 1);
   h.doc.dispatch("keydown", { key: " ", code: "Space", target: h.elements.stage, repeat: true }); assert.equal(h.calls.play, 1);
   h.doc.dispatch("keydown", { key: " ", code: "Space", target: new Surface(h.doc, "input") }); assert.equal(h.calls.play, 1);
+  h.unchanged(); h.controller.destroy();
+});
+
+test("opening the export dialog blocks global playback and editing shortcuts without cancelling native button keys", () => {
+  const h = editorHarness(), target = new Surface(h.doc, "button"); h.nodes.exportDialog.append(target);
+  const keys = [{ key: " ", code: "Space" }, { key: "s" }, { key: "Backspace" },
+    { key: "z", metaKey: true }, { key: "y", ctrlKey: true }, { key: "s", metaKey: true }];
+  h.nodes.exportDialog.open = true;
+  for (const key of keys) {
+    const event = h.doc.dispatch("keydown", { target, ...key });
+    assert.equal(event.defaultPrevented, false);
+  }
+  assert.equal(h.calls.play, 0); assert.equal(h.calls.edits, 0);
+  h.nodes.exportDialog.open = false;
+  for (const key of keys) h.doc.dispatch("keydown", { target: h.elements.stage, ...key });
+  assert.equal(h.calls.play, 1); assert.equal(h.calls.edits, 5);
   h.unchanged(); h.controller.destroy();
 });

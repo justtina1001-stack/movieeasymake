@@ -849,6 +849,7 @@
     state.session = session;
     state.selected = value.clips[0]?.id || null; state.selectedKind = "video"; state.playhead = 0; state.previewIndex = -1;
     state.loadedMedia = null; state.pendingSeek = null; state.exportJob = null;
+    closeExportDialog();
     clearTimeout(state.exportTimer);
     storagePut("h3-editor-last-project", value.id);
     const url = new URL(location.href); url.searchParams.set("project", value.id); history.replaceState(null, "", url);
@@ -907,7 +908,11 @@
     ["downloadProjectArchive", "openProjectArchive"].forEach(id => $(id).disabled = locked() || !state.archivesReady);
     document.querySelectorAll("[data-recovery-copy]").forEach(button => button.disabled = locked());
     $("saveProject").disabled = locked() || Boolean(state.session?.inFlight);
-    $("exportProject").disabled = locked() || noClips || Boolean(state.session?.conflict);
+    $("exportProject").disabled = !state.backendReady || state.busy || !state.session || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) || (noClips && !state.exportJob);
+    $("exportProject").textContent = exporting() ? `匯出中 ${Math.round(state.exportJob.progress || 0)}%` : "匯出 MP4 ↗";
+    $("startExport").disabled = locked() || noClips || Boolean(state.session?.conflict);
+    $("startExport").textContent = state.busy ? "正在準備匯出…" : exporting() ? "正在匯出…" : "匯出目前剪輯";
+    $("autoDownloadExport").disabled = state.busy || exporting();
     $("undo").disabled = locked() || !state.session?.undoStack.length;
     $("redo").disabled = locked() || !state.session?.redoStack.length;
     ["duplicateClip", "deleteClip"].forEach(id => $(id).disabled = locked() || !selected);
@@ -1766,34 +1771,74 @@
   }
   function renderExport() {
     const job = state.exportJob;
-    $("exportPanel").classList.toggle("hidden", !job); if (!job) return;
+    const value = project();
+    $("exportSummary").textContent = value ? `${value.name}\n${value.width} × ${value.height} · ${value.fps} fps · ${formatTime(totalDuration(value))}` : "";
+    $("exportPanel").classList.toggle("hidden", !job);
+    if (!job) { renderDisabled(); return; }
     const labels = { queued: "等待匯出", running: "正在匯出影片", completed: "影片匯出完成", failed: "匯出未完成", cancelled: "已取消匯出" };
     $("exportStatus").textContent = labels[job.status] || "確認匯出狀態";
     const progress = clamp(Number(job.progress) || 0, 0, 100);
     $("exportPercent").textContent = `${Math.round(progress)}%`; $("exportProgress").value = progress;
     $("cancelExport").classList.toggle("hidden", !exporting()); $("cancelExport").disabled = false;
+    if (exporting()) $("autoDownloadExport").checked = job.auto_download === true;
     $("downloadExport").classList.toggle("hidden", job.status !== "completed");
     $("downloadExport").href = `/api/editor/exports/${encodeURIComponent(job.id)}/file?download=1`;
-    $("exportDetail").textContent = job.error || (job.status === "completed" ? "MP4 已就緒，可下載分享。" : "使用已儲存的剪輯與輸出設定。");
+    $("exportDetail").textContent = job.error || (job.status === "completed" ? "這是上次匯出的檔案；重新匯出會使用目前的剪輯。" : "使用已儲存的剪輯與輸出設定。");
     renderDisabled();
   }
+  function closeExportDialog() { if ($("exportDialog").open) $("exportDialog").close(); }
+  function openExportDialog() {
+    if ($("exportProject").disabled) return;
+    pause(); renderExport();
+    if (!$('exportDialog').open) $("exportDialog").showModal();
+    if (state.exportJob) pollExport();
+  }
+  function downloadExport(manual = false) {
+    const job = state.exportJob;
+    if (job?.status !== "completed" || (!manual && job.download_requested)) return;
+    job.download_requested = true;
+    storagePut(`h3-editor-export:${project().id}`, job);
+    if (!manual) {
+      const link = document.createElement("a");
+      link.href = $("downloadExport").href; link.download = ""; link.hidden = true;
+      document.body.append(link); link.click(); link.remove();
+    }
+    closeExportDialog();
+    notify("已送出 MP4 下載；可從右上「匯出 MP4」再次下載。");
+  }
   async function pollExport() {
-    const id = state.exportJob?.id; if (!id) return;
+    const id = state.exportJob?.id, projectId = project()?.id; if (!id || !projectId) return;
+    clearTimeout(state.exportTimer); state.exportTimer = null;
     try {
       const response = await api(`/api/editor/exports/${encodeURIComponent(id)}`);
-      if (state.exportJob?.id !== id) return;
-      state.exportJob = response.export || response; storagePut(`h3-editor-export:${project().id}`, state.exportJob); renderExport();
+      if (state.exportJob?.id !== id || project()?.id !== projectId) return;
+      const previous = state.exportJob;
+      state.exportJob = { ...(response.export || response), auto_download: previous.auto_download === true, download_requested: previous.download_requested === true };
+      storagePut(`h3-editor-export:${projectId}`, state.exportJob); renderExport();
+      if (state.exportJob.status === "completed" && state.exportJob.auto_download && !state.exportJob.download_requested) downloadExport();
       if (!exporting()) return;
-    } catch (error) { if (state.exportJob?.id !== id) return; $("exportDetail").textContent = "暫時無法取得進度，正在重新連線…"; }
+    } catch (error) {
+      if (state.exportJob?.id !== id || project()?.id !== projectId) return;
+      if (error.status === 404) {
+        state.exportJob = { ...state.exportJob, status: "failed", error: "上次匯出的檔案已無法取得，請重新匯出目前的剪輯。" };
+        storagePut(`h3-editor-export:${projectId}`, state.exportJob); renderExport(); return;
+      }
+      $("exportDetail").textContent = "暫時無法取得進度，正在重新連線…";
+    }
     clearTimeout(state.exportTimer); state.exportTimer = setTimeout(pollExport, 1200);
   }
   async function startExport() {
     if (locked() || !totalDuration(project())) return;
+    const session = state.session, projectId = project().id, autoDownload = $("autoDownloadExport").checked;
     pause(); state.busy = true; renderDisabled();
     try {
       await saveProject();
-      const response = await api(`/api/editor/projects/${project().id}/exports`, json("POST"));
-      state.exportJob = response.export || response; storagePut(`h3-editor-export:${project().id}`, state.exportJob); renderExport(); pollExport();
+      if (state.session !== session) return;
+      const response = await api(`/api/editor/projects/${projectId}/exports`, json("POST"));
+      const job = { ...(response.export || response), auto_download: autoDownload, download_requested: false };
+      storagePut(`h3-editor-export:${projectId}`, job);
+      if (state.session !== session) return;
+      state.exportJob = job; renderExport(); pollExport();
     } finally { state.busy = false; renderDisabled(); }
   }
   async function boot() {
@@ -2107,10 +2152,14 @@
   $("audioTracks").ondragover = event => { if (!locked() && [...event.dataTransfer.types].includes("application/x-h3-editor-audio")) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } };
   $("audioTracks").ondrop = action(event => { const id = event.dataTransfer.getData("application/x-h3-editor-audio"), track = event.target.closest("[data-audio-track]"); if (!id || !track || locked()) return; event.preventDefault(); event.stopPropagation(); const start = clamp((event.clientX - $("timelineCanvas").getBoundingClientRect().left) / state.zoom - (state.audioDragOffset || 0), 0, 600); edit(p => { const clip = audioClips(p).find(item => item.id === id); if (clip) { clip.start = start; clip.track = Number(track.dataset.audioTrack); } }); state.selected = id; state.selectedKind = "audio"; render(); });
   $("clipTrack").ondragstart = event => event.preventDefault();
-  $("exportProject").onclick = action(startExport);
+  $("exportProject").onclick = openExportDialog;
+  $("startExport").onclick = action(startExport);
+  $("closeExportDialog").onclick = closeExportDialog;
+  $("downloadExport").onclick = () => downloadExport(true);
   $("cancelExport").onclick = action(async () => { if (!exporting()) return; $("cancelExport").disabled = true; try { await api(`/api/editor/exports/${state.exportJob.id}/cancel`, json("POST")); await pollExport(); } finally { $("cancelExport").disabled = false; } });
   document.addEventListener("keydown", action(async event => {
     if (event.defaultPrevented) return;
+    if ($("exportDialog").open) return;
     if (state.layoutDragging) { event.preventDefault(); return; }
     if (state.trackDrag) { if (event.key === "Escape") finishTrackGesture(false); event.preventDefault(); return; }
     if (state.speedDrag) { event.preventDefault(); return; }

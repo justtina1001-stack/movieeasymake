@@ -57,7 +57,6 @@
       <div class="preview-cache-bar"><span id="previewCacheStatus" class="subtle">預先準備下一片段，減少切換等待。</span><button id="buildPreview" class="button ghost small">建立流暢預覽</button></div>
       <div class="transport"><button id="jumpStart" class="icon-button" aria-label="回到開頭" title="回到開頭">|◀</button><button id="playPause" class="play-button" aria-label="播放" title="播放／暫停（空白鍵）">▶</button><output id="timeDisplay">00:00.00 <span>/ 00:00.00</span></output><span id="playbackStatus" class="subtle"></span></div>
       <input id="previewSeek" class="preview-seek" type="range" min="0" max="0" step="0.01" value="0" aria-label="預覽播放位置">
-      <div id="exportPanel" class="export-panel hidden" aria-live="polite"><div class="export-heading"><strong id="exportStatus">準備匯出</strong><span id="exportPercent">0%</span></div><progress id="exportProgress" max="100" value="0"></progress><div class="export-actions"><span id="exportDetail" class="subtle">匯出完成後可下載影片。</span><button id="cancelExport" class="button ghost small">取消匯出</button><a id="downloadExport" class="button primary small hidden" download>下載 MP4 ↓</a></div></div>
     </section>
     <div id="layoutInspectorSeparator" class="layout-separator layout-separator-vertical" role="separator" tabindex="0" aria-label="預覽與片段設定寬度" aria-orientation="vertical" aria-controls="previewPanel inspectorPanel" title="拖曳調整設定欄寬度；雙擊還原。方向鍵調整，Shift 加速，Home 還原。"><span aria-hidden="true"></span></div>
     <aside id="inspectorPanel" class="inspector panel" aria-label="片段設定">
@@ -75,6 +74,14 @@
       <div class="timeline-foot"><span>拖到軌道中央放入同軌 · 拖到上下邊界新增圖層 · 左右拖曳定位 · 拖曳兩端裁切</span><span>把手 ← → 一影格 <i>·</i> Esc 取消拖曳 <i>·</i> Ctrl / ⌘ Z 復原</span></div>
     </section>
   </main>
+  <dialog id="exportDialog" class="export-dialog" aria-labelledby="exportDialogTitle" aria-describedby="exportDialogNote">
+    <div class="export-dialog-heading"><div><p class="eyebrow">EXPORT</p><h2 id="exportDialogTitle">匯出 MP4</h2></div><button id="closeExportDialog" type="button" class="icon-button" aria-label="關閉匯出視窗">×</button></div>
+    <p id="exportSummary" class="export-summary"></p>
+    <label class="export-download-choice"><input id="autoDownloadExport" type="checkbox" checked>匯出完成後自動下載 MP4</label>
+    <p id="exportDialogNote" class="subtle">可先關閉視窗；再次點右上「匯出 MP4」即可查看進度或下載上次匯出的檔案。</p>
+    <div id="exportPanel" class="export-panel hidden" aria-live="polite"><div class="export-heading"><strong id="exportStatus">準備匯出</strong><span id="exportPercent">0%</span></div><progress id="exportProgress" max="100" value="0"></progress><p id="exportDetail" class="subtle">匯出完成後可下載影片。</p><div class="export-actions"><button id="cancelExport" type="button" class="button ghost small">取消匯出</button><a id="downloadExport" class="button secondary small hidden" download>下載上次匯出 ↓</a></div></div>
+    <div class="export-dialog-footer"><button id="startExport" type="button" class="button primary">匯出目前剪輯</button></div>
+  </dialog>
   <output id="trimFeedback" class="trim-feedback hidden" aria-live="off"></output>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 </body>

@@ -132,9 +132,10 @@ function shipped(name) {
 function editorHarness() {
   const h = harness({ stored: JSON.stringify(preferences()) }), nodes = Object.fromEntries(Object.values(h.elements).map(node => [node.getAttribute("id"), node]));
   nodes.videoCanvas = h.canvas;
+  nodes.exportDialog = new Surface(h.doc, "dialog"); nodes.exportDialog.open = false;
   for (const id of ["previewZoom", "previewZoomIn", "previewZoomOut", "previewFit", "previewHand"]) nodes[id] = new Surface(h.doc, id === "previewZoom" ? "select" : "button");
   const state = { session: h.session, backendReady: true, busy: false, trimDrag: null, overlayDrag: null, speedDrag: null, trackDrag: null,
-    layoutDragging: false, rasterCache: h.cache }, calls = { play: 0, disabled: 0, finishOverlay: 0, previewResize: 0 };
+    layoutDragging: false, rasterCache: h.cache }, calls = { play: 0, edits: 0, disabled: 0, finishOverlay: 0, previewResize: 0 };
   h.win.H3EditorPreview = preview; h.win.H3EditorLayout = layout; h.win.localStorage = h.storage;
   const sandbox = { ...core, root: h.win, document: h.doc, state, $: id => nodes[id], action: fn => fn,
     locked: () => Boolean(state.layoutDragging || state.overlayDrag || state.trimDrag || state.speedDrag || state.trackDrag),
@@ -142,7 +143,8 @@ function editorHarness() {
     finishOverlayGesture: () => { calls.finishOverlay++; state.overlayDrag = null; },
     finishTrim() {}, finishTrackGesture() {}, jumpPositionKeyframe: () => false,
     togglePlay: () => { calls.play++; }, renderTimeline() {}, renderInspector() {}, renderOverlayPreview() {},
-    keyboardTrim() {}, saveProject() {}, overlayEdit() {}, travel() {}, doSplit() {}, deleteSelected() {} };
+    keyboardTrim() {}, saveProject() { calls.edits++; }, overlayEdit() {},
+    travel() { calls.edits++; }, doSplit() { calls.edits++; }, deleteSelected() { calls.edits++; } };
   vm.createContext(sandbox);
   const projectBinding = source.match(/^  const project = .+;$/m); assert.ok(projectBinding); vm.runInContext(projectBinding[0], sandbox);
   for (const name of ["fitCanvas", "resizePreview"]) vm.runInContext(shipped(name), sandbox);
@@ -399,6 +401,22 @@ test("the shipped active-layout flag blocks camera gestures and Space while norm
   const space = h.doc.dispatch("keydown", { key: " ", code: "Space", target: h.elements.librarySeparator });
   assert.equal(space.defaultPrevented, true); assert.equal(h.calls.play, 1);
   h.dispatch("library", "pointercancel"); assert.equal(h.state.layoutDragging, false); h.unchanged(); h.cleanup();
+});
+
+test("the shipped editor leaves Space and editing keys to an open export dialog", () => {
+  const h = editorHarness(), target = new Surface(h.doc, "button"); h.nodes.exportDialog.append(target);
+  const keys = [{ key: " ", code: "Space" }, { key: "s" }, { key: "Delete" },
+    { key: "z", ctrlKey: true }, { key: "s", ctrlKey: true }];
+  h.nodes.exportDialog.open = true;
+  for (const key of keys) {
+    const event = h.doc.dispatch("keydown", { target, ...key });
+    assert.equal(event.defaultPrevented, false);
+  }
+  assert.equal(h.calls.play, 0); assert.equal(h.calls.edits, 0);
+  h.nodes.exportDialog.open = false;
+  for (const key of keys) h.doc.dispatch("keydown", { target: h.elements.stage, ...key });
+  assert.equal(h.calls.play, 1); assert.equal(h.calls.edits, 4);
+  h.unchanged(); h.cleanup();
 });
 
 test("the actual mount refuses layout gestures during camera pan and content motion gestures", () => {
