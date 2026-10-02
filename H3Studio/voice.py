@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from remote_voice import RemoteVoiceConnection, RemoteVoiceError
+
 
 VOICE_JOB_DIR_NAME = "voice_jobs"
 VOICE_OUTPUT_DIR_NAME = "voice_outputs"
@@ -328,12 +330,19 @@ class VoiceJobManager:
         gpu_lock: asyncio.Lock,
         installer: VoiceInstaller,
         asset_path: Callable[[str], Path],
+        *,
+        comfy=None,
     ):
         self.job_dir = data_dir / VOICE_JOB_DIR_NAME
         self.output_dir = data_dir / VOICE_OUTPUT_DIR_NAME
         self.gpu_lock = gpu_lock
         self.installer = installer
         self.asset_path = asset_path
+        self.comfy = comfy
+        self.remote_connections: dict[str, RemoteVoiceConnection] = {}
+        self.remote_poll_interval = 1.0
+        self.shutting_down = False
+        self.before_local_generate = None
         self.jobs: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, asyncio.Task] = {}
         self.processes: dict[str, asyncio.subprocess.Process] = {}
@@ -366,10 +375,31 @@ class VoiceJobManager:
         self.jobs[job_id]["updated_at"] = utc_now()
         self._persist(self.jobs[job_id])
 
+    def remote_connection(self):
+        if self.comfy is None or self.comfy.mode != "remote":
+            return None
+        try:
+            return RemoteVoiceConnection.from_comfy(self.comfy)
+        except RemoteVoiceError as error:
+            raise VoiceError(str(error)) from error
+
+    async def public_status(self):
+        if self.comfy is None or self.comfy.mode != "remote":
+            return {**self.installer.public_status(), "connection_mode": "local", "can_install": True, "available": True}
+        try:
+            status = await self.remote_connection().status()
+            return {**status, "connection_mode": "remote", "can_install": False, "available": True}
+        except (RemoteVoiceError, VoiceError) as error:
+            return {"models": {mode: {"label": value["label"], "installed": False} for mode, value in VOICE_MODELS.items()},
+                    "runtime_installed": False, "installed": False, "active": False,
+                    "state": "unavailable", "error": str(error), "connection_mode": "remote",
+                    "can_install": False, "available": False}
+
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         compiled = compile_voice_request(payload)
         mode = compiled["mode"]
-        if not self.installer.runtime_installed() or not self.installer.model_installed(mode):
+        remote = self.remote_connection()
+        if remote is None and (not self.installer.runtime_installed() or not self.installer.model_installed(mode)):
             raise VoiceError(f"{VOICE_MODELS[mode]['label']}尚未安裝，請先按安裝。")
         if mode == "clone":
             try:
@@ -398,12 +428,17 @@ class VoiceJobManager:
             "seed": compiled["seed"],
             "created_at": utc_now(),
             "updated_at": utc_now(),
+            "engine_mode": "remote" if remote else "local",
         }
+        if remote:
+            job["remote_base_url"] = remote.base_url
+            self.remote_connections[job_id] = remote
+            job["current_node"] = "等待遠端 GPU 主機"
         self.jobs[job_id] = job
         self.cancel_events[job_id] = asyncio.Event()
         self._persist(job)
         (self.job_dir / f"{job_id}.request.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps({**payload, "seed": compiled["seed"]}, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         self.tasks[job_id] = asyncio.create_task(self._run(job_id, compiled))
         return job
@@ -411,7 +446,15 @@ class VoiceJobManager:
     async def _run(self, job_id: str, compiled: dict[str, Any]) -> None:
         cancel_event = self.cancel_events[job_id]
         try:
+            if self.jobs[job_id].get("engine_mode") == "remote":
+                await self._run_remote(job_id, compiled)
+                return
             async with self.gpu_lock:
+                if cancel_event.is_set():
+                    raise asyncio.CancelledError
+                if self.before_local_generate:
+                    self.update(job_id, current_node="等待主機現有影片工作完成")
+                    await self.before_local_generate(cancel_event)
                 if cancel_event.is_set():
                     raise asyncio.CancelledError
                 started = datetime.now(timezone.utc)
@@ -458,12 +501,76 @@ class VoiceJobManager:
                     execution_seconds=round((finished - started).total_seconds(), 3),
                 )
         except asyncio.CancelledError:
-            self.update(job_id, status="cancelled", current_node=None, error="語音工作已取消。")
+            if self.shutting_down and self.jobs[job_id].get("engine_mode") == "remote":
+                self.update(job_id, status="interrupted", current_node=None, error="遠端主機工作仍保留；重新送出可接回進度或取回音訊。")
+            else:
+                self.update(job_id, status="cancelled", current_node=None, error="語音工作已取消。")
         except Exception as error:
             self.update(job_id, status="failed", current_node=None, error=str(error))
         finally:
             self.processes.pop(job_id, None)
             (self.job_dir / f"{job_id}.worker.json").unlink(missing_ok=True)
+
+    async def _run_remote(self, job_id, compiled):
+        job = self.jobs[job_id]
+        remote = self.remote_connections[job_id]
+        cancel_event = self.cancel_events[job_id]
+
+        async def check_cancel():
+            if cancel_event.is_set():
+                if job.get("remote_job_id"):
+                    await remote.cancel(job["remote_job_id"])
+                raise asyncio.CancelledError
+
+        await check_cancel()
+        self.update(job_id, status="preparing", current_node="連線遠端語音服務")
+        if job.get("remote_job_id"):
+            result = await remote.get(job["remote_job_id"])
+            await check_cancel()
+            if result.get("status") in {"failed", "cancelled", "interrupted"}:
+                result = await remote.resume(job["remote_job_id"])
+        else:
+            status = await remote.status()
+            if not status.get("runtime_installed") or not status["models"].get(compiled["mode"], {}).get("installed"):
+                raise VoiceError(f"遠端 GPU 主機的{VOICE_MODELS[compiled['mode']]['label']}尚未安裝；請由主機管理者安裝，同事端不需安裝模型。")
+            await check_cancel()
+            reference_id = job.get("remote_reference_id", "")
+            if compiled["mode"] == "clone" and not reference_id:
+                self.update(job_id, current_node="上傳參考音訊至遠端主機")
+                reference_id = await remote.upload_reference(self.asset_path(compiled["reference_asset_id"]))
+                self.update(job_id, remote_reference_id=reference_id)
+            await check_cancel()
+            result = await remote.create(compiled, job_id, reference_id)
+            self.update(job_id, remote_job_id=result["id"])
+        while True:
+            await check_cancel()
+            status = result.get("status")
+            if status == "completed":
+                self.update(job_id, status="running", progress=95, current_node="下載遠端語音成品")
+                output = self.output_dir / f"{job_id}.wav"
+                await remote.download(job["remote_job_id"], output)
+                await check_cancel()
+                timing = {field: result[field] for field in ("generation_started_at", "finished_at", "execution_seconds") if field in result}
+                self.update(job_id, status="completed", progress=100, current_node=None, error=None,
+                            local_output=output.name, **timing)
+                return
+            if status in {"failed", "interrupted"}:
+                raise VoiceError(str(result.get("error") or "遠端主機的語音工作未完成。"))
+            if status == "cancelled":
+                raise asyncio.CancelledError
+            if status not in {"queued", "preparing", "running"}:
+                raise VoiceError("遠端主機回傳的語音工作狀態格式錯誤。")
+            progress = result.get("progress", 0)
+            if not isinstance(progress, (int, float)) or not math.isfinite(progress):
+                progress = 0
+            self.update(job_id, status=status, progress=min(90, max(0, progress)),
+                        current_node="遠端主機：" + str(result.get("current_node") or "等待 GPU"), error=None)
+            try:
+                await asyncio.wait_for(cancel_event.wait(), timeout=self.remote_poll_interval)
+            except asyncio.TimeoutError:
+                pass
+            await check_cancel()
+            result = await remote.get(job["remote_job_id"])
 
     async def cancel(self, job_id: str) -> dict[str, Any]:
         job = self.jobs.get(job_id)
@@ -472,6 +579,16 @@ class VoiceJobManager:
         if job.get("status") not in {"queued", "preparing", "running"}:
             return job
         self.cancel_events.setdefault(job_id, asyncio.Event()).set()
+        if job.get("engine_mode") == "remote" and job.get("remote_job_id"):
+            try:
+                await self.remote_connections[job_id].cancel(job["remote_job_id"])
+            except RemoteVoiceError as error:
+                raise VoiceError(str(error)) from error
+            task = self.tasks.get(job_id)
+            if task and not task.done():
+                task.cancel()
+            self.update(job_id, status="cancelled", current_node=None, error="語音工作已取消。")
+            return self.jobs[job_id]
         process = self.processes.get(job_id)
         if process and process.returncode is None:
             process.terminate()
@@ -482,10 +599,12 @@ class VoiceJobManager:
         return self.jobs[job_id]
 
     async def shutdown(self) -> None:
+        self.shutting_down = True
         for job_id, task in list(self.tasks.items()):
             if task.done():
                 continue
-            self.cancel_events.setdefault(job_id, asyncio.Event()).set()
+            if self.jobs[job_id].get("engine_mode") != "remote":
+                self.cancel_events.setdefault(job_id, asyncio.Event()).set()
             process = self.processes.get(job_id)
             if process and process.returncode is None:
                 process.terminate()
@@ -502,10 +621,18 @@ class VoiceJobManager:
         if not request_path.exists():
             raise VoiceError("這筆舊工作沒有保留生成設定。")
         compiled = compile_voice_request(json.loads(request_path.read_text(encoding="utf-8")))
-        if not self.installer.model_installed(compiled["mode"]):
+        remote = self.remote_connection()
+        origin = job.get("engine_mode", "local")
+        if origin == "remote":
+            if not remote or remote.base_url != job.get("remote_base_url"):
+                raise VoiceError("請連回這筆語音工作原本的 Gateway，再接回遠端工作；不會改由本機或另一台主機重做。")
+            self.remote_connections[job_id] = remote
+        elif remote:
+            raise VoiceError("這筆是本機語音工作，請切換回本機引擎後重新送出。")
+        if origin != "remote" and not self.installer.model_installed(compiled["mode"]):
             raise VoiceError("這筆工作需要的語音模型尚未安裝。")
         self.cancel_events[job_id] = asyncio.Event()
-        self.update(job_id, status="queued", progress=0, current_node="等待 GPU", error=None)
+        self.update(job_id, status="queued", progress=0, current_node="等待遠端 GPU 主機" if remote else "等待 GPU", error=None)
         self.tasks[job_id] = asyncio.create_task(self._run(job_id, compiled))
         return self.jobs[job_id]
 

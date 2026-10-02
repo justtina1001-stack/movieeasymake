@@ -273,3 +273,121 @@ test('rank refresh changes annotations without touching other card contents', ()
   assert.match(progress.innerHTML, /60%/);
   assert.equal(card.innerHTML, '<video controls></video><textarea>未儲存內容</textarea>');
 });
+
+test('remote voice phases show host state and progress without inventing an engine rank', () => {
+  const { context, run } = fixture(emptyQueue());
+  context.job = { id: 'voice', engine_mode: 'remote', status: 'running', progress: 35, current_node: '主機回報的語音進度' };
+  for (const [phase, label, expectedProgress, waiting] of [
+    ['remote_waiting', '遠端排隊中', null, true],
+    ['remote_preparing', '遠端準備中', null, false],
+    ['remote_processing', '遠端生成中', 61, false],
+  ]) {
+    context.sharedQueueData.jobs.voice = { phase, position: 7, ahead_count: 8, progress: 60.7 };
+    const result = run('queueJobPresentation(job)');
+    assert.equal(result.label, label);
+    assert.equal(result.progress, expectedProgress);
+    assert.equal(result.waiting, waiting);
+    assert.equal(result.detail, context.job.current_node);
+    assert.doesNotMatch(result.label + result.detail, /本機|第 7|前方 8/);
+  }
+});
+
+test('remote job metadata keeps its host status when queue data is missing, offline, or unknown', () => {
+  const { context, run } = fixture();
+  for (const queue of [
+    null,
+    { available: false, jobs: {} },
+    { available: false, error_code: 'studio_restart_required', jobs: {} },
+    { ...emptyQueue(), jobs: { voice: { phase: 'unknown' } } },
+    { ...emptyQueue(), jobs: { voice: { phase: 'local_processing' } } },
+  ]) {
+    context.sharedQueueData = queue;
+    for (const [status, label, progress] of [
+      ['queued', '遠端排隊中', null],
+      ['preparing', '遠端準備中', null],
+      ['running', '遠端生成中', 42],
+    ]) {
+      context.job = { id: 'voice', engine_mode: 'remote', status, progress: 41.7 };
+      const result = run('queueJobPresentation(job)');
+      assert.equal(result.label, label);
+      assert.equal(result.progress, progress);
+      assert.doesNotMatch(result.label + result.detail, /本機|引擎順位|排隊第/);
+    }
+  }
+});
+
+test('remote processing progress remains bounded and unknown host percentages stay unmeasured', () => {
+  const { context, run } = fixture();
+  for (const [value, expected] of [[null, null], [undefined, null], ['', null], ['bad', null], [-10, 0], [101, 100]]) {
+    context.job = { id: 'voice', engine_mode: 'remote', status: 'running', progress: value };
+    assert.equal(run('queueJobPresentation(job).progress'), expected);
+  }
+  context.job.status = 'completed';
+  context.job.progress = 100;
+  assert.equal(run('queueJobPresentation(job).label'), '已完成');
+  assert.equal(run('queueJobPresentation(job).progress'), 100);
+});
+
+test('remote metadata survives HTML annotations and refresh even before queue API is available', () => {
+  const { context, element, run } = fixture();
+  context.job = { id: 'voice', engine_mode: 'remote', status: 'running', progress: 37, current_node: '遠端主機' };
+  assert.match(run('queueJobAttributes(job)'), /data-queue-engine-mode="remote"/);
+  assert.match(run('queueJobBadgeHtml(job)'), /遠端生成中/);
+  const badge = element('remote-badge');
+  badge.dataset = { queueJob: 'voice', queueStatus: 'running', queueProgress: '37', queueNode: '遠端主機', queueEngineMode: 'remote' };
+  badge.attributes['data-queue-badge'] = '';
+  const progress = element('remote-progress');
+  progress.dataset = badge.dataset;
+  progress.attributes['data-queue-progress-panel'] = '';
+  context.annotations = [badge, progress];
+  run('refreshQueueJobAnnotations()');
+  assert.equal(badge.textContent, '遠端生成中');
+  assert.match(progress.innerHTML, /37%/);
+  assert.doesNotMatch(progress.innerHTML, /本機/);
+  badge.dataset.queueStatus = 'queued';
+  run('refreshQueueJobAnnotations()');
+  assert.equal(badge.textContent, '遠端排隊中');
+  assert.doesNotMatch(progress.innerHTML, /37%/);
+});
+
+test('remote queue rows use remote labels and only host processing reports a percentage', () => {
+  const { context, run } = fixture(emptyQueue());
+  context.rows = [
+    { title: '遠端待處理', phase: 'remote_waiting', kind: 'voice', position: 3, progress: 9 },
+    { title: '遠端準備', phase: 'remote_preparing', kind: 'voice', progress: 15 },
+    { title: '遠端生成', phase: 'remote_processing', kind: 'voice', progress: 55.8 },
+  ];
+  const html = run('queueRowsHtml(rows, "remote")');
+  for (const label of ['遠端排隊中', '遠端準備中', '遠端生成中']) assert.match(html, new RegExp(label));
+  assert.match(html, /56%/);
+  assert.doesNotMatch(html, /本機|第 3 位|9%|15%/);
+});
+
+test('remote voices in local_active are grouped as remote and excluded from local processing counts', () => {
+  const { context, element, run } = fixture(emptyQueue());
+  context.sharedQueueData.local_active = [
+    { kind: 'voice', title: '遠端角色語音', phase: 'remote_processing', progress: 75, owner: '我的工作' },
+  ];
+  run('renderSharedQueue()');
+  assert.match(element('#queueStatusMessage').textContent, /遠端另有 1 筆/);
+  assert.doesNotMatch(element('#queueStatusMessage').textContent, /本機另有/);
+  assert.match(element('#queueWorkList').innerHTML, /遠端工作狀態/);
+  assert.match(element('#queueWorkList').innerHTML, /遠端生成中.*遠端角色語音.*75%/);
+  assert.doesNotMatch(element('#queueWorkList').innerHTML, /本機工作狀態/);
+  context.sharedQueueData.local_active.push({ kind: 'music', title: '本機音樂素材', phase: 'preparing' });
+  run('renderSharedQueue()');
+  assert.match(element('#queueStatusMessage').textContent, /本機另有 1 筆/);
+  assert.match(element('#queueStatusMessage').textContent, /遠端另有 1 筆/);
+  assert.match(element('#queueWorkList').innerHTML, /本機工作狀態/);
+});
+
+test('a failed queue refresh keeps remote voices out of stale local processing descriptions', async () => {
+  const { context, element, run } = fixture(emptyQueue());
+  context.sharedQueueData.local_active = [{ kind: 'voice', title: '遠端角色語音', phase: 'remote_waiting' }];
+  context.api = async () => { throw Error('offline'); };
+  await run('loadSharedQueue()');
+  assert.match(element('#queueStatusMessage').textContent, /遠端另有 1 筆/);
+  assert.match(element('#queueStatusMessage').textContent, /遠端資訊為上次取得/);
+  assert.doesNotMatch(element('#queueStatusMessage').textContent, /本機另有|本機資訊/);
+  assert.match(element('#queueWorkList').innerHTML, /遠端工作狀態/);
+});

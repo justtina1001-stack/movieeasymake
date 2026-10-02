@@ -2059,8 +2059,9 @@ def create_app() -> web.Application:
     music_installer = Music3Installer(comfy)
     music_jobs = MusicJobManager(comfy, DATA_DIR, jobs.gpu_lock, music_installer)
     voice_installer = VoiceInstaller(DATA_DIR)
-    voice_jobs = VoiceJobManager(DATA_DIR, jobs.gpu_lock, voice_installer, assets.path_for)
-    gateway = SharedComfyGateway(DATA_DIR)
+    voice_jobs = VoiceJobManager(DATA_DIR, jobs.gpu_lock, voice_installer, assets.path_for, comfy=comfy)
+    gateway = SharedComfyGateway(DATA_DIR, voice_installer=voice_installer, voice_jobs=voice_jobs, voice_assets=assets)
+    voice_jobs.before_local_generate = gateway.wait_for_engine_idle
     shortfilms = ShortFilmStore(DATA_DIR / "shortfilms")
 
     async def use_installed_engine(target: Path) -> None:
@@ -2889,16 +2890,20 @@ def create_app() -> web.Application:
         return web.FileResponse(path, headers=headers)
 
     async def voice_status(_: web.Request) -> web.Response:
-        return web.json_response(voice_installer.public_status())
+        return web.json_response(await voice_jobs.public_status(), headers={"Cache-Control": "no-store"})
 
     async def install_voice_model(request: web.Request) -> web.Response:
         try:
+            if comfy.mode == "remote":
+                raise VoiceError("遠端語音模型由 GPU 主機管理者安裝；同事端不需安裝語音環境或模型。")
             payload = await request.json()
             return web.json_response(await voice_installer.start(str(payload.get("mode") or "custom")), status=202)
         except (VoiceError, json.JSONDecodeError) as error:
             return json_response_error(error, 409)
 
     async def cancel_voice_install(_: web.Request) -> web.Response:
+        if comfy.mode == "remote":
+            return json_response_error(VoiceError("請由 GPU 主機管理者管理語音模型安裝，同事端不能取消主機安裝。"), 409)
         return web.json_response(await voice_installer.cancel())
 
     async def list_voice_jobs(request: web.Request) -> web.Response:

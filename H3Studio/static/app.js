@@ -427,31 +427,62 @@ function closeVoiceStudio() {
 
 function renderVoiceStatus(data) {
   voiceStatusData = data;
+  const remote = (data.connection_mode || connectionSettings?.mode) === "remote";
+  const available = data.available !== false && (!remote || data.connection_mode === "remote");
+  const canInstall = !remote && available && data.can_install !== false;
   const model = data.models?.[voiceMode] || {};
-  const active = Boolean(data.active);
-  const installed = Boolean(data.runtime_installed && model.installed);
+  const active = Boolean(available && data.active);
+  const installed = Boolean(available && data.runtime_installed && model.installed);
+  const error = data.error || (!available
+    ? remote && !data.connection_mode
+      ? "目前 Studio 尚未提供遠端語音功能，請更新並重新啟動 Studio。"
+      : `無法取得${remote ? "遠端主機" : "本機"}語音狀態，請確認連線後重試。`
+    : "");
+  const modelLabel = model.label || voiceModeLabel(voiceMode);
+  const engineLabel = remote ? " · 遠端主機" : "";
+  $("#voiceEngineLabel").textContent = remote ? "REMOTE OPEN-WEIGHT VOICE" : "LOCAL OPEN-WEIGHT VOICE";
+  $("#voiceDescription").textContent = remote
+    ? "中文台詞、聲線設計與參考聲線複製；使用遠端 GPU 主機，本機不需安裝語音模型，不使用付費 API。"
+    : "中文台詞、聲線設計與參考聲線複製；完全本機執行，不使用付費 API。";
+  $("#voiceGenerationNote").textContent = remote
+    ? "語音在遠端 GPU 主機生成，完成後自動回存這台電腦；參考音訊會上傳至主機。"
+    : "語音、Music 3 與影片共用本機 GPU 工作鎖；語音模型會在每次工作完成後釋放顯存。";
   const dot = $("#voiceStatusDot");
-  dot.className = `music-status-dot${installed ? " ready" : active ? " active" : data.error ? " error" : ""}`;
-  $("#voiceModelTitle").textContent = installed
-    ? `${model.label || voiceModeLabel(voiceMode)}已可使用`
-    : active ? data.current || "正在安裝語音模型" : `${model.label || voiceModeLabel(voiceMode)}尚未安裝`;
+  dot.className = `music-status-dot${installed ? " ready" : active ? " active" : error ? " error" : ""}`;
+  $("#voiceModelTitle").textContent = !available
+    ? `${remote ? "遠端主機" : "本機"}語音暫時無法使用`
+    : installed ? `${modelLabel}已可使用${engineLabel}`
+    : active ? `${data.current || "正在安裝語音模型"}${engineLabel}` : `${modelLabel}尚未安裝${engineLabel}`;
   const installedCount = Object.values(data.models || {}).filter(item => item.installed).length;
-  $("#voiceModelDetail").textContent = data.error || (active
-    ? `${data.current || "安裝中"}；大型檔案會自動續傳`
-    : `${model.description || "Qwen3-TTS 本機模型"} · 已安裝 ${installedCount}/3 種`);
-  $("#voiceInstallProgress").classList.toggle("hidden", !active && !data.error);
-  $("#voiceInstallProgress").textContent = data.error || (active ? "安裝會在背景繼續；首次建立獨立環境與下載權重需要一些時間。" : "");
-  $("#installVoiceModel").classList.toggle("hidden", installed);
-  $("#installVoiceModel").disabled = active;
-  $("#installVoiceModel").textContent = data.runtime_installed ? `安裝${model.label || "目前模型"}` : `建立語音環境並安裝${model.label || "目前模型"}`;
-  $("#cancelVoiceInstall").classList.toggle("hidden", !active);
-  $("#generateVoice").disabled = !installed;
+  $("#voiceModelDetail").textContent = error || (remote && !installed && !active
+    ? `請 GPU 主機管理者在主機的語音工作室安裝${modelLabel}；這台電腦不需安裝語音模型。`
+    : active ? `${remote ? "遠端主機" : "本機"}：${data.current || "安裝中"}；大型檔案會自動續傳`
+    : `${model.description || "Qwen3-TTS 開源模型"} · ${remote ? "遠端主機" : "本機"}已安裝 ${installedCount}/3 種`);
+  $("#voiceInstallProgress").classList.toggle("hidden", !active && !error);
+  $("#voiceInstallProgress").textContent = error || (active
+    ? remote ? "主機正在安裝，請等待管理者完成；這台電腦不需下載模型。" : "安裝會在背景繼續；首次建立獨立環境與下載權重需要一些時間。"
+    : "");
+  $("#installVoiceModel").classList.toggle("hidden", !canInstall || installed);
+  $("#installVoiceModel").disabled = !canInstall || active;
+  $("#installVoiceModel").textContent = data.runtime_installed ? `安裝${modelLabel}` : `建立語音環境並安裝${modelLabel}`;
+  $("#cancelVoiceInstall").classList.toggle("hidden", !canInstall || !active);
+  $("#cancelVoiceInstall").disabled = !canInstall || !active;
+  $("#generateVoice").disabled = !installed || $("#generateVoice").hasAttribute("aria-busy");
 }
 
 async function loadVoiceStatus() {
-  const data = await api("/api/voice/status");
-  renderVoiceStatus(data);
-  return data;
+  try {
+    const data = await api("/api/voice/status");
+    renderVoiceStatus(data);
+    return data;
+  } catch (error) {
+    const mode = connectionSettings?.mode || voiceStatusData?.connection_mode || "local";
+    renderVoiceStatus({
+      connection_mode: mode, available: false, can_install: false, models: {},
+      error: `無法讀取${mode === "remote" ? "遠端主機" : "本機"}語音狀態：${error.message}`,
+    });
+    throw error;
+  }
 }
 
 function renderVoiceReference() {
@@ -1806,9 +1837,16 @@ function queueJobPresentation(job, queue = sharedQueueData) {
   const active = ["queued", "preparing", "running"].includes(job.status);
   const percent = value => value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Math.max(0, Math.min(100, Math.round(Number(value))));
   if (!active) return { label: statusLabel(job.status), detail: job.current_node || statusLabel(job.status), progress: percent(job.progress), waiting: false };
-  if (queue?.error_code === "studio_restart_required") return { label: "Studio 待重啟", detail: "介面已更新；請等工作完成後重啟 Studio，才能確認引擎順位。", progress: null, waiting: false };
   const row = queue?.jobs?.[job.id];
   const phase = row?.phase;
+  if (["remote_waiting", "remote_preparing", "remote_processing"].includes(phase) || job.engine_mode === "remote") {
+    const remotePhase = ["remote_waiting", "remote_preparing", "remote_processing"].includes(phase)
+      ? phase : { queued: "remote_waiting", preparing: "remote_preparing", running: "remote_processing" }[job.status];
+    if (remotePhase === "remote_waiting") return { label: "遠端排隊中", detail: job.current_node || "等待遠端 GPU 主機執行", progress: null, waiting: true };
+    if (remotePhase === "remote_preparing") return { label: "遠端準備中", detail: job.current_node || "正在準備或上傳遠端語音素材", progress: null, waiting: false };
+    return { label: "遠端生成中", detail: job.current_node || "由遠端 GPU 主機生成語音", progress: percent(row?.progress ?? job.progress), waiting: false };
+  }
+  if (queue?.error_code === "studio_restart_required") return { label: "Studio 待重啟", detail: "介面已更新；請等工作完成後重啟 Studio，才能確認引擎順位。", progress: null, waiting: false };
   if (phase === "engine_waiting" && queue.available) {
     const position = Number.isInteger(row.position) && row.position > 0 ? row.position : null;
     const ahead = Number.isInteger(row.ahead_count) && row.ahead_count >= 0 ? row.ahead_count : null;
@@ -1824,7 +1862,7 @@ function queueJobPresentation(job, queue = sharedQueueData) {
 
 function queueJobAttributes(job) {
   if (!["queued", "preparing", "running"].includes(job.status)) return "";
-  return ` data-queue-job="${escapeHtml(job.id)}" data-queue-status="${escapeHtml(job.status)}" data-queue-progress="${escapeHtml(job.progress ?? "")}" data-queue-node="${escapeHtml(job.current_node || "")}"`;
+  return ` data-queue-job="${escapeHtml(job.id)}" data-queue-status="${escapeHtml(job.status)}" data-queue-progress="${escapeHtml(job.progress ?? "")}" data-queue-node="${escapeHtml(job.current_node || "")}" data-queue-engine-mode="${escapeHtml(job.engine_mode || "")}"`;
 }
 
 function queueJobBadgeHtml(job, className = "job-badge") {
@@ -1842,7 +1880,7 @@ function queueJobProgressHtml(job) {
 
 function refreshQueueJobAnnotations() {
   $$('[data-queue-job]').forEach(element => {
-    const job = { id: element.dataset.queueJob, status: element.dataset.queueStatus, progress: element.dataset.queueProgress, current_node: element.dataset.queueNode };
+    const job = { id: element.dataset.queueJob, status: element.dataset.queueStatus, progress: element.dataset.queueProgress, current_node: element.dataset.queueNode, engine_mode: element.dataset.queueEngineMode };
     const presentation = queueJobPresentation(job);
     if (element.hasAttribute("data-queue-badge")) {
       element.textContent = presentation.label;
@@ -1858,8 +1896,8 @@ function queueRowsHtml(rows, group) {
   const kinds = { video: "影片", music: "音樂", voice: "語音", image: "圖片", unknown: "其他工作" };
   return rows.map(row => {
     const rank = Number.isInteger(row.position) && row.position > 0 ? `第 ${row.position} 位` : "等待中";
-    const phaseLabel = { engine_running: "執行中", engine_waiting: rank, local_waiting: "待送出", preparing: "準備素材", finishing: "完成後處理", local_processing: "本機處理", unknown: "同步狀態中" }[row.phase] || "同步狀態中";
-    const progress = row.phase === "engine_running" && row.progress !== null && row.progress !== undefined && Number.isFinite(Number(row.progress)) ? ` · ${Math.max(0, Math.min(100, Math.round(Number(row.progress))))}%` : "";
+    const phaseLabel = { engine_running: "執行中", engine_waiting: rank, local_waiting: "待送出", preparing: "準備素材", finishing: "完成後處理", local_processing: "本機處理", remote_waiting: "遠端排隊中", remote_preparing: "遠端準備中", remote_processing: "遠端生成中", unknown: "同步狀態中" }[row.phase] || "同步狀態中";
+    const progress = ["engine_running", "remote_processing"].includes(row.phase) && row.progress !== null && row.progress !== undefined && row.progress !== "" && Number.isFinite(Number(row.progress)) ? ` · ${Math.max(0, Math.min(100, Math.round(Number(row.progress))))}%` : "";
     const ahead = row.phase === "engine_waiting" && Number.isInteger(row.ahead_count) && row.ahead_count >= 0 ? ` · 前方 ${row.ahead_count} 筆` : "";
     return `<li class="queue-work-row ${group}"><span class="queue-row-position">${escapeHtml(phaseLabel)}</span><div><strong>${escapeHtml(row.title || "未命名工作")}</strong><small>${escapeHtml(kinds[row.kind] || kinds.unknown)}${row.owner ? ` · ${escapeHtml(row.owner)}` : ""}${escapeHtml(ahead)}${escapeHtml(progress)}</small></div></li>`;
   }).join("");
@@ -1877,7 +1915,10 @@ function renderSharedQueue() {
   panel.classList.toggle("queue-unavailable", !available && Boolean(data));
   const date = data?.updated_at ? new Date(data.updated_at) : null;
   $("#queueUpdatedAt").textContent = date && !Number.isNaN(date.getTime()) ? `${data.stale ? "上次取得" : "更新於"} ${date.toLocaleTimeString("zh-TW", { hour12: false })}` : "尚未取得狀態";
-  const localActive = Array.isArray(data?.local_active) ? data.local_active : [];
+  const allActive = Array.isArray(data?.local_active) ? data.local_active : [];
+  const remotePhases = ["remote_waiting", "remote_preparing", "remote_processing"];
+  const remoteActive = allActive.filter(row => remotePhases.includes(row.phase));
+  const localActive = allActive.filter(row => !remotePhases.includes(row.phase));
   let message = "正在確認引擎排隊狀態...";
   if (data && !available) message = data.error || "目前無法取得引擎佇列，無法確認是否仍有工作執行。";
   else if (available && data.running_count > 0) message = `引擎正在執行 ${data.running_count} 筆工作${data.pending_count > 0 ? `，另有 ${data.pending_count} 筆等待輪到。` : "。"}`;
@@ -1886,8 +1927,11 @@ function renderSharedQueue() {
   const localProcessing = localActive.filter(row => row.phase !== "unknown").length;
   const unknown = localActive.length - localProcessing;
   if (localProcessing) message += ` 本機另有 ${localProcessing} 筆正在準備或處理，詳見清單。`;
+  if (remoteActive.length) message += ` 遠端另有 ${remoteActive.length} 筆正在排隊、準備或生成，詳見清單。`;
   if (unknown) message += ` 另有 ${unknown} 筆工作正在確認引擎狀態。`;
-  if (data?.stale) message += " 本機資訊為上次取得的狀態。";
+  if (data?.stale) message += remoteActive.length
+    ? ` ${localActive.length || data?.local_waiting?.length ? "本機與遠端" : "遠端"}資訊為上次取得的狀態。`
+    : " 本機資訊為上次取得的狀態。";
   const messageElement = $("#queueStatusMessage");
   if (messageElement.textContent !== message) messageElement.textContent = message;
   const groups = [
@@ -1895,6 +1939,7 @@ function renderSharedQueue() {
     ["引擎排隊", available ? data.pending : [], "pending"],
     ["本機待送出", data?.local_waiting, "local"],
     ["本機工作狀態", localActive, "local"],
+    ["遠端工作狀態", remoteActive, "remote"],
   ].filter(([, rows]) => Array.isArray(rows) && rows.length);
   $("#queueWorkList").innerHTML = groups.length ? groups.map(([label, rows, group]) => `<section class="queue-work-group"><h3>${label}<span>${rows.length}</span></h3><ol>${queueRowsHtml(rows, group)}</ol></section>`).join("") : `<p class="queue-empty">${available ? "目前沒有待顯示的工作" : "引擎工作清單暫時無法取得"}</p>`;
 }
@@ -3886,6 +3931,8 @@ function bindEvents() {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(connectionPayload()),
       });
       applyStudioRole(connectionSettings);
+      renderVoiceStatus({ connection_mode: connectionSettings.mode, available: false, can_install: false, models: {}, error: "正在重新檢查語音狀態…" });
+      loadVoiceStatus().catch(error => console.warn(error));
       closeConnectionSettings();
       engineStartingAt = 0;
       toast("引擎設定已儲存");

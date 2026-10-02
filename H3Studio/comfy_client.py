@@ -306,15 +306,29 @@ class ComfyClient:
         ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                f"{self.base_url}/prompt",
-                json={"prompt": workflow, "client_id": client_id},
-                headers=self.auth_headers(),
-            ) as response:
-                result = await response.json()
-                if response.status != 200:
-                    raise RuntimeError(result.get("error", {}).get("message") or str(result))
-                prompt_id = result["prompt_id"]
+            while True:
+                if cancel_event.is_set():
+                    raise asyncio.CancelledError
+                async with session.post(
+                    f"{self.base_url}/prompt",
+                    json={"prompt": workflow, "client_id": client_id},
+                    headers=self.auth_headers(),
+                ) as response:
+                    result = await response.json()
+                    if response.status == 409 and result.get("code") == "host_gpu_busy":
+                        # This response guarantees that no prompt was accepted.
+                        await callback({"status": "queued", "progress": 0,
+                                        "current_node": "等待遠端 GPU 主機完成目前語音或其他工作"})
+                    elif response.status != 200:
+                        error = result.get("error")
+                        raise RuntimeError((error.get("message") if isinstance(error, dict) else error) or str(result))
+                    else:
+                        prompt_id = result["prompt_id"]
+                        break
+                try:
+                    await asyncio.wait_for(cancel_event.wait(), timeout=1)
+                except asyncio.TimeoutError:
+                    pass
             await callback({"prompt_id": prompt_id, "status": "running", "progress": 0})
 
             reconnect_delay = 1.0

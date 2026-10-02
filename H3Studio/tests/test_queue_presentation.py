@@ -25,6 +25,20 @@ def job(status="queued", **values):
 
 
 class QueuePresentationTests(unittest.TestCase):
+    def test_remote_voice_uses_host_progress_without_claiming_local_processing_or_comfy_rank(self):
+        voice = {state: job(state, engine_mode="remote", progress=35,
+                            remote_base_url="http://private-gateway", remote_job_id="private-host-job")
+                 for state in ("queued", "preparing", "running")}
+        view = build_queue_view(snapshot(), {}, {}, voice)
+        self.assertEqual(view["jobs"]["queued"]["phase"], "remote_waiting")
+        self.assertEqual(view["jobs"]["preparing"]["phase"], "remote_preparing")
+        self.assertEqual(view["jobs"]["running"]["phase"], "remote_processing")
+        self.assertEqual(view["jobs"]["running"]["progress"], 35)
+        self.assertEqual(view["local_waiting_count"], 0)
+        for row in view["jobs"].values():
+            self.assertIsNone(row["position"]); self.assertIsNone(row["ahead_count"])
+        self.assertNotIn("private-", json.dumps(view))
+
     def test_engine_snapshot_overrides_stale_running_status_and_progress(self):
         video = {
             "active-video": job("running", prompt_id="active-prompt", name="正在生成", progress=37),

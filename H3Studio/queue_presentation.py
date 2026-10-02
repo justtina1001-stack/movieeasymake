@@ -50,7 +50,7 @@ def build_queue_view(
             if isinstance(segment, int):
                 title += f" · 第 {segment} 段"
         progress = None
-        if phase == "engine_running":
+        if phase in {"engine_running", "remote_processing"}:
             try:
                 value = float(job.get("progress") or 0)
                 if math.isfinite(value):
@@ -100,7 +100,9 @@ def build_queue_view(
         child_id = job.get("active_child_id")
         if child_id in all_jobs and all_jobs[child_id][1].get("status") in ACTIVE_STATUSES:
             continue
-        if job.get("status") == "queued":
+        if kind == "voice" and job.get("engine_mode") == "remote":
+            phase = {"queued": "remote_waiting", "preparing": "remote_preparing", "running": "remote_processing"}[job["status"]]
+        elif job.get("status") == "queued":
             phase = "local_waiting"
         elif job.get("status") == "preparing":
             phase = "finishing" if job.get("output") or job.get("current_node") == "合併替換片段並處理聲音" else "preparing"

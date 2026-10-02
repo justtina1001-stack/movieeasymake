@@ -72,14 +72,17 @@ class GatewayStore:
             return defaults
 
     def _load_state(self) -> dict[str, Any]:
+        keys = ("prompt_owners", "voice_job_owners", "voice_asset_owners", "voice_client_jobs")
         if not self.state_path.exists():
-            return {"prompt_owners": {}}
+            return {key: {} for key in keys}
         try:
             payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-            owners = payload.get("prompt_owners") if isinstance(payload, dict) else {}
-            return {"prompt_owners": owners if isinstance(owners, dict) else {}}
+            return {
+                key: payload[key] if isinstance(payload, dict) and isinstance(payload.get(key), dict) else {}
+                for key in keys
+            }
         except (OSError, json.JSONDecodeError):
-            return {"prompt_owners": {}}
+            return {key: {} for key in keys}
 
     @staticmethod
     def _write(path: Path, payload: dict[str, Any]) -> None:
@@ -175,13 +178,17 @@ class GatewayStore:
 
 
 class SharedComfyGateway:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, *, voice_installer=None, voice_jobs=None, voice_assets=None):
         self.store = GatewayStore(data_dir)
+        self.voice_installer = voice_installer
+        self.voice_jobs = voice_jobs
+        self.voice_assets = voice_assets
         self.runner: web.AppRunner | None = None
         self.site: web.TCPSite | None = None
         self.last_error = ""
         self.upload_dir = data_dir / "gateway_uploads"
         self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.submit_lock = asyncio.Lock()
 
     @property
     def upstream_url(self) -> str:
@@ -259,6 +266,26 @@ class SharedComfyGateway:
         if runner:
             await runner.cleanup()
 
+    async def wait_for_engine_idle(self, cancel_event):
+        """Drain accepted Comfy work while the host voice manager holds its GPU lock."""
+        if not self.running and not self.store.config.get("enabled"):
+            return
+        # An already accepted POST must finish before the queue can prove idle.
+        async with self.submit_lock:
+            pass
+        while True:
+            if cancel_event.is_set():
+                raise asyncio.CancelledError
+            snapshot = await fetch_queue_snapshot(self.upstream_url)
+            if not snapshot.get("available"):
+                raise GatewayError("無法確認 GPU 主機的影片佇列，請先啟動主機 ComfyUI 再產生共享語音。")
+            if not snapshot["running_count"] and not snapshot["pending_count"]:
+                return
+            try:
+                await asyncio.wait_for(cancel_event.wait(), timeout=1)
+            except asyncio.TimeoutError:
+                pass
+
     def create_app(self) -> web.Application:
         app = web.Application(client_max_size=3 * 1024**3)
         app.router.add_get("/system_stats", self.proxy_system_stats)
@@ -271,6 +298,8 @@ class SharedComfyGateway:
         app.router.add_post("/interrupt", self.proxy_interrupt)
         app.router.add_post("/api/jobs/{prompt_id}/cancel", self.proxy_interrupt)
         app.router.add_get("/ws", self.proxy_websocket)
+        from gateway_voice import register_gateway_voice
+        register_gateway_voice(app, self)
         return app
 
     def _authenticated_user(self, request: web.Request) -> dict[str, Any]:
@@ -397,15 +426,19 @@ class SharedComfyGateway:
                 "prompt": self._rewrite_workflow(workflow, str(user["id"])),
                 "client_id": self._mapped_client_id(str(user["id"]), original_client_id),
             }
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
-                async with session.post(f"{self.upstream_url}/prompt", json=forwarded) as response:
-                    body = await response.read()
-                    if response.status == 200:
-                        result = json.loads(body)
-                        prompt_id = str(result.get("prompt_id") or "")
-                        if prompt_id:
-                            self.store.set_prompt_owner(prompt_id, str(user["id"]))
-                    return web.Response(body=body, status=response.status, content_type=response.content_type)
+            async with self.submit_lock:
+                if self.voice_jobs is not None and self.voice_jobs.gpu_lock.locked():
+                    return web.json_response({"error": "GPU 主機正在處理其他 Studio 工作，請稍候。",
+                                              "code": "host_gpu_busy", "retryable": True}, status=409)
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+                    async with session.post(f"{self.upstream_url}/prompt", json=forwarded) as response:
+                        body = await response.read()
+                        if response.status == 200:
+                            result = json.loads(body)
+                            prompt_id = str(result.get("prompt_id") or "")
+                            if prompt_id:
+                                self.store.set_prompt_owner(prompt_id, str(user["id"]))
+                        return web.Response(body=body, status=response.status, content_type=response.content_type)
         except (json.JSONDecodeError, GatewayError) as error:
             raise web.HTTPBadRequest(
                 text=json.dumps({"error": str(error)}, ensure_ascii=False), content_type="application/json"
