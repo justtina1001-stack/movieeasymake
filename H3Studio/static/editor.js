@@ -51,7 +51,8 @@
     return value;
   }
   function requireAnimationSupport(value, ready) {
-    if (!ready && [...value.clips, ...overlays(value)].some(item => Object.keys(canonicalAnimations(item)).length)) throw new Error("目前 Studio 尚未載入進退場動畫與轉場更新，動畫設定尚未送出儲存、草稿仍保留。請重新啟動 Studio 後再儲存。");
+    // New-project requests omit clip collections; the server supplies empty ones.
+    if (!ready && [...(value.clips || []), ...overlays(value)].some(item => Object.keys(canonicalAnimations(item)).length)) throw new Error("目前 Studio 尚未載入進退場動畫與轉場更新，動畫設定尚未送出儲存、草稿仍保留。請重新啟動 Studio 後再儲存。");
   }
   const TEXT_STYLE_DEFAULTS = Object.freeze({ stroke_width: 0, stroke_color: "#000000", fill_mode: "solid", gradient_start: "#ffffff", gradient_end: "#ff8a3d", gradient_angle: 90 });
   function canonicalTextStyle(layer) {

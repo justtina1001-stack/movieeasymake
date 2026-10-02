@@ -237,3 +237,19 @@ test("animation support guards allow legacy clips and keep configured drafts out
   value.clips[0].animation_in = effect(); assert.throws(() => requireAnimationSupport(value, false), /草稿仍保留/);
   requireAnimationSupport(value, true);
 });
+
+test("animation support accepts empty create requests before the server adds clip collections", () => {
+  for (const value of [{}, { name: "未命名專案" }, { name: "未命名專案", clips: [] }]) {
+    const before = clone(value);
+    assert.doesNotThrow(() => requireAnimationSupport(value, false));
+    assert.deepEqual(value, before);
+  }
+});
+
+test("a create request without main clips still protects animated overlay content", () => {
+  const value = { name: "疊層副本", overlays: [title("title", { animation_in: effect() })] };
+  const before = clone(value);
+  assert.throws(() => requireAnimationSupport(value, false), /草稿仍保留/);
+  assert.deepEqual(value, before);
+  requireAnimationSupport(value, true);
+});

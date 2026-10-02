@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { clone, signature, canonicalSavedSignature, resolveDraft, ProjectSession, ProjectAutoSaver } = require("../static/editor.js");
+const { clone, signature, canonicalSavedSignature, resolveDraft, ProjectSession, ProjectAutoSaver, editableContent, requireTextStyleSupport, requireAnimationSupport } = require("../static/editor.js");
 
 const project = () => ({ id: "persist-project", name: "續編測試", width: 1280, height: 720, fps: 24, updated_at: "r1",
   clips: [{ id: "v1", media_id: "video", in: 0, out: 4, speed: 1, volume: 1 }],
@@ -125,6 +125,62 @@ test("canceling a timer before switching projects cannot save the wrong session"
 });
 
 const browserSource = fs.readFileSync(path.join(__dirname, "../static/editor.js"), "utf8");
+function newProjectFixture(source, animationReady = false, transitionReady = false) {
+  const events = [], requests = [], original = clone(source);
+  const state = { session: new ProjectSession(source), projects: [original], busy: false,
+    textStyleReady: true, clipAnimationsReady: animationReady, clipTransitionsReady: transitionReady };
+  const context = vm.createContext({ state, clone, editableContent, requireTextStyleSupport, requireAnimationSupport,
+    canSwitch: () => true, project: () => state.session.project, renderDisabled() {},
+    saveProject: async () => { events.push("save"); }, rememberDraft: () => { events.push("draft"); },
+    json: (method, data) => ({ method, body: JSON.stringify(data) }),
+    api: async (url, options) => {
+      assert.equal(url, "/api/editor/projects"); assert.equal(options.method, "POST");
+      const payload = JSON.parse(options.body); requests.push(payload); events.push("create");
+      return { project: { width: 1280, height: 720, fps: 24, clips: [], audio_clips: [], overlays: [],
+        ...payload, id: "new-project", updated_at: "r1" } };
+    },
+    installProject: value => { state.session = new ProjectSession(value); events.push("install"); },
+    render: () => { events.push("render"); },
+  });
+  const start = browserSource.indexOf("  async function newProject("), rest = browserSource.slice(start);
+  const end = rest.slice(1).search(/\n  (?:async )?function \w+\(/);
+  assert.ok(start >= 0 && end >= 0); vm.runInContext(rest.slice(0, end + 1), context);
+  return { state, original, events, requests, create: copy => context.newProject(copy) };
+}
+
+test("new project saves the current project and creates an empty project with legacy capabilities", async () => {
+  for (const [animationReady, transitionReady] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const source = project(), before = clone(source), f = newProjectFixture(source, animationReady, transitionReady);
+    await f.create(false);
+    assert.deepEqual(f.events, ["save", "create", "install", "render"]);
+    assert.deepEqual(f.requests, [{ name: "未命名專案" }]);
+    assert.equal(f.state.session.project.id, "new-project");
+    assert.deepEqual(f.state.session.project.clips, []); assert.deepEqual(f.state.session.project.audio_clips, []);
+    assert.deepEqual(f.state.session.project.overlays, []); assert.equal(f.state.busy, false);
+    assert.equal(f.state.projects.length, 2); assert.deepEqual(f.state.projects[1], before);
+    assert.deepEqual(source, before);
+  }
+});
+
+test("copying an animated project to a legacy backend preserves the draft without creating a project", async () => {
+  const source = project(); source.clips[0].animation_in = { type: "fade", duration: 0.5 };
+  const before = clone(source), f = newProjectFixture(source), session = f.state.session, sessionBefore = clone(session.project);
+  await assert.rejects(f.create(true), /草稿仍保留/);
+  assert.deepEqual(f.events, ["draft"]); assert.deepEqual(f.requests, []);
+  assert.equal(f.state.session, session); assert.deepEqual(f.state.session.project, sessionBefore); assert.deepEqual(source, before);
+  assert.equal(f.state.projects.length, 1); assert.equal(f.state.busy, false);
+});
+
+test("copying an animated project to a supported backend retains its clips and effects", async () => {
+  const source = project(); source.clips[0].animation_in = { type: "fade", duration: 0.5 };
+  const before = clone(source), f = newProjectFixture(source, true, true);
+  await f.create(true);
+  assert.deepEqual(f.events, ["draft", "create", "install", "render"]);
+  assert.deepEqual(f.requests[0].clips, before.clips); assert.deepEqual(f.requests[0].audio_clips, before.audio_clips);
+  assert.equal(f.state.session.project.name, `${before.name} 副本`);
+  assert.deepEqual(source, before); assert.equal(f.state.busy, false);
+});
+
 function browserStorageFixture(session) {
   const values = new Map(), state = { session }; let serial = 0, denied = false;
   const localStorage = { get length() { return values.size; }, key: i => [...values.keys()][i],
