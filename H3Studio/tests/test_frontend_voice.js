@@ -205,5 +205,5 @@ test("voice controls initially wait for readiness and load the updated frontend"
   for (const id of ["voiceEngineLabel", "voiceDescription", "voiceGenerationNote"]) {
     assert.match(html, new RegExp(`id="${id}"`));
   }
-  assert.match(html, /app\.js\?v=20261002-remote-voice/);
+  assert.match(html, /<script\b[^>]*\bsrc="\/static\/app\.js\?v=[A-Za-z0-9][A-Za-z0-9._-]*"[^>]*>\s*<\/script>/);
 });

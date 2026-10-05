@@ -65,6 +65,21 @@ class StartupAPITests(unittest.IsolatedAsyncioTestCase):
         payload = await response.json()
         self.assertIn("一般使用者工作站", payload["error"])
 
+    async def test_version_is_frozen_read_only_and_available_without_engines(self):
+        with (
+            patch.object(studio, "studio_source_fingerprint", side_effect=AssertionError("must not rehash disk")),
+            patch.object(self.app["comfy"], "ensure_running", new=AsyncMock()) as start,
+            patch.object(self.app["comfy"], "system_stats", new=AsyncMock()) as stats,
+            patch.object(self.app["comfy"], "model_inventory", new=AsyncMock()) as inventory,
+        ):
+            response = await self.client.get("/api/studio/version")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.json(), studio.STUDIO_RUNTIME_VERSION)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        start.assert_not_awaited()
+        stats.assert_not_awaited()
+        inventory.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

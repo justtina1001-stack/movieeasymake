@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import hashlib
 import io
 import json
 import math
 import mimetypes
+import os
 from fractions import Fraction
 import re
 import uuid
@@ -27,6 +29,7 @@ from PIL import Image, ImageOps
 from comfy_client import ComfyClient
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, validate_runtime_inventory, resolve_video_vae
 from custom_loras import active_loras
+from lora_catalog import describe_loras, builtin_lora_items
 from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
 from model_updates import ModelUpdateError, ModelUpdateManager
 from music3 import (
@@ -48,6 +51,9 @@ from queue_presentation import build_queue_view
 from queue_cancel import QueueCancelError
 from face_repair import repair_capabilities, repair_options
 from qwen_image import register_image_routes
+from scriptwriting import register_scriptwriting_routes
+from script_video_renderer import ScriptVideoRenderer
+from setup_scriptwriting import start_managed_server as start_scriptwriting_server
 from video_editor import register_editor_routes
 from editor_media_io import register_editor_media_io
 from editor_project_files import register_editor_project_files
@@ -66,7 +72,7 @@ from shortfilm import (
     validate_shot_references,
 )
 from settings import ConnectionSettings, SettingsError, SettingsStore
-from studio_startup import plan_startup, probe_studio
+from studio_startup import _read_local_http, plan_startup, probe_studio
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -100,6 +106,59 @@ MAX_RETIME_DURATION = 60.0
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def studio_source_fingerprint(root: Path) -> str:
+    """Hash shipped code, never settings, tests, models or generated work."""
+    root = Path(root)
+    files = list(root.glob("*.py"))
+    static = root / "static"
+    if static.is_dir():
+        files.extend(path for path in static.rglob("*")
+                     if path.is_file() and path.suffix.lower() in {".html", ".js", ".css"})
+    writing_skills = root / "writing_skills"
+    if writing_skills.is_dir():
+        files.extend(path for path in writing_skills.rglob("*")
+                     if path.is_file() and path.suffix.lower() in {".md", ".json"})
+    fingerprint = hashlib.sha256()
+    for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
+        content = path.read_bytes()
+        fingerprint.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        fingerprint.update(len(content).to_bytes(8, "big"))
+        fingerprint.update(content)
+    return fingerprint.hexdigest()
+
+
+# Freeze this at import: old handlers continue running even when source and
+# static files on disk have been updated. Rehashing inside the endpoint would
+# incorrectly claim that the old process had loaded the new implementation.
+STUDIO_RUNTIME_VERSION = {
+    "studio": "minimax-h3-studio",
+    "source_fingerprint": studio_source_fingerprint(APP_DIR),
+    "workspace_fingerprint": hashlib.sha256(os.path.normcase(str(APP_DIR)).encode("utf-8")).hexdigest(),
+    "started_at": utc_now(),
+    "pid": os.getpid(),
+}
+
+
+def verify_running_studio(port: int) -> None:
+    """Reuse only a process loaded from this workspace's current source."""
+    body = _read_local_http(port, "/api/studio/version", 1.5,
+                            max_bytes=4097, accept="application/json")
+    version = None
+    if body is not None and len(body) <= 4096:
+        try:
+            version = json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            pass
+    if not isinstance(version, dict) or any(
+            version.get(key) != STUDIO_RUNTIME_VERSION[key]
+            for key in ("studio", "source_fingerprint", "workspace_fingerprint")):
+        raise RuntimeError(
+            f"Studio 仍在 http://127.0.0.1:{port} 執行，但尚未載入目前工作區的程式版本。"
+            "請先儲存各工作區的專案並等待正在執行的工作完成，"
+            "關閉原本的 Studio 啟動視窗，確認服務已停止後重新執行啟動檔。"
+            "再次執行啟動檔只會嘗試重用原有服務，無法讓舊程式自動更新。")
 
 
 def output_timestamp(value: datetime | None = None) -> str:
@@ -2094,16 +2153,24 @@ def create_app() -> web.Application:
     register_editor_media_io(app)
     register_editor_project_files(app)
     register_editor_overlays(app)
+    app["script_video_renderer"] = ScriptVideoRenderer(app)
+    register_scriptwriting_routes(app, STATIC_DIR, DATA_DIR)
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
+
+    async def studio_version(_: web.Request) -> web.Response:
+        return web.json_response(STUDIO_RUNTIME_VERSION, headers={"Cache-Control": "no-store"})
 
     async def lora_catalog(_: web.Request) -> web.Response:
         try:
             names = await comfy.list_loras()
             reserved = {name for candidates in TURBO_LORA_CANDIDATES.values() for name in candidates}
+            custom_names = [name.replace("\\", "/") for name in names if name.replace("\\", "/").split("/")[-1] not in reserved]
             return web.json_response({
-                "names": [name.replace("\\", "/") for name in names if name.replace("\\", "/").split("/")[-1] not in reserved],
+                "names": custom_names,
+                "items": describe_loras(custom_names),
+                "builtin_items": builtin_lora_items(names),
                 "mode": comfy.mode,
                 "folder": str(comfy.comfy_dir / "models" / "loras" / "h3studio_custom") if comfy.mode == "local" else "遠端 ComfyUI / models / loras / h3studio_custom",
             })
@@ -3019,6 +3086,7 @@ def create_app() -> web.Application:
             return json_response_error(error, 404)
 
     app.router.add_get("/", index)
+    app.router.add_get("/api/studio/version", studio_version)
     app.router.add_get("/api/status", status)
     app.router.add_get("/api/queue", queue_status)
     app.router.add_get("/api/face-repair/status", face_repair_status)
@@ -3114,10 +3182,26 @@ def create_app() -> web.Application:
         await voice_jobs.shutdown()
         await voice_installer.shutdown()
 
+    async def start_scriptwriting(_: web.Application) -> None:
+        # Serving Ollama alone allocates no model memory. Installation is explicit.
+        async def start_in_background() -> None:
+            try:
+                await asyncio.to_thread(start_scriptwriting_server)
+            except (OSError, RuntimeError) as error:
+                print(f"劇本引擎啟動失敗：{error}", flush=True)
+        app["scriptwriting_start_task"] = asyncio.create_task(start_in_background())
+
+    async def cleanup_scriptwriting_start(_: web.Application) -> None:
+        task = app.get("scriptwriting_start_task")
+        if task:
+            await task
+
     app.on_startup.append(auto_start_engine)
     app.on_startup.append(auto_start_gateway)
+    app.on_startup.append(start_scriptwriting)
     app.on_cleanup.append(cleanup_gateway)
     app.on_cleanup.append(cleanup_voice)
+    app.on_cleanup.append(cleanup_scriptwriting_start)
     return app
 
 
@@ -3143,6 +3227,8 @@ def main() -> None:
     try:
         launch = plan_startup(args.port, auto_port=args.auto_port,
                               required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails", "clip_animations", "clip_transitions"))
+        if launch.existing:
+            verify_running_studio(launch.port)
     except (ValueError, RuntimeError) as error:
         print(f"[ERROR] {error}", flush=True)
         raise SystemExit(1) from error

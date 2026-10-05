@@ -3,8 +3,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from custom_loras import normalize_loras, active_loras
-from dialogue import format_dialogue, map_outside_dialogue
+from custom_loras import normalize_loras, active_loras, required_lora_triggers
+from dialogue import format_dialogue, map_outside_dialogue, visual_direction_text
 from typing import Any
 
 
@@ -180,6 +180,20 @@ def validate_runtime_inventory(compiled: CompiledRequest, inventory: dict[str, b
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _with_lora_triggers(prompt: str, loras: list[dict[str, Any]], family: str) -> str:
+    # Required cues belong to the visual direction, never to speech or sign text.
+    visual = visual_direction_text(prompt)
+    missing = [cue for cue in required_lora_triggers(loras, family)
+               if not re.search(r"(?<!\w)" + re.escape(cue) + r"(?!\w)", visual, re.IGNORECASE)]
+    if not missing:
+        return prompt
+    prefix = ", ".join(missing) + ", "
+    marker = re.match(r"\[Shot 1\]\s*", prompt)
+    if marker:
+        return "[Shot 1] " + prefix + prompt[marker.end():]
+    return prefix + prompt
 
 
 def _safe_int(value: Any, default: int) -> int:
@@ -484,6 +498,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     if not base_prompt:
         raise RequestError("請輸入影片敘述。")
     prompt_profile = _clean_text(payload.get("prompt_profile"))
+    shortfilm_reference_continuity = prompt_profile == "shortfilm" and mode == "r2v"
 
     first_image = _clean_text(payload.get("first_image_asset_id")) or None
     last_image = _clean_text(payload.get("last_image_asset_id")) or None
@@ -559,6 +574,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         if item.get("type") in {"character", "creature"}
     )
     base_prompt = format_dialogue(base_prompt, speakers=speakers)
+    base_prompt = _with_lora_triggers(base_prompt, custom_loras, "ref2va" if reference_mode else "fl2va")
     storyboards = payload.get("storyboards") or []
     storyboard_duration = sum(min(15.0, max(0.5, _safe_float(shot.get("duration"), 2.0))) for shot in storyboards)
     if storyboard_duration > (length / FPS) + 0.05:
@@ -647,6 +663,14 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 visual_sources = picture_tags or video_tags
                 visual = "、".join(visual_sources) if visual_sources else "文字描述"
                 definitions.append(f"{subject_tag} 是「{alias}」，形象參考來自 {visual}。{description}".strip())
+                if shortfilm_reference_continuity and item_type in {"character", "creature"}:
+                    definitions[-1] += (
+                        " Unless the story explicitly defines this alias as a group or distinct additional individuals, "
+                        "it is one and the same physical individual across all views and cuts. "
+                        "Multiple views or figures in a turnaround/reference sheet show the same individual from different angles, not extra cast members; "
+                        "use appearance only, without reproducing the sheet layout, panels, labels, or multiple figures in the scene. "
+                        "Explicit story directions for twins, duplication, shadows, or reflections take precedence."
+                    )
                 if picture_tags:
                     assignments.append(f"{'、'.join(picture_tags)} 只用於保留 {subject_tag} 的身份、外觀與固定特徵。")
                 for tag in video_tags:
@@ -749,10 +773,24 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                     for tag in picture_tags:
                         retention.append(f"{tag}: weak_reference only to identify the original person to replace in <Video 1>; do not transfer appearance to the output.")
                 elif subject_tag:
-                    retention.append(
-                        f"{subject_tag}: fully_preserved whenever {alias} appears; keep identity, face, body proportions, "
-                        "clothing, colors, and distinguishing features consistent across the shot."
-                    )
+                    if shortfilm_reference_continuity and item["type"] == "object":
+                        retention.append(
+                            f"{subject_tag}: fully_preserved whenever {alias} appears; keep its explicitly stated quantity, "
+                            "left/right pairing, appearance, positions, and state consistent across cuts until an explicit action changes them; "
+                            "a different view does not create an additional object or set."
+                        )
+                    else:
+                        retention.append(
+                            f"{subject_tag}: fully_preserved whenever {alias} appears; keep identity, face, body proportions, "
+                            "clothing, colors, and distinguishing features consistent across the shot."
+                        )
+                    if shortfilm_reference_continuity and item["type"] in {"character", "creature"}:
+                        retention[-1] += (
+                            " Retain the same physical individual across views and cuts; "
+                            "reference images and turnaround-sheet views supply appearance only, not extra people, bodies, panels, or labels. "
+                            "Do not duplicate this individual without explicit story direction; "
+                            "a story-defined group, distinct individuals, twins, duplication, shadows, or reflections remain allowed."
+                        )
                     for tag in picture_tags:
                         retention.append(
                             f"{tag}: attribute_transfer to {subject_tag}; transfer appearance and fixed visual attributes only."

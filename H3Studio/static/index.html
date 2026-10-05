@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
   <link rel="stylesheet" href="/static/styles.css?v=20260921-qwen-image">
+  <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-help">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -20,6 +21,7 @@
       <span id="studioRoleBadge" class="studio-role-badge client">一般使用者</span>
       <a class="button ghost small" href="/images" target="_blank" rel="noopener">▧ 圖片</a>
       <a class="button ghost small" href="/editor" target="_blank" rel="noopener">✂ 影片剪輯</a>
+      <a class="button ghost small" href="/scripts" target="_blank" rel="noopener">✎ 腳本編寫</a>
       <button id="openMusicStudio" class="button ghost small music-toolbar-button" type="button" aria-haspopup="dialog"><b>♫</b><span>Music 3</span></button>
       <button id="openVoiceStudio" class="button ghost small voice-toolbar-button" type="button" aria-haspopup="dialog"><b>◉</b><span>語音</span></button>
       <button id="openPromptGuide" class="button ghost small guide-toolbar-button" type="button" aria-haspopup="dialog" aria-label="開啟提示詞指南"><b>✦</b><span class="guide-button-label">提示詞指南</span></button>
@@ -138,6 +140,7 @@
             <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 穩定版 · 自動適配</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1 768p</option><option value="turbo_quality">Turbo 新高品質 · 8-step 768p</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2 768p</option><option value="turbo_ref_quality">Ref Turbo 品質比較 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速 · 4-step（原版）</option></select></label>
             <div><strong id="qualityModeTitle">原生品質模式</strong><span id="qualityModeHint">保留目前採樣設定，適合正式成品。</span></div>
           </div>
+          <div id="qualityBuiltinLoraHelp" class="lora-builtin-help"></div>
           <div class="quality-selector">
             <label>影片解碼<select id="videoVae" aria-describedby="videoVaeHint"><option value="auto">自動（優先 INT8）</option><option value="int8">INT8（較快、省記憶體）</option><option value="fp16">FP16（相容模式）</option></select></label>
             <div><strong>影片解碼效能</strong><span id="videoVaeHint">自動優先使用 INT8；引擎不支援或缺少模型時使用 FP16。主要加速解碼、降低記憶體占用；整體生成時間仍依鏡頭而定。</span></div>
@@ -427,6 +430,7 @@
                 <label>生成品質<select id="sfQuality" aria-describedby="sfQualityHint"><option value="native">原生品質</option><option value="turbo">Turbo 穩定版</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1</option><option value="turbo_quality">Turbo 新高品質 · 8-step</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2</option><option value="turbo_ref_quality">Ref Turbo 品質比較 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速（原版）</option></select></label>
               </div>
               <p id="sfQualityHint" class="field-help"></p>
+              <div id="sfBuiltinLoraHelp" class="lora-builtin-help"></div>
               <div class="quality-selector">
                 <label>影片解碼<select id="sfVideoVae" aria-describedby="sfVideoVaeHint"><option value="auto">自動（優先 INT8）</option><option value="int8">INT8（較快、省記憶體）</option><option value="fp16">FP16（相容模式）</option></select></label>
                 <div><strong>每個鏡頭共用</strong><span id="sfVideoVaeHint">自動優先使用 INT8；引擎不支援或缺少模型時使用 FP16。主要加速解碼、降低記憶體占用；整體生成時間仍依鏡頭而定。</span></div>
@@ -885,7 +889,8 @@ non_diegetic_music: ...</pre></div>
       <div class="modal-actions"><button id="faceRepairCheck" class="button ghost" type="button">重新檢查</button><button id="faceRepairSubmit" class="button primary" type="button" disabled>建立修復工作</button></div>
     </section>
   </div>
-  <script src="/static/app.js?v=20261002-remote-voice"></script>
+  <script src="/static/lora-help.js?v=20261005-lora-help"></script>
+  <script src="/static/app.js?v=20261005-lora-help"></script>
   <script src="/static/face-repair.js?v=20260917-face-repair"></script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 """User-selected model adapters; paths are relative to the active ComfyUI catalog."""
 import math
 import re
+from lora_catalog import known_lora_family, required_trigger
 
 
 def normalize_loras(value):
@@ -32,6 +33,11 @@ def normalize_loras(value):
         family = item.get("family", "both")
         if family not in {"fl2va", "ref2va", "both"}:
             raise ValueError("LoRA 適用模型必須是 FL2VA、Ref2VA 或兩者。")
+        known_family = known_lora_family(name)
+        if known_family:
+            if family not in {known_family, "both"}:
+                raise ValueError("Wushu r2v v7 權重只適用 Ref2VA，請選擇對應版本。")
+            family = known_family
         result.append(dict(name=name, strength=strength, family=family,
                            enabled=item.get("enabled", True) is not False))
     return result
@@ -40,3 +46,25 @@ def normalize_loras(value):
 def active_loras(items, family):
     return [item for item in items if item["enabled"] and item["strength"] != 0
             and item["family"] in {family, "both"}]
+
+
+def validate_loras_for_family(items, family):
+    """Validate an explicit workflow choice without discarding disabled rows."""
+    if family not in {"fl2va", "ref2va"}:
+        raise ValueError("生成模型家族必須是 FL2VA 或 Ref2VA。")
+    normalized = normalize_loras(items)
+    for item in normalized:
+        if item["enabled"] and item["strength"] != 0 and item["family"] not in {family, "both"}:
+            target = "Ref2VA" if family == "ref2va" else "FL2VA"
+            raise ValueError(f"LoRA「{item['name']}」不適用 {target}；請停用或選擇適用版本。")
+    return normalized
+
+
+def required_lora_triggers(items, family):
+    """Only required upstream cues from enabled, applicable, nonzero adapters."""
+    result = []
+    for item in active_loras(normalize_loras(items), family):
+        cue = required_trigger(item["name"])
+        if cue and cue not in result:
+            result.append(cue)
+    return result

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>剪輯室 · H3 Studio</title>
-  <link rel="stylesheet" href="/static/editor.css?v=20261001-animation1">
+  <link rel="stylesheet" href="/static/editor.css?v=20261003-video-history">
   <script defer src="/static/editor_speed.js?v=20261001-resizable-layout1"></script>
   <script defer src="/static/editor_animations.js?v=20261001-animation1"></script>
   <script defer src="/static/editor_transition_preview.js?v=20261001-animation1"></script>
@@ -16,7 +16,7 @@
   <script defer src="/static/editor_track_drag_ui.js?v=20261001-resizable-layout1"></script>
   <script defer src="/static/editor_preview.js?v=20261001-resizable-layout1"></script>
   <script defer src="/static/editor_layout.js?v=20261001-resizable-layout1"></script>
-  <script defer src="/static/editor.js?v=20261002-new-project1"></script>
+  <script defer src="/static/editor.js?v=20261003-video-history"></script>
 </head>
 <body>
   <header class="editor-topbar">
@@ -34,7 +34,7 @@
       <label class="field project-picker">開啟專案<select id="projectSelect"><option>載入中…</option></select></label>
       <div class="project-files"><button id="downloadProjectArchive" class="button ghost small">下載完整專案備份</button><button id="openProjectArchive" class="button ghost small">從備份檔開啟</button><input id="projectArchiveInput" type="file" accept=".h3edit.zip" hidden><p class="subtle">備份包含剪輯、文字，以及使用到的影片、音訊與圖片；共用素材庫的其他素材不包含在內。</p><p id="archiveStatus" class="subtle" role="status"></p><details id="recoveryDetails"><summary>草稿備份 <span id="recoveryCount">0</span></summary><div id="recoveryList"></div><p class="subtle">草稿資料用於救援剪輯設定，不含素材檔案。完整搬移請使用上方專案備份。</p></details></div>
       <div class="overlay-add-tools"><button id="addTextOverlay" class="button secondary small">T 加入文字</button><button id="addImageOverlay" class="button secondary small">▧ 加入圖片</button><input id="imageUploadInput" type="file" accept=".png,.jpg,.jpeg,.webp" multiple hidden><p id="overlaySupport" class="subtle"></p></div>
-      <div class="library-tabs" role="tablist"><button id="mediaTab" class="active" role="tab" aria-selected="true" aria-controls="mediaPanel">已匯入</button><button id="jobsTab" role="tab" aria-selected="false" aria-controls="jobsPanel">生成作品</button></div>
+      <div class="library-tabs" role="tablist"><button id="mediaTab" class="active" role="tab" aria-selected="true" aria-controls="mediaPanel">已匯入</button><button id="jobsTab" role="tab" aria-selected="false" aria-controls="jobsPanel">生成作品</button><button id="videoHistoryTab" role="tab" aria-selected="false" aria-controls="videoHistoryPanel">歷史影片</button></div>
       <div id="mediaPanel" role="tabpanel" aria-labelledby="mediaTab">
         <button id="uploadZone" class="upload-zone"><span aria-hidden="true">＋</span><strong>加入影片、音訊或圖片</strong><small>拖放素材到這裡，或點擊上傳</small><small>MP4／WebM · 音訊 · PNG／JPEG／WebP</small></button>
         <button id="addAudio" class="button ghost small full-width">♫ 加入音訊檔</button>
@@ -48,6 +48,13 @@
         <button id="refreshJobs" class="button ghost small">重新整理作品</button>
         <div id="jobList" class="media-list"><p class="empty-note">正在讀取作品…</p></div>
         <div class="job-pages"><button id="jobsPrevious" class="button ghost small">上一頁</button><span id="jobsPage">第 1 頁</span><button id="jobsNext" class="button ghost small">下一頁</button></div>
+      </div>
+      <div id="videoHistoryPanel" role="tabpanel" aria-labelledby="videoHistoryTab" class="hidden">
+        <p class="subtle">查看所有劇本自動製作完成的影片。預覽與下載不會更動目前剪輯；原剪輯會在新分頁開啟。</p>
+        <label class="field">顯示範圍<select id="videoHistoryScope"><option value="all">全部影片</option><option value="current">目前剪輯專案</option></select></label>
+        <button id="refreshVideoHistory" type="button" class="button ghost small">重新整理</button>
+        <p id="videoHistoryStatus" class="subtle" role="status" aria-live="polite">開啟此分頁可查看已完成影片。</p>
+        <div id="videoHistoryList" class="editor-history-list"></div>
       </div>
       <div class="library-footnote">素材庫由所有專案共用，重開後會保留；加入時間軸才會成為這個專案的剪輯。<br>主軌最多 50 段、10 分鐘；同時可疊加 3 段上層影片，另有 4 條音訊軌。</div>
     </aside>
@@ -85,6 +92,13 @@
     <p id="exportDialogNote" class="subtle">可先關閉視窗；再次點右上「匯出 MP4」即可查看進度或下載上次匯出的檔案。</p>
     <div id="exportPanel" class="export-panel hidden" aria-live="polite"><div class="export-heading"><strong id="exportStatus">準備匯出</strong><span id="exportPercent">0%</span></div><progress id="exportProgress" max="100" value="0"></progress><p id="exportDetail" class="subtle">匯出完成後可下載影片。</p><div class="export-actions"><button id="cancelExport" type="button" class="button ghost small">取消匯出</button><a id="downloadExport" class="button secondary small hidden" download>下載上次匯出 ↓</a></div></div>
     <div class="export-dialog-footer"><button id="startExport" type="button" class="button primary">匯出目前剪輯</button></div>
+  </dialog>
+  <dialog id="videoHistoryDialog" class="editor-history-dialog" aria-labelledby="videoHistoryTitle" aria-describedby="videoHistoryDetail">
+    <div class="export-dialog-heading"><div><p class="eyebrow">VIDEO HISTORY</p><h2 id="videoHistoryTitle">歷史影片</h2></div><button id="closeVideoHistory" type="button" class="icon-button" aria-label="關閉歷史影片預覽">×</button></div>
+    <p id="videoHistoryDetail" class="subtle"></p>
+    <video id="videoHistoryPreview" controls playsinline preload="none" aria-label="歷史完成影片預覽"></video>
+    <p id="videoHistoryPreviewStatus" class="subtle" role="status" aria-live="polite"></p>
+    <div class="editor-history-actions"><a id="downloadHistoryVideo" class="button secondary small" download>下載 MP4</a><a id="openHistoryEditor" class="button ghost small hidden" target="_blank" rel="noopener noreferrer">開啟原剪輯 ↗</a></div>
   </dialog>
   <output id="trimFeedback" class="trim-feedback hidden" aria-live="off"></output>
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>

@@ -9,6 +9,7 @@
   let pendingDelete = null;
   let pendingUpscale = null, upscaleModels = [], upscaleReady = false;
   let selectedLora = '', loraSupported = false, availableLoras = [], lastJobsMarkup = '';
+  let loraCatalog = H3LoraHelp.catalog({}, {model:'qwen'});
   const templates = {
     color:'以圖 1 為主圖，將【指定物件】的顏色改為【目標顏色】，保留原本人物五官、造型、姿勢、構圖與其他物件。',
     background:'以圖 1 為主圖，將背景替換為【新場景】，保留主體外觀、五官、服裝與姿勢，使光線與陰影自然融入新場景。',
@@ -90,19 +91,21 @@
     saveDraft(); $('imagePrompt').focus();
   });
   function renderLoras() {
-    $('imageLora').innerHTML = '<option value="">不使用 LoRA</option>' + availableLoras.map(n=>`<option value="${escape(n)}">${escape(n.replace(/^qwen_image_2_1[\\/]/,''))}</option>`).join('') +
+    $('imageLora').innerHTML = '<option value="">不使用 LoRA</option>' + availableLoras.map(n=>`<option value="${escape(n)}">${escape(H3LoraHelp.label(H3LoraHelp.item(loraCatalog,n,{model:'qwen'})))}</option>`).join('') +
       (selectedLora && !availableLoras.includes(selectedLora) ? `<option value="${escape(selectedLora)}">未提供：${escape(selectedLora)}</option>` : '');
     $('imageLora').value=selectedLora;
     $('loraStatus').textContent = !loraSupported ? '此後端尚未提供 LoRA 支援；請更新並重啟 Studio／檢查引擎。' :
       selectedLora && !availableLoras.includes(selectedLora) ? '原本選擇的 LoRA 不在目前引擎，請重新選擇後生成。' :
       availableLoras.length ? `目前引擎提供 ${availableLoras.length} 個專用資料夾中的 LoRA；請確認作者標示的基礎模型與觸發詞。` : '目前引擎尚未安裝 Qwen-Image-2.1 專用 LoRA，可直接使用基礎模型。';
+    $('imageLoraHelp').innerHTML = selectedLora ? H3LoraHelp.html(H3LoraHelp.item(loraCatalog,selectedLora,{model:'qwen'})) : '';
+    $('imageLoraCatalog').innerHTML = loraCatalog.items.length ? `<details class="lora-catalog"><summary>查看全部 ${loraCatalog.items.length} 個圖片 LoRA 的用途</summary><div class="lora-catalog-list">${loraCatalog.items.map(item=>H3LoraHelp.html(item)).join('')}</div></details>` : '';
     update();
   }
   async function checkStatus() {
     $('refreshStatus').disabled = true;
     try {
       const result = await api('/api/images/status'); ready = result.ready === true;
-      loraSupported = result.lora_supported === true; availableLoras = Array.isArray(result.loras) ? result.loras : []; renderLoras();
+      loraSupported = result.lora_supported === true; loraCatalog = H3LoraHelp.catalog(result,{model:'qwen'}); availableLoras = loraCatalog.names; renderLoras();
       $('engineStatus').textContent = ready ? 'Qwen-Image-2.1 已就緒' : '圖片引擎尚未就緒';
       $('engineDetail').textContent = result.error || `${result.mode === 'remote' ? '共用遠端' : '本機'}引擎 · 官方 INT8 模型 · 圖片與影片依佇列順序處理`;
     } catch (error) { ready = false; $('engineStatus').textContent = '暫時無法檢查引擎'; $('engineDetail').textContent = error.message; }

@@ -17,6 +17,7 @@ from PIL import Image
 from domain import RequestError
 from queue_cancel import QueueCancelError
 from qwen_image_models import MODEL_FILES, LICENSE_URL
+from lora_catalog import describe_loras
 from image_upscale import compile_upscale, build_upscale_workflow, upscale_capabilities, MODELS as UPSCALE_MODELS
 
 ACTIVE = {"queued", "preparing", "running"}
@@ -118,7 +119,7 @@ def build_image_workflow(compiled, uploaded, job_id):
 
 async def image_capabilities(comfy):
     result = {"ready": False, "nodes_ready": False, "models": [], "license_url": LICENSE_URL,
-              "mode": comfy.mode, "error": None, "lora_supported": False, "loras": []}
+              "mode": comfy.mode, "error": None, "lora_supported": False, "loras": [], "lora_items": []}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             async def info(name):
@@ -146,6 +147,7 @@ async def image_capabilities(comfy):
                 result["lora_supported"] = bool(lora)
                 choices = lora.get("input", {}).get("required", {}).get("lora_name", [[]])[0]
                 result["loras"] = sorted(n for n in choices if is_image_lora(n))
+                result["lora_items"] = describe_loras(result["loras"], image=True)
             except (aiohttp.ClientError, TimeoutError, ValueError, TypeError):
                 pass
     except (aiohttp.ClientError, TimeoutError, ValueError, TypeError, OSError):

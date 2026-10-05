@@ -675,7 +675,112 @@
     if (!(Number(capabilities.schema_version) >= 2)) throw outdated();
     return capabilities;
   }
-  const core = { ...motion, ...speedMath, ...animationsCore, normalizeProjectAnimations, requireAnimationSupport, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities };
+  function editorHistoryVideoUrl(pipeline) {
+    if (pipeline?.status !== "completed") return "";
+    const validId = value => typeof value === "string" && /^[a-f0-9]{32}$/i.test(value);
+    if (pipeline.video_url != null && pipeline.video_url !== "") {
+      if (typeof pipeline.video_url !== "string") return "";
+      return /^\/api\/(?:assets\/[a-f0-9]{32}|jobs\/[a-f0-9]{32}\/video|scripts\/video-pipelines\/[a-f0-9]{32}\/video|editor\/exports\/[a-f0-9]{32}\/file)(?:\?download=[01])?$/i.test(pipeline.video_url) ? pipeline.video_url : "";
+    }
+    if (validId(pipeline.video_asset_id)) return `/api/assets/${pipeline.video_asset_id}`;
+    return validId(pipeline.export_id) ? `/api/editor/exports/${pipeline.export_id}/file` : "";
+  }
+  function editorVideoHistoryItems(data) {
+    const items = Array.isArray(data) ? data : data?.items;
+    if (!Array.isArray(items)) throw new Error("主機回傳的影片紀錄格式不完整；先前清單仍保留。");
+    const records = new Map();
+    for (const pipeline of items) {
+      const url = editorHistoryVideoUrl(pipeline);
+      if (!url || typeof pipeline?.id !== "string" || !/^[a-f0-9]{32}$/i.test(pipeline.id)) continue;
+      const name = [pipeline.project_title, pipeline.title, pipeline.snapshot?.title].find(value => typeof value === "string" && value.trim());
+      const editorId = typeof pipeline.editor_project_id === "string" && /^[a-f0-9]{32}$/i.test(pipeline.editor_project_id) ? pipeline.editor_project_id : "";
+      const time = Date.parse(pipeline.finished_at || pipeline.updated_at || pipeline.created_at || "");
+      const seconds = pipeline.snapshot?.duration ?? pipeline.duration;
+      const duration = typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+      const download = new URL(url, "http://localhost"); download.searchParams.set("download", "1");
+      records.set(pipeline.id, { id: pipeline.id, title: name?.trim().slice(0, 200) || "未命名影片", url,
+        downloadUrl: download.pathname + download.search, editorProjectId: editorId,
+        editorUrl: editorId ? `/editor?project=${encodeURIComponent(editorId)}` : "",
+        time: Number.isFinite(time) ? time : 0, duration });
+    }
+    return [...records.values()].sort((a, b) => b.time - a.time || a.id.localeCompare(b.id));
+  }
+  function filterEditorVideoHistory(records, scope, projectId) {
+    return scope === "current" ? records.filter(item => item.editorProjectId && item.editorProjectId === projectId) : [...records];
+  }
+  function createEditorVideoHistory({ elements, read, projectId }) {
+    const doc = elements.list.ownerDocument;
+    let records = [], serial = 0, selectedId = "";
+    const dateLabel = item => item.time ? new Date(item.time).toLocaleString("zh-TW") : "完成日期未記錄";
+    const detail = item => `${dateLabel(item)} · ${item.duration == null ? "長度未記錄" : `目標 ${item.duration} 秒`}`;
+    function render() {
+      const visible = filterEditorVideoHistory(records, elements.filter.value, projectId());
+      elements.list.replaceChildren();
+      if (!visible.length) {
+        const empty = doc.createElement("p"); empty.className = "empty-note";
+        empty.textContent = elements.filter.value === "current" ? "目前剪輯專案尚無自動製作完成的影片；選擇「全部影片」可查看其他作品。" : "尚無自動製作完成的影片。完成後會保留在這裡。";
+        elements.list.append(empty);
+      }
+      for (const item of visible) {
+        const card = doc.createElement("article"), title = doc.createElement("strong"), meta = doc.createElement("small"), actions = doc.createElement("div");
+        card.className = "editor-history-card"; card.dataset.pipelineId = item.id;
+        title.textContent = item.title; meta.textContent = detail(item); actions.className = "editor-history-actions";
+        const preview = doc.createElement("button"); preview.type = "button"; preview.className = "button secondary small"; preview.textContent = "預覽";
+        preview.addEventListener("click", () => open(item.id));
+        const download = doc.createElement("a"); download.className = "button ghost small"; download.textContent = "下載 MP4"; download.href = item.downloadUrl; download.download = "";
+        actions.append(preview, download);
+        if (item.editorUrl) {
+          const link = doc.createElement("a"); link.className = "button ghost small"; link.textContent = "開啟原剪輯 ↗";
+          link.href = item.editorUrl; link.target = "_blank"; link.rel = "noopener noreferrer"; actions.append(link);
+        }
+        card.append(title, meta, actions); elements.list.append(card);
+      }
+    }
+    async function refresh() {
+      const request = ++serial; elements.refresh.disabled = true; elements.status.textContent = "正在讀取歷史影片…";
+      try {
+        const data = await read("/api/scripts/video-pipelines");
+        if (request !== serial) return false;
+        const next = editorVideoHistoryItems(data), raw = Array.isArray(data) ? data : data.items;
+        if (!next.length && records.length) {
+          elements.status.textContent = "主機此次未回傳完成影片；先前清單與預覽仍保留，可按「重新整理」重試。";
+          return false;
+        }
+        const partial = !Array.isArray(data) && (data.has_more === true || Boolean(data.next_cursor) || (Number.isFinite(data.total) && data.total > raw.length));
+        records = partial ? [...new Map([...records, ...next].map(item => [item.id, item])).values()].sort((a, b) => b.time - a.time || a.id.localeCompare(b.id)) : next;
+        render(); elements.status.textContent = partial ? `已保留 ${records.length} 支影片；主機回傳部分紀錄，請重新整理接續查看。` : `全部自動成品 ${records.length} 支 · 預覽不會更動目前剪輯。`;
+        return true;
+      } catch (error) {
+        if (request !== serial) return false;
+        elements.status.textContent = error.status === 404 ? "目前主機尚未提供影片紀錄；先前清單仍保留，可按「重新整理」重試。" : `暫時無法讀取影片紀錄：${error.message || "連線失敗"}。先前清單仍保留，可重新整理重試。`;
+        return false;
+      } finally { if (request === serial) elements.refresh.disabled = false; }
+    }
+    function releasePreview() {
+      elements.video.pause(); elements.video.removeAttribute("src"); elements.video.load();
+      selectedId = ""; elements.previewStatus.textContent = "";
+    }
+    function close() { if (elements.dialog.open) elements.dialog.close(); else releasePreview(); }
+    function open(id) {
+      const item = records.find(entry => entry.id === id); if (!item) return false;
+      elements.title.textContent = item.title; elements.detail.textContent = detail(item); elements.previewStatus.textContent = "";
+      elements.download.href = item.downloadUrl;
+      elements.editor.classList.toggle("hidden", !item.editorUrl);
+      if (item.editorUrl) { elements.editor.href = item.editorUrl; elements.editor.target = "_blank"; elements.editor.rel = "noopener noreferrer"; }
+      else elements.editor.removeAttribute("href");
+      if (selectedId !== id) { elements.video.pause(); elements.video.src = item.url; selectedId = id; }
+      if (!elements.dialog.open) elements.dialog.showModal();
+      return true;
+    }
+    elements.refresh.addEventListener("click", refresh);
+    elements.filter.addEventListener("change", render);
+    elements.close.addEventListener("click", close);
+    elements.dialog.addEventListener("close", releasePreview);
+    elements.video.addEventListener("error", () => { if (selectedId) elements.previewStatus.textContent = "這支影片暫時無法播放；紀錄仍保留，可關閉後重新預覽或下載 MP4。"; });
+    render();
+    return { refresh, render, open, close };
+  }
+  const core = { ...motion, ...speedMath, ...animationsCore, normalizeProjectAnimations, requireAnimationSupport, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities, editorHistoryVideoUrl, editorVideoHistoryItems, filterEditorVideoHistory, createEditorVideoHistory };
   const trackDragModule = typeof module !== "undefined" && module.exports ? require("./editor_track_drag.js") : root.H3EditorTrackDrag;
   Object.assign(core, trackDragModule.createTrackDragCore(core));
   if (typeof module !== "undefined" && module.exports) module.exports = core;
@@ -1057,7 +1162,7 @@
     state.selected = (state.selectedKind === "video" ? session.project.clips : state.selectedKind === "overlay" ? overlays(session.project) : audioClips(session.project))[0]?.id || null;
     renderRecovery();
     if (session.dirty) sessionChanged(session);
-    render(); seek(0, false);
+    render(); seek(0, false); videoHistoryUI.render();
     const savedExport = storageGet(`h3-editor-export:${value.id}`);
     if (savedExport?.id) { state.exportJob = savedExport; renderExport(); if (exporting()) pollExport(); }
   }
@@ -2139,8 +2244,19 @@
   document.addEventListener("drop", action(async event => { if (!event.dataTransfer.files.length) return; event.preventDefault(); dragDepth = 0; document.body.classList.remove("dragging-file"); await importFiles([...event.dataTransfer.files]); }));
   $("mediaList").onclick = action(event => { const layer = event.target.closest("[data-add-video-layer]"), audio = event.target.closest("[data-add-audio]"), button = event.target.closest("[data-add-media]"); if (locked()) return; if (layer) addOverlay("video", layer.dataset.addVideoLayer); else if (audio) addAudioMedia(audio.dataset.addAudio); else if (button) addMedia(button.dataset.addMedia); });
   $("jobList").onclick = action(event => { const button = event.target.closest("[data-import-job]"); if (button && !locked()) return importJob(button.dataset.importJob); });
-  function showTab(jobs) { $("mediaPanel").classList.toggle("hidden", jobs); $("jobsPanel").classList.toggle("hidden", !jobs); $("mediaTab").classList.toggle("active", !jobs); $("jobsTab").classList.toggle("active", jobs); $("mediaTab").setAttribute("aria-selected", String(!jobs)); $("jobsTab").setAttribute("aria-selected", String(jobs)); }
+  const videoHistoryUI = createEditorVideoHistory({ elements: {
+    list: $("videoHistoryList"), status: $("videoHistoryStatus"), filter: $("videoHistoryScope"), refresh: $("refreshVideoHistory"),
+    dialog: $("videoHistoryDialog"), video: $("videoHistoryPreview"), title: $("videoHistoryTitle"), detail: $("videoHistoryDetail"),
+    close: $("closeVideoHistory"), download: $("downloadHistoryVideo"), editor: $("openHistoryEditor"), previewStatus: $("videoHistoryPreviewStatus"),
+  }, read: api, projectId: () => state.session?.project.id || "" });
+  function showTab(value) {
+    const selected = value === true ? "jobs" : value === "history" ? "history" : "media";
+    for (const [name, tab, panel] of [["media", "mediaTab", "mediaPanel"], ["jobs", "jobsTab", "jobsPanel"], ["history", "videoHistoryTab", "videoHistoryPanel"]]) {
+      $(panel).classList.toggle("hidden", name !== selected); $(tab).classList.toggle("active", name === selected); $(tab).setAttribute("aria-selected", String(name === selected));
+    }
+  }
   $("mediaTab").onclick = () => showTab(false); $("jobsTab").onclick = action(async () => { showTab(true); await loadJobs(); });
+  $("videoHistoryTab").onclick = () => { showTab("history"); videoHistoryUI.refresh(); };
   $("refreshJobs").onclick = action(loadJobs);
   $("jobsPrevious").onclick = action(async () => { if (!state.jobsLoading && state.jobPage > 1) { state.jobPage--; await loadJobs(); } });
   $("jobsNext").onclick = action(async () => { if (!state.jobsLoading) { state.jobPage++; await loadJobs(); } });
@@ -2383,6 +2499,7 @@
   $("downloadExport").onclick = () => downloadExport(true);
   $("cancelExport").onclick = action(async () => { if (!exporting()) return; $("cancelExport").disabled = true; try { await api(`/api/editor/exports/${state.exportJob.id}/cancel`, json("POST")); await pollExport(); } finally { $("cancelExport").disabled = false; } });
   document.addEventListener("keydown", action(async event => {
+    if ($("videoHistoryDialog")?.open) return;
     if (event.defaultPrevented) return;
     if ($("exportDialog").open) return;
     if (state.layoutDragging) { event.preventDefault(); return; }

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from custom_loras import normalize_loras
+from dialogue import format_dialogue
 from domain import FL_ONLY_QUALITY_MODES, QUALITY_MODES
 
 
@@ -449,6 +450,64 @@ def _speaker_ids(project: dict[str, Any]) -> dict[str, str]:
     return {alias: f"S{index}" for index, alias in enumerate(speakers, start=1)}
 
 
+def _action_visual_directions(action: str, speakers: tuple[str, ...]) -> str:
+    formatted = format_dialogue(action, speakers=speakers)
+    visual = re.sub(r"<d>.*?</d>", "", formatted, flags=re.DOTALL)
+    # Quoted signs, captions, and speech are content, not camera/cut instructions.
+    return re.sub(r'''「[^」]*」|『[^』]*』|“[^”]*”|"(?:\\.|[^"\\])*"|(?<!\w)'(?:\\.|[^'\\])*'(?!\w)''', "", visual)
+
+
+def _contains_direction(visual_action: str, direction: str) -> bool:
+    key = " ".join(direction.split()).casefold()
+    if not key:
+        return False
+    return bool(re.search(r"(?<!\w)" + re.escape(key) + r"(?!\w)", visual_action))
+
+
+def _camera_cut_ranges(visual_action: str, duration: float) -> list[tuple[float, float, str]]:
+    ranges: list[tuple[float, float, str]] = []
+    cursor = 0.0
+    offset = 0
+    for cut in re.finditer(r"\[Shot\s*([1-9]\d*)\b[^\]]*\]", visual_action, re.I):
+        if int(cut.group(1)) == 1:
+            continue
+        timestamp = re.match(r"\s*At\s+(\d+):(\d+(?:\.\d+)?)", visual_action[cut.end():], re.I)
+        if not timestamp:
+            return []
+        start = int(timestamp.group(1)) * 60 + float(timestamp.group(2))
+        if not cursor < start < duration:
+            return []
+        ranges.append((cursor, start, visual_action[offset:cut.start()]))
+        cursor, offset = start, cut.end()
+    ranges.append((cursor, duration, visual_action[offset:]))
+    return ranges
+
+
+def _nonduplicate_camera_detail(detail: str, visual_action: str, duration: float) -> str:
+    """Remove exact repeated direction lines, retaining independent user wording."""
+    action_key = " ".join(visual_action.split()).casefold()
+    if _contains_direction(action_key, detail):
+        return ""
+    cut_ranges = _camera_cut_ranges(visual_action, duration)
+    comparison_key: str | None = action_key
+    remaining: list[str] = []
+    for line in detail.splitlines(keepends=True):
+        # Merged storyboard cuts also store a timed copy of each camera direction.
+        timed = re.match(r"^\s*(\d+(?:\.\d+)?)\s*[–—-]\s*(\d+(?:\.\d+)?)\s*s\s*:\s*", line, flags=re.I)
+        if timed:
+            start, end = float(timed.group(1)), float(timed.group(2))
+            comparison_key = next((
+                " ".join(action.split()).casefold() for cut_start, cut_end, action in cut_ranges
+                if abs(start - cut_start) < 0.001 and abs(end - cut_end) < 0.001
+            ), None)
+        comparable = line[timed.end():] if timed else line
+        direction_key = " ".join(comparable.split()).casefold()
+        if comparison_key is not None and _contains_direction(comparison_key, direction_key):
+            continue
+        remaining.append(line)
+    return "".join(remaining).strip()
+
+
 def compile_shot_payload(
     project: dict[str, Any],
     scene_id: str,
@@ -480,16 +539,47 @@ def compile_shot_payload(
 
     location = ", ".join(value for value in [scene["location"], scene["time_of_day"]] if value) or "the established story location"
     style = project["style"] or "cinematic visual storytelling with coherent lighting"
+    speaker_ids = _speaker_ids(project)
+    visual_action = _action_visual_directions(shot["action"], tuple(speaker_ids))
+    next_cut = next((match for match in re.finditer(r"\[Shot\s*([1-9]\d*)\b[^\]]*\]", visual_action, re.I) if int(match.group(1)) > 1), None)
+    multiple_cuts = next_cut is not None
+    opening_action = visual_action[:next_cut.start()] if next_cut else visual_action
+    opening_has_framing = bool(re.search(
+        r"\bshot\s*size\s*[:：]|\b(?:wide|full|medium)\s+(?:shot|view)\b|"
+        r"\b(?:extreme\s+)?close[- ]up\b|\bpoint[- ]of[- ]view\b|景[別别]|特[寫写]|全景|中景|近景",
+        opening_action, re.I,
+    ))
+    opening_has_camera = bool(re.search(
+        r"\bcamera\s*[:：]|\bthe camera\s+(?:remains|stays|is|moves|pans|pushes|pulls|tracks|follows|circles|tilts|orbits)\b|"
+        r"\b(?:tracking|handheld|static)\s+(?:shot|camera)\b|攝影機|摄影机|運鏡|运镜|機位|机位|鏡頭|镜头|跟拍",
+        opening_action, re.I,
+    ))
+    camera_detail = _nonduplicate_camera_detail(shot["camera_detail"], visual_action, shot["duration"])
     camera = CAMERAS.get(shot["camera"], "")
-    if shot["camera_detail"]:
-        camera = f"{camera} {shot['camera_detail']}".strip()
+    framing = f"Opening framing: {SHOT_SIZES[shot['shot_size']]}."
+    if multiple_cuts:
+        camera = "" if opening_has_camera or not camera else f"Opening cut only, unless its action specifies otherwise: {camera} Do not carry this movement into later cuts."
+        framing = "" if opening_has_framing else f"Opening cut only, unless its action specifies framing: {SHOT_SIZES[shot['shot_size']]}."
+    if camera_detail:
+        camera = f"{camera} {camera_detail}".strip()
     if not camera:
-        camera = "The camera movement follows the user's shot direction while preserving spatial continuity."
+        camera = "" if multiple_cuts else "The camera movement follows the user's shot direction while preserving spatial continuity."
+    defined_subject_ids = {
+        asset["id"] for asset in referenced if asset["type"] in {"character", "creature", "object"}
+    }
     subjects = ", ".join(
-        f"{asset['alias']} ({asset['description']})" if asset["description"] else asset["alias"]
+        f"{asset['alias']} ({asset['description']})" if asset["description"] and asset["id"] not in defined_subject_ids else asset["alias"]
         for asset in selected
     ) or "the described subjects"
-    speaker_ids = _speaker_ids(project)
+    text_characters = ", ".join(
+        asset["alias"] for asset in selected
+        if asset["type"] in {"character", "creature"} and asset["id"] not in defined_subject_ids
+    )
+    text_identity = (
+        f"For {text_characters}, preserve the same physical individual across views and cuts; "
+        "do not create additional bodies merely to show another angle. "
+        "Explicit story directions for a group, distinct individuals, twins, duplication, shadows, or reflections take precedence."
+    ) if text_characters else ""
     dialogue = ""
     if shot["dialogue"]:
         speaker = shot["speaker_alias"]
@@ -517,15 +607,19 @@ def compile_shot_payload(
     if referenced:
         named_assets = ", ".join(asset["alias"] for asset in referenced)
         reference_start_sentence = (
-            f"From the very first visible frame, use the named references for {named_assets}; "
-            "do not begin with an invented substitute, placeholder subject, or unrelated environment before the references appear."
+            f"Whenever the action first shows {named_assets}, use their named references immediately rather than an invented substitute. "
+            "Their visibility and entry timing follow the action; do not insert them into offscreen or object-only views."
         )
 
     narrative = " ".join(part.strip() for part in [
         f"[Shot 1] A {FORMAT_LABELS[project['format']]} in {style}.",
         f"The scene takes place in {location}. {scene['description']}".strip(),
-        f"Use a {SHOT_SIZES[shot['shot_size']]} featuring {subjects}.",
+        f"Appearance definitions for {subjects} apply only where the action shows them; do not force every selected subject into each frame.",
+        "Follow each cut's own framing and camera direction; these take precedence over supplemental camera direction." if multiple_cuts else "",
+        framing,
         camera,
+        text_identity,
+        "Preserve explicitly stated object quantities, left/right pairing, positions, and states across views and cuts until an explicit action changes them; a new camera angle alone does not add, remove, or duplicate objects.",
         continuity_sentence,
         reference_start_sentence,
         storyboard_sentence,
@@ -556,7 +650,7 @@ def compile_shot_payload(
         "mode": "r2v" if use_reference_mode else "t2v",
         "prompt_profile": "shortfilm",
         "prompt": narrative,
-        "shortfilm_summary": f"A single shot from {project['title']}: {scene['title']} — {shot['title']}.",
+        "shortfilm_summary": f"A {'video segment' if multiple_cuts else 'single shot'} from {project['title']}: {scene['title']} — {shot['title']}.",
         "shortfilm_soundscape": shot["sound"],
         "shortfilm_music": shot["music"],
         "job_name": f"{project['title']}_{scene['title']}_{shot['title']}",

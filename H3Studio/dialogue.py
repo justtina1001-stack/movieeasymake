@@ -151,6 +151,18 @@ def _quoted_spans(text: str) -> Iterable[tuple[int, int]]:
         position += 1
 
 
+def visual_direction_text(text: str) -> str:
+    """Read directions without treating speech or nested visible-text quotes as cues."""
+    text = _DIALOGUE.sub(" ", text)
+    parts = []
+    cursor = 0
+    for start, end in _quoted_spans(text):
+        parts.extend((text[cursor:start], " "))
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def format_dialogue(text: str, *, speakers: Iterable[str] = (), dialogue_field: bool = False) -> str:
     """Tag explicit speech, leaving ambiguous prose and visible-text quotes alone.
 

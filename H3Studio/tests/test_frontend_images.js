@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../static/images.js'), 'utf8');
+const loraSource = fs.readFileSync(path.join(__dirname, '../static/lora-help.js'), 'utf8');
 const a='a'.repeat(32), b='b'.repeat(32), c='c'.repeat(32);
 
 async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscaleStatus={}}={}) {
@@ -19,9 +20,11 @@ async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscale
     });
     return elements.get(id);
   }
-  const context=vm.createContext({document:{getElementById:el,hidden:false},localStorage:{getItem:()=>stored,setItem:(_,s)=>stored=s},setInterval(){},FormData,
+  let statusError = false;
+  const context=vm.createContext({document:{getElementById:el,hidden:false},localStorage:{getItem:()=>stored,setItem:(_,s)=>stored=s},setInterval(){},FormData,URL,
     async fetch(url,options) {
       calls.push({url,options});
+      if (url === '/api/images/status' && statusError) throw new Error('連線失敗');
       if(options?.method === 'DELETE') return {ok:!deleteError,json:async()=>deleteError?{error:'刪除失敗'}:{deleted:true}};
       const data = url === '/api/images/status' ? {ready:true,lora_supported:true,loras:[],...status} :
         url === '/api/images/upscale/status' ? {ready:true,models:[{id:'general',installed:true},{id:'anime',installed:true}],...upscaleStatus} :
@@ -31,11 +34,12 @@ async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscale
       return {ok:true,json:async()=>data};
     }
   });
+  vm.runInContext(loraSource,context);
   vm.runInContext(source,context);
   await new Promise(setImmediate);
   const fire=async(id,type,event={})=>{await el(id).listeners[type]({preventDefault(){},...event});};
   const click=(id,dataset)=>fire(id,'click',{target:{closest:()=>({dataset,disabled:false})}});
-  return {el,fire,click,calls,draft:()=>JSON.parse(stored)};
+  return {el,fire,click,calls,draft:()=>JSON.parse(stored),setStatusError:()=>{statusError=true;}};
 }
 
 test('promoting a reference changes submitted order and preserves the prompt',async()=>{
@@ -88,6 +92,46 @@ test('selected engine adapter and strength are included in the job',async()=>{
   await f.fire('imageForm','submit');
   const payload=JSON.parse(f.calls.find(c=>c.url==='/api/images/jobs').options.body);
   assert.equal(payload.lora_name,name);assert.equal(payload.lora_strength,0.65);
+});
+
+test('image LoRA metadata shows all purposes without changing selected adapter or draft',async()=>{
+  const name='qwen_image_2_1/style.safetensors',other='qwen_image_2_1/unknown.safetensors';
+  const draft={imagePrompt:'保留原稿',imageLora:name,imageLoraStrength:'0.65'};
+  const f=await fixture({draft,status:{loras:[name,other],lora_items:[{name,title:'水彩風格',purpose:'柔和水彩',known:true,family:'qwen-image-2.1',trigger:'',usage:'依作者設定',limits:'須相容Qwen',source_url:'https://example.org/model'}]}});
+  assert.equal(f.el('imageLora').value,name);assert.equal(f.el('imageLoraStrength').value,'0.65');
+  assert.match(f.el('imageLoraHelp').innerHTML,/柔和水彩/);
+  assert.match(f.el('imageLoraCatalog').innerHTML,/尚未登錄/);
+  assert.match(f.el('imageLoraHelp').innerHTML,/noopener noreferrer/);
+  for (const [field,value] of Object.entries(draft)) assert.equal(f.draft()[field],value);
+  const saved=f.draft();await f.fire('refreshStatus','click');assert.deepEqual(f.draft(),saved);
+});
+
+test('legacy image adapters get unknown help and unavailable old selection stays intact',async()=>{
+  const name='qwen_image_2_1/old.safetensors',other='qwen_image_2_1/new.safetensors';
+  const f=await fixture({draft:{imageLora:name,imageLoraStrength:'0.4',imagePrompt:'原稿'},status:{loras:[other]}});
+  assert.equal(f.el('imageLora').value,name);
+  assert.match(f.el('imageLoraHelp').innerHTML,/用途尚未登錄/);
+  assert.match(f.el('loraStatus').textContent,/不在目前引擎/);
+  assert.equal(f.el('generateImage').disabled,true);
+});
+
+test('failed image inventory refresh preserves metadata selection and draft',async()=>{
+  const name='qwen_image_2_1/style.safetensors',draft={imageLora:name,imageLoraStrength:'0.7',imagePrompt:'原稿'};
+  const f=await fixture({draft,status:{loras:[name],lora_items:[{name,title:'已讀風格',purpose:'已讀用途',known:true}]}});
+  const help=f.el('imageLoraHelp').innerHTML;
+  const saved=f.draft();
+  f.setStatusError();await f.fire('refreshStatus','click');
+  assert.equal(f.el('imageLoraHelp').innerHTML,help);
+  assert.equal(f.el('imageLora').value,name);assert.equal(f.el('imageLoraStrength').value,'0.7');
+  assert.deepEqual(f.draft(),saved);
+  assert.equal(f.el('generateImage').disabled,true);
+});
+
+test('unsafe image LoRA metadata cannot inject markup or an executable source link',async()=>{
+  const name='qwen_image_2_1/unsafe.safetensors';
+  const f=await fixture({draft:{imageLora:name},status:{loras:[name],lora_items:[{name,known:true,title:'<img src=x>',purpose:'<script>alert(1)</script>',source_url:'javascript:alert(1)'}]}});
+  assert.doesNotMatch(f.el('imageLoraHelp').innerHTML,/<img|<script|href=/);
+  assert.match(f.el('imageLoraHelp').innerHTML,/&lt;img/);
 });
 
 test('edit templates append without erasing text and style template requires a second image',async()=>{

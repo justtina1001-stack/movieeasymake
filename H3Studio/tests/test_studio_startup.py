@@ -13,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+import app as studio
 import studio_startup as startup
 
 
@@ -42,7 +43,9 @@ class StudioStartupTests(unittest.TestCase):
         return port
 
     def server(self, body=startup.STUDIO_TITLE, status=200, *, redirect=None, gate=None, dribble=False,
-               capabilities=None, capability_status=200, capability_redirect=None, capability_gate=None):
+               capabilities=None, capability_status=200, capability_redirect=None, capability_gate=None,
+               version_body=None, version_status=200, version_redirect=None, version_gate=None,
+               version_dribble=False):
         requests = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -57,12 +60,15 @@ class StudioStartupTests(unittest.TestCase):
                 if self.path == "/api/editor/capabilities":
                     response_body = body if capabilities is None else capabilities
                     response_status, response_redirect, response_gate = capability_status, capability_redirect, capability_gate
+                elif self.path == "/api/studio/version":
+                    response_body = body if version_body is None else version_body
+                    response_status, response_redirect, response_gate = version_status, version_redirect, version_gate
                 try:
                     if response_gate is not None:
-                        response_gate.wait(.8)
-                    if dribble:
+                        response_gate.wait(2.5 if self.path == "/api/studio/version" else .8)
+                    if dribble or (version_dribble and self.path == "/api/studio/version"):
                         self.connection.sendall(b"HTTP/1.1 200 OK\r\nX-Slow: ")
-                        for _ in range(50):
+                        for _ in range(150 if version_dribble else 50):
                             self.connection.sendall(b"x")
                             time.sleep(.02)
                         return
@@ -85,6 +91,8 @@ class StudioStartupTests(unittest.TestCase):
                 gate.set()
             if capability_gate is not None:
                 capability_gate.set()
+            if version_gate is not None:
+                version_gate.set()
             server.shutdown()
             server.server_close()
             worker.join(timeout=1)
@@ -106,6 +114,87 @@ class StudioStartupTests(unittest.TestCase):
                                      "ALL_PROXY": "http://127.0.0.1:1", "NO_PROXY": ""}):
             self.assertTrue(startup.probe_studio(port, timeout=.3))
         self.assertEqual(requests, ["/"])
+
+    def test_runtime_version_matches_before_reusing_ready_workspace(self):
+        version = {**studio.STUDIO_RUNTIME_VERSION, "pid": 12345, "started_at": "2020-01-01T00:00:00+00:00"}
+        port, requests = self.server(version_body=json.dumps(version).encode())
+        with patch.object(startup, "_try_lock", side_effect=AssertionError("reuse must not lock")), \
+                patch.object(startup, "_reserve_port", side_effect=AssertionError("reuse must not bind")):
+            result = self.plan(port)
+            self.assertIsNone(studio.verify_running_studio(result.port))
+        self.assertEqual((result.port, result.existing, result.sock, result.lock), (port, True, None, None))
+        self.assertEqual(requests, ["/", "/api/studio/version"])
+
+    def test_runtime_version_rejects_other_source_workspace_or_application(self):
+        for key in ("source_fingerprint", "workspace_fingerprint", "studio"):
+            with self.subTest(mismatched=key):
+                version = {**studio.STUDIO_RUNTIME_VERSION, key: "a-different-loaded-version"}
+                port, requests = self.server(version_body=json.dumps(version).encode())
+                with self.assertRaisesRegex(RuntimeError, "尚未載入目前工作區") as error:
+                    studio.verify_running_studio(port)
+                self.assertIn("等待正在執行的工作完成", str(error.exception))
+                self.assertEqual(requests, ["/api/studio/version"])
+                self.assertTrue(startup._has_listener(port))
+                self.assertFalse(self.lock_file.exists())
+
+    def test_legacy_or_unreadable_runtime_version_is_not_reused(self):
+        legacy = {"studio": studio.STUDIO_RUNTIME_VERSION["studio"]}
+        current = json.dumps(studio.STUDIO_RUNTIME_VERSION).encode()
+        cases = ((None, 200), (json.dumps(legacy).encode(), 200), (b"null", 200),
+                 (b"[]", 200), (b"not json", 200), (b"\xff", 200), (current, 404))
+        for body, status in cases:
+            with self.subTest(body=body, status=status):
+                port, requests = self.server(version_body=body, version_status=status)
+                with self.assertRaisesRegex(RuntimeError, "尚未載入目前工作區"):
+                    studio.verify_running_studio(port)
+                self.assertEqual(requests, ["/api/studio/version"])
+                self.assertTrue(startup._has_listener(port))
+
+    def test_runtime_version_redirect_is_not_followed(self):
+        target, target_requests = self.server(version_body=json.dumps(studio.STUDIO_RUNTIME_VERSION).encode())
+        port, requests = self.server(version_status=302,
+                                     version_redirect=f"http://127.0.0.1:{target}/api/studio/version")
+
+        with self.assertRaisesRegex(RuntimeError, "尚未載入目前工作區"):
+            studio.verify_running_studio(port)
+
+        self.assertEqual(requests, ["/api/studio/version"])
+        self.assertEqual(target_requests, [])
+
+    def test_runtime_version_stall_and_trickling_headers_obey_total_timeout(self):
+        stalled, stalled_requests = self.server(version_body=json.dumps(studio.STUDIO_RUNTIME_VERSION).encode(),
+                                                version_gate=threading.Event())
+        trickling, trickling_requests = self.server(version_dribble=True)
+        for port, requests in ((stalled, stalled_requests), (trickling, trickling_requests)):
+            with self.subTest(port=port):
+                started = time.monotonic()
+                with self.assertRaisesRegex(RuntimeError, "尚未載入目前工作區"):
+                    studio.verify_running_studio(port)
+                self.assertLess(time.monotonic() - started, 2.3)
+                self.assertEqual(requests, ["/api/studio/version"])
+
+    def test_runtime_version_connects_directly_despite_environment_proxies(self):
+        proxy, proxy_requests = self.server(b"This proxy must not receive any request")
+        port, requests = self.server(version_body=json.dumps(studio.STUDIO_RUNTIME_VERSION).encode())
+        proxy_url = f"http://127.0.0.1:{proxy}"
+        environment = {key: proxy_url for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")}
+        environment.update(NO_PROXY="", no_proxy="")
+        with patch.dict(os.environ, environment):
+            self.assertIsNone(studio.verify_running_studio(port))
+        self.assertEqual(requests, ["/api/studio/version"])
+        self.assertEqual(proxy_requests, [])
+
+    def test_runtime_version_body_limit_rejects_oversized_matching_document(self):
+        current = json.dumps(studio.STUDIO_RUNTIME_VERSION).encode()
+        for size, accepted in ((4096, True), (4097, False)):
+            with self.subTest(bytes=size):
+                port, requests = self.server(version_body=current + b" " * (size - len(current)))
+                if accepted:
+                    self.assertIsNone(studio.verify_running_studio(port))
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "尚未載入目前工作區"):
+                        studio.verify_running_studio(port)
+                self.assertEqual(requests, ["/api/studio/version"])
 
     def test_unrelated_http_error_and_redirect_are_never_considered_studio(self):
         healthy, target_requests = self.server()

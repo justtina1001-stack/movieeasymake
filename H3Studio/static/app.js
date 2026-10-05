@@ -104,6 +104,12 @@ let lastVoiceJobsSignature = "";
 let studioWorkspace = localStorage.getItem("h3studio-workspace-v1") || "quick";
 let shortFilmProjects = [];
 let activeShortFilmId = localStorage.getItem("h3studio-shortfilm-active-v1") || "";
+const workspaceLink = new URLSearchParams(location.search);
+if (workspaceLink.get("workspace") === "shortfilm") {
+  studioWorkspace = "shortfilm";
+  const linkedProject = workspaceLink.get("project") || "";
+  if (/^[a-f0-9]{32}$/.test(linkedProject)) activeShortFilmId = linkedProject;
+}
 let shortFilmSaveTimer;
 let shortFilmBatchRunning = false;
 let shortFilmStatusRefreshing = false;
@@ -953,6 +959,7 @@ async function addReferenceFiles(item, kind, files) {
 
 let loraCatalog = null;
 let loraCatalogMessage = "先把 H3 相容的 .safetensors 放入運算引擎的 models/loras/h3studio_custom 資料夾（可自行建立），再按重新掃描。";
+const loraPickers = {quick: "", sf: ""};
 
 function loraItems(scope) {
   if (scope === "sf") {
@@ -973,21 +980,35 @@ function renderLoraPanels() {
     panel.innerHTML = `<details class="advanced" ${open ? "open" : ""}>
       <summary>自訂 LoRA · ${rows.filter(row => row.enabled !== false && Number(row.strength) !== 0).length} 個啟用${scope === "sf" ? " · 全片共用" : ""}</summary>
       <p class="field-help">${escapeHtml(loraCatalogMessage)}</p>
-      <p class="field-help">適用模型由你依作者說明指定，清單不代表相容性已驗證。FL2VA 用於文生／首尾；Ref2VA 用於多模態／角色替換。不同模式的 LoRA 自動略過。內建 Turbo 由「生成品質」管理；此處用於角色、風格或動態 LoRA。觸發詞請填入影片敘述。</p>
+      <p class="field-help">FL2VA 用於文生／首尾；Ref2VA 用於多模態／角色替換。不同模式的 LoRA 自動略過。已登錄模型在你選擇時填入作者標示的適用類型，仍可自行調整。已啟用且必需的觸發詞會於生成時加入；選用的創作要求可自行填寫。內建加速 LoRA 由「生成品質」管理。</p>
       ${rows.map((row, index) => {
         const names = [...new Set([row.name, ...(loraCatalog?.names || [])].filter(Boolean))];
         return `<div class="form-grid three" data-lora-row="${index}">
-          <label>LoRA 檔案<select data-lora-field="name">${names.map(name => `<option value="${escapeHtml(name)}" ${row.name === name ? "selected" : ""}>${escapeHtml(name)}${loraCatalog && !loraCatalog.names.includes(name) ? "（目前引擎未找到）" : ""}</option>`).join("")}</select></label>
+          <label>LoRA 檔案<select data-lora-field="name">${names.map(name => `<option value="${escapeHtml(name)}" ${row.name === name ? "selected" : ""}>${escapeHtml(H3LoraHelp.label(H3LoraHelp.item(loraCatalog, name)))}${loraCatalog && !loraCatalog.names.includes(name) ? "（目前引擎未找到）" : ""}</option>`).join("")}</select></label>
           <label>強度（0＝略過）<input data-lora-field="strength" type="number" min="0" max="2" step="0.05" value="${escapeHtml(row.strength ?? 0.5)}"></label>
-          <label>作者標示的適用模型<select data-lora-field="family">${[["both","FL2VA + Ref2VA"],["fl2va","僅 FL2VA"],["ref2va","僅 Ref2VA"]].map(([value,label]) => `<option value="${value}" ${(row.family || "both") === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+          <label>適用模型<select data-lora-field="family">${[["both","FL2VA + Ref2VA"],["fl2va","僅 FL2VA"],["ref2va","僅 Ref2VA"]].map(([value,label]) => `<option value="${value}" ${(row.family || "both") === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
           <label class="check-option"><input data-lora-field="enabled" type="checkbox" ${row.enabled !== false ? "checked" : ""}>啟用</label>
           <button type="button" class="secondary-button" data-lora-remove="${index}">移除設定</button>
+          <div class="lora-selection-help">${H3LoraHelp.html(H3LoraHelp.item(loraCatalog, row.name))}</div>
         </div>`;
       }).join("")}
-      <div class="button-row"><button type="button" class="secondary-button" data-lora-refresh>重新掃描引擎 LoRA</button>
-      <button type="button" class="secondary-button" data-lora-add ${rows.length >= 4 || !unusedNames.length ? "disabled" : ""}>＋ 加入 LoRA（先掃描，最多 4 個）</button></div>
+      <div class="lora-picker-row"><label>選擇要加入的 LoRA<select data-lora-picker><option value="">請選擇 LoRA</option>${unusedNames.map(name=>`<option value="${escapeHtml(name)}" ${loraPickers[scope] === name ? "selected" : ""}>${escapeHtml(H3LoraHelp.label(H3LoraHelp.item(loraCatalog, name)))}</option>`).join("")}</select></label>
+      <button type="button" class="secondary-button" data-lora-add ${rows.length >= 4 || !unusedNames.includes(loraPickers[scope]) ? "disabled" : ""}>＋ 加入所選 LoRA（最多 4 個）</button><button type="button" class="secondary-button" data-lora-refresh>重新掃描引擎 LoRA</button></div>
+      ${loraCatalog?.items?.length ? `<details class="lora-catalog"><summary>查看全部 ${loraCatalog.items.length} 個 LoRA 的用途與限制</summary><div class="lora-catalog-list">${loraCatalog.items.map(item=>H3LoraHelp.html(item)).join("")}</div></details>` : ""}
       <p class="field-help">預設不載入自訂 LoRA。依清單順序疊加；強度與疊加效果需小片段實測。遠端模式的檔案須由 GPU 主機管理者放置，這裡不會把本機檔案傳到遠端。</p>
     </details>`;
+  }
+  renderBuiltinLoraHelp();
+}
+
+function renderBuiltinLoraHelp() {
+  for (const id of ["qualityBuiltinLoraHelp", "sfBuiltinLoraHelp"]) {
+    const container = $(`#${id}`);
+    if (!container) continue;
+    const items = loraCatalog?.builtin_items || [];
+    container.innerHTML = items.length
+      ? `<details class="lora-catalog"><summary>生成品質的內建加速 LoRA · ${items.length} 個版本</summary><p>由「生成品質」選項管理，無須在自訂 LoRA 重複加入。</p><div class="lora-catalog-list">${items.map(item=>H3LoraHelp.html(item)).join("")}</div></details>`
+      : "內建加速 LoRA 由生成品質管理；在自訂 LoRA 按「重新掃描」可查看各版本的用途與來源。";
   }
 }
 
@@ -996,6 +1017,11 @@ function bindLoraPanels() {
     const panel = $(`#${id}`);
     const save = () => scope === "sf" ? scheduleShortFilmSave() : persistForm();
     panel.addEventListener("change", event => {
+      if (event.target.hasAttribute("data-lora-picker")) {
+        loraPickers[scope] = event.target.value;
+        renderLoraPanels();
+        return;
+      }
       const field = event.target.dataset.loraField;
       if (!field) return;
       const row = loraItems(scope)[Number(event.target.closest("[data-lora-row]").dataset.loraRow)];
@@ -1006,6 +1032,10 @@ function bindLoraPanels() {
         return;
       }
       row[field] = field === "enabled" ? event.target.checked : field === "strength" ? Number(event.target.value) : event.target.value;
+      if (field === "name") {
+        const family = H3LoraHelp.family(H3LoraHelp.item(loraCatalog, row.name));
+        if (family) row.family = family;
+      }
       save();
       renderLoraPanels();
     });
@@ -1015,16 +1045,18 @@ function bindLoraPanels() {
       if (button.hasAttribute("data-lora-refresh")) {
         button.disabled = true;
         try {
-          loraCatalog = await api("/api/loras");
+          loraCatalog = H3LoraHelp.catalog(await api("/api/loras"));
           loraCatalogMessage = `${loraCatalog.mode === "remote" ? "遠端引擎" : "本機引擎"} · ${loraCatalog.folder} · 找到 ${loraCatalog.names.length} 個非內建 Turbo 檔案。`;
         } catch (error) {
-          loraCatalog = null;
           loraCatalogMessage = error.message;
         }
       } else if (button.hasAttribute("data-lora-add")) {
-        const name = (loraCatalog?.names || []).find(name => !loraItems(scope).some(row => row.name === name));
-        if (name && loraItems(scope).length < 4) loraItems(scope).push({name, strength: 0.5, family: "both", enabled: true});
-        save();
+        const name = loraPickers[scope];
+        if (name && (loraCatalog?.names || []).includes(name) && !loraItems(scope).some(row => row.name === name) && loraItems(scope).length < 4) {
+          loraItems(scope).push({name, strength: 0.5, family: H3LoraHelp.family(H3LoraHelp.item(loraCatalog, name)) || "both", enabled: true});
+          loraPickers[scope] = "";
+          save();
+        }
       } else if (button.hasAttribute("data-lora-remove")) {
         loraItems(scope).splice(Number(button.dataset.loraRemove), 1);
         save();
