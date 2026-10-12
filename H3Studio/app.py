@@ -11,6 +11,7 @@ import mimetypes
 import os
 from fractions import Fraction
 import re
+import threading
 import uuid
 import webbrowser
 import zipfile
@@ -28,6 +29,9 @@ from PIL import Image, ImageOps
 
 from comfy_client import ComfyClient
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, validate_runtime_inventory, resolve_video_vae
+from h3_media import prepare_media_payload, normalized_reference_video, reference_video_ids
+from h3_prompt_translation import H3PromptTranslator, original_h3_payload, prepare_h3_payload
+from shortfilm_batch import ShortFilmBatchManager, ShortFilmBatchError, generation_source
 from custom_loras import active_loras
 from lora_catalog import describe_loras, builtin_lora_items
 from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
@@ -277,6 +281,7 @@ def probe_video(path: Path) -> dict[str, Any]:
                 "height": int(stream.height),
                 "fps": round(rate, 3),
                 "duration": round(duration, 3),
+                "duration_exact": duration,
                 "target_frames": max(1, round(duration * VIDEO_FPS)),
                 "has_audio": bool(container.streams.audio),
             }
@@ -649,6 +654,7 @@ def _append_video_range(
     range_start_frame: int,
     range_end_frame: int,
     start_frame: int = 0,
+    pad_last_frame: bool = False,
 ) -> int:
     """Append an exact 24 fps timeline range, resampling the source when needed."""
     range_start_frame = max(0, int(range_start_frame))
@@ -662,6 +668,7 @@ def _append_video_range(
         source_rate = float(video_stream.average_rate or video_stream.base_rate or VIDEO_FPS)
         previous = None
         previous_time = 0.0
+        timeline_origin = None
         decoded = 0
 
         def emit(frame: Any) -> None:
@@ -671,7 +678,10 @@ def _append_video_range(
                 written += 1
 
         for frame in source.decode(video=0):
-            frame_time = float(frame.time) if frame.time is not None else decoded / source_rate
+            raw_time = float(frame.time) if frame.time is not None else decoded / source_rate
+            if timeline_origin is None:
+                timeline_origin = raw_time
+            frame_time = max(0.0, raw_time - timeline_origin)
             decoded += 1
             if previous is not None:
                 while produced / VIDEO_FPS < frame_time and produced < range_end_frame:
@@ -684,10 +694,33 @@ def _append_video_range(
         if previous is None:
             raise RuntimeError(f"影片沒有可解碼的畫面：{path.name}")
         duration = float(video_stream.duration * video_stream.time_base) if video_stream.duration else previous_time + 1 / source_rate
-        while produced / VIDEO_FPS < duration and produced < range_end_frame:
+        while produced < range_end_frame and (pad_last_frame or produced / VIDEO_FPS < duration):
             emit(previous)
             produced += 1
     return written
+
+
+def normalize_h3_reference_video(source_path: Path, output_path: Path, frames: int) -> None:
+    """Resample by source timestamps and pad the final pose to H3's frame grid."""
+    info = probe_video(source_path)
+    with av.open(str(output_path), mode="w") as output:
+        video = output.add_stream("libx264", rate=VIDEO_FPS)
+        video.width = max(2, int(info["width"]) // 2 * 2)
+        video.height = max(2, int(info["height"]) // 2 * 2)
+        video.pix_fmt = "yuv420p"
+        video.options = {"crf": "18", "preset": "fast"}
+        # PCM avoids AAC decoder padding becoming extra reference-audio tokens.
+        audio = output.add_stream("pcm_s16le", rate=48000) if info["has_audio"] else None
+        if audio is not None:
+            audio.layout = "stereo"
+        written = _append_video_range(output, video, source_path, 0, frames, pad_last_frame=True)
+        for packet in video.encode():
+            output.mux(packet)
+        if audio is not None:
+            samples = written * 2000
+            _write_audio_values(output, audio, _audio_arrays(source_path, 0, samples), samples)
+            for packet in audio.encode():
+                output.mux(packet)
 
 
 def _audio_arrays(path: Path, skip_samples: int, target_samples: int):
@@ -1047,11 +1080,13 @@ class AssetStore:
     def __init__(self, directory: Path):
         self.directory = directory
         self.directory.mkdir(parents=True, exist_ok=True)
+        self.media_lock = threading.RLock()
 
     def path_for(self, asset_id: str) -> Path:
         if not SAFE_ID.fullmatch(asset_id):
             raise RequestError("素材識別碼格式錯誤。")
-        matches = [path for path in self.directory.glob(f"{asset_id}.*") if path.suffix != ".json"]
+        matches = [path for path in self.directory.glob(f"{asset_id}.*")
+                   if path.stem == asset_id and path.suffix in ALLOWED_EXTENSIONS and path.is_file()]
         if not matches:
             raise RequestError(f"找不到素材：{asset_id}")
         return matches[0]
@@ -1063,12 +1098,19 @@ class AssetStore:
             return {"id": asset_id, "name": path.name, "kind": "unknown", "size": path.stat().st_size}
         return json.loads(metadata_path.read_text(encoding="utf-8"))
 
+    def _write_metadata(self, asset_id: str, metadata: dict[str, Any]) -> None:
+        metadata_path = self.directory / f"{asset_id}.json"
+        temporary = self.directory / f"{asset_id}.{uuid.uuid4().hex}.json.tmp"
+        try:
+            temporary.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(metadata_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def update_metadata(self, asset_id: str, **changes: Any) -> dict[str, Any]:
         metadata = self.metadata(asset_id)
         metadata.update(changes)
-        (self.directory / f"{asset_id}.json").write_text(
-            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        self._write_metadata(asset_id, metadata)
         return metadata
 
     def save_image(self, image: Any, name: str, kind: str) -> dict[str, Any]:
@@ -1083,7 +1125,7 @@ class AssetStore:
             "size": path.stat().st_size,
             "created_at": utc_now(),
         }
-        (self.directory / f"{asset_id}.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_metadata(asset_id, metadata)
         return metadata
 
     def register_derived_video(
@@ -1092,20 +1134,22 @@ class AssetStore:
         name: str,
         kind: str,
         extra: dict[str, Any] | None = None,
+        *,
+        extension: str = ".mp4",
     ) -> dict[str, Any]:
-        path = self.directory / f"{asset_id}.mp4"
-        if not SAFE_ID.fullmatch(asset_id) or not path.exists():
+        path = self.directory / f"{asset_id}{extension}"
+        if extension not in {".mp4", ".mov"} or not SAFE_ID.fullmatch(asset_id) or not path.exists():
             raise RequestError("衍生影片素材不存在。")
         metadata = {
             "id": asset_id,
             "name": Path(name).name,
             "kind": kind,
-            "extension": ".mp4",
+            "extension": extension,
             "size": path.stat().st_size,
             "created_at": utc_now(),
             **(extra or {}),
         }
-        (self.directory / f"{asset_id}.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_metadata(asset_id, metadata)
         return metadata
 
     async def save_upload(self, request: web.Request) -> dict[str, Any]:
@@ -1143,7 +1187,7 @@ class AssetStore:
             "created_at": utc_now(),
             "transparency_filled": transparency_filled,
         }
-        (self.directory / f"{asset_id}.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._write_metadata(asset_id, metadata)
         return metadata
 
 
@@ -1274,6 +1318,10 @@ class JobManager:
         segment_index: int | None = None,
     ) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
+        media = raw_request.get("media_preflight") or {}
+        replacement_source = media.get("replacement_source_asset_id")
+        if compiled.mode == "replace" and not replacement_source:
+            replacement_source = replacement_source_asset_id(raw_request)
         job = {
             "id": job_id,
             "name": clean_job_name(raw_request.get("job_name")),
@@ -1297,6 +1345,11 @@ class JobManager:
             "width": compiled.width,
             "height": compiled.height,
             "duration": compiled.actual_duration,
+            "replacement_audio_mode": raw_request.get("replacement_audio_mode") or "original",
+            "replacement_source_asset_id": replacement_source,
+            "replacement_source_duration": (media.get("videos", {}).get(replacement_source) or {}).get("duration"),
+            "preparation_warnings": list(dict.fromkeys([*compiled.warnings,
+                                                        *(raw_request.get("h3_preparation_warnings") or [])])),
             "retime_target_duration": normalize_retime_duration(raw_request.get("retime_duration")),
             "export_frames": raw_request.get("export_frames") is True,
             "continuation_source_job": compiled.continuation_source_job,
@@ -1452,6 +1505,26 @@ class JobManager:
             "output": output,
             **(history_execution_timing(history or {}) or self.finish_timing(job_id)),
         }
+        if compiled.mode == "replace" and not job.get("parent_job_id"):
+            self.update(job_id, progress=99, current_node="整理角色替換影片與完成聲音")
+            source_id = job.get("replacement_source_asset_id") or (compiled.reference_videos[0] if compiled.reference_videos else None)
+            if not source_id:
+                raise RequestError("找不到角色替換原始影片，無法整理完成聲音。")
+            source_path = self.assets.path_for(source_id)
+            source_duration = job.get("replacement_source_duration")
+            if source_duration is None:
+                source_duration = float((await asyncio.to_thread(probe_video, source_path))["duration"])
+            generated_info = await asyncio.to_thread(probe_video, continuation_path)
+            frames = max(1, min(round(float(source_duration) * VIDEO_FPS),
+                                round(float(generated_info["duration"]) * VIDEO_FPS)))
+            final_path = OUTPUT_DIR / f"{job_id}_replaced.mp4"
+            segment = {"core_start_frame": 0, "core_end_frame": frames, "input_start_frame": 0}
+            final_duration = await asyncio.to_thread(
+                merge_replacement_segments, source_path, [continuation_path], [segment], final_path,
+                compiled.width, compiled.height, str(job.get("replacement_audio_mode") or "original"),
+            )
+            updates.update(segment_output=output, local_output=final_path.name,
+                           download_name=f"{output_stem}_角色替換.mp4", duration=final_duration)
         if compiled.mode == "extend" and compiled.continuation_merge:
             self.update(job_id, progress=99, current_node="串接上一段影片")
             try:
@@ -1786,6 +1859,9 @@ class JobManager:
                     child_payload = self._replacement_child_payload(
                         raw_request, parent, segment, previous_continuity_asset or None
                     )
+                    child_payload = await asyncio.to_thread(
+                        prepare_media_payload, child_payload, self.assets, probe_video, normalize_h3_reference_video,
+                    )
                     compiled = compile_request(child_payload)
                     child = self.create(
                         compiled,
@@ -1954,6 +2030,12 @@ class JobManager:
                     if cancel_event.is_set():
                         raise asyncio.CancelledError
                     path = self.assets.path_for(asset_id)
+                    if asset_id in compiled.reference_videos:
+                        prepared_video = await asyncio.to_thread(
+                            normalized_reference_video, self.assets, asset_id, compiled.length,
+                            probe_video, normalize_h3_reference_video,
+                        )
+                        path = Path(prepared_video["path"])
                     uploaded[asset_id] = await self.comfy.upload_asset(path, f"h3studio/{job_id}")
                     self.update(job_id, progress=round(index / max(1, len(asset_ids)) * 5, 1))
 
@@ -2147,6 +2229,14 @@ def create_app() -> web.Application:
     app["voice_jobs"] = voice_jobs
     app["shared_gateway"] = gateway
     app["shortfilms"] = shortfilms
+
+    async def prepare_generation_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        prepared = await asyncio.to_thread(
+            prepare_media_payload, payload, assets, probe_video, normalize_h3_reference_video,
+        )
+        return await prepare_h3_payload(app, prepared)
+
+    app["prepare_generation_payload"] = prepare_generation_payload
     register_job_thumbnails(app, OUTPUT_DIR)
     image_jobs = register_image_routes(app, STATIC_DIR, DATA_DIR)
     register_editor_routes(app, STATIC_DIR, DATA_DIR)
@@ -2155,6 +2245,7 @@ def create_app() -> web.Application:
     register_editor_overlays(app)
     app["script_video_renderer"] = ScriptVideoRenderer(app)
     register_scriptwriting_routes(app, STATIC_DIR, DATA_DIR)
+    app["h3_prompt_translator"] = H3PromptTranslator(app)
 
     async def index(_: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "index.html")
@@ -2499,98 +2590,139 @@ def create_app() -> web.Application:
         except (ShortFilmError, ValueError) as error:
             return json_response_error(error, 400)
 
+    async def compile_shortfilm_payload(
+        project_id: str, shot_id: str, request_payload: dict[str, Any],
+        project_override: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        project = project_override if project_override is not None else shortfilms.get(project_id)
+        flattened = flatten_shots(project)
+        shot_index = next((index for index, (_, shot) in enumerate(flattened) if shot["id"] == shot_id), None)
+        if shot_index is None:
+            raise ShortFilmError("找不到指定鏡頭。")
+        scene, shot = flattened[shot_index]
+        validate_shot_references(project, scene, shot)
+        continuation_asset_id = shot.get("continuation_asset_id")
+        if shot.get("continue_previous"):
+            if shot_index == 0:
+                raise ShortFilmError("第一個鏡頭無法沿用上一鏡尾幀。")
+            previous_scene, previous_shot = flattened[shot_index - 1]
+            previous_job_id = previous_shot.get("job_id")
+            previous_job = jobs.jobs.get(previous_job_id) if previous_job_id else None
+            if not previous_job or previous_job.get("status") != "completed" or not previous_job.get("output"):
+                raise ShortFilmError("上一個鏡頭尚未完成，暫時無法擷取尾幀。")
+            previous_expected, _ = compile_shot_payload(
+                project,
+                previous_scene["id"],
+                previous_shot["id"],
+                continuation_asset_id=previous_shot.get("continuation_asset_id"),
+            )
+            previous_request_path = JOB_DIR / f"{previous_job_id}.request.json"
+            try:
+                previous_request = json.loads(previous_request_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                previous_request = {}
+            changed_aliases = changed_reference_aliases(
+                previous_expected.get("references"),
+                original_h3_payload(previous_request).get("references"),
+            )
+            if changed_aliases:
+                changed_labels = "、".join(f"「{alias}」" for alias in changed_aliases)
+                raise ShortFilmError(
+                    f"上一鏡使用的是舊版或不同參考素材（{changed_labels}）。"
+                    "為避免開頭先出現舊 AI 畫面，請先重新生成上一鏡，再續接這一鏡。"
+                )
+            valid_cached_asset = False
+            if shot.get("continuation_job_id") != previous_job_id:
+                continuation_asset_id = None
+            if continuation_asset_id and shot.get("continuation_job_id") == previous_job_id:
+                try:
+                    assets.path_for(continuation_asset_id)
+                    valid_cached_asset = True
+                except RequestError:
+                    continuation_asset_id = None
+            if not valid_cached_asset and request_payload.get("prepare_continuity", True):
+                source_path = await jobs.job_output_path(previous_job)
+                frame = await asyncio.to_thread(extract_continuation_frame, source_path, assets)
+                continuation_asset_id = frame["id"]
+                shot["continuation_asset_id"] = continuation_asset_id
+                shot["continuation_job_id"] = previous_job_id
+                if project_override is None:
+                    project = shortfilms.update(project_id, project)
+                flattened = flatten_shots(project)
+                scene, shot = next((item for item in flattened if item[1]["id"] == shot_id), (scene, shot))
+
+        raw_payload, warnings = compile_shot_payload(
+            project,
+            scene["id"],
+            shot_id,
+            continuation_asset_id=continuation_asset_id,
+        )
+        raw_payload.update({
+            "shortfilm_project_id": project_id,
+            "shortfilm_scene_id": scene["id"],
+            "shortfilm_shot_id": shot_id,
+            "shortfilm_scene_title": scene.get("title") or "場次",
+            "shortfilm_shot_title": shot.get("title") or "鏡頭",
+        })
+        raw_payload = await prepare_generation_payload(raw_payload)
+        compiled = compile_request(raw_payload)
+        for asset_id in required_asset_ids(compiled):
+            assets.path_for(asset_id)
+        data = asdict(compiled)
+        data["asset_count"] = len(required_asset_ids(compiled))
+        return {
+            "project": project,
+            "payload": raw_payload,
+            "compiled": data,
+            "warnings": list(dict.fromkeys([*project_warnings(project), *warnings, *compiled.warnings,
+                                            *(raw_payload.get("h3_preparation_warnings") or [])])),
+        }
+
     async def compile_shortfilm_shot(request: web.Request) -> web.Response:
         try:
-            request_payload = await request.json()
-            project_id = request.match_info["project_id"]
-            shot_id = request.match_info["shot_id"]
-            project = shortfilms.get(project_id)
-            flattened = flatten_shots(project)
-            shot_index = next((index for index, (_, shot) in enumerate(flattened) if shot["id"] == shot_id), None)
-            if shot_index is None:
-                raise ShortFilmError("找不到指定鏡頭。")
-            scene, shot = flattened[shot_index]
-            validate_shot_references(project, scene, shot)
-            continuation_asset_id = shot.get("continuation_asset_id")
-            if shot.get("continue_previous"):
-                if shot_index == 0:
-                    raise ShortFilmError("第一個鏡頭無法沿用上一鏡尾幀。")
-                previous_scene, previous_shot = flattened[shot_index - 1]
-                previous_job_id = previous_shot.get("job_id")
-                previous_job = jobs.jobs.get(previous_job_id) if previous_job_id else None
-                if not previous_job or previous_job.get("status") != "completed" or not previous_job.get("output"):
-                    raise ShortFilmError("上一個鏡頭尚未完成，暫時無法擷取尾幀。")
-                previous_expected, _ = compile_shot_payload(
-                    project,
-                    previous_scene["id"],
-                    previous_shot["id"],
-                    continuation_asset_id=previous_shot.get("continuation_asset_id"),
-                )
-                previous_request_path = JOB_DIR / f"{previous_job_id}.request.json"
-                try:
-                    previous_request = json.loads(previous_request_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    previous_request = {}
-                changed_aliases = changed_reference_aliases(
-                    previous_expected.get("references"),
-                    previous_request.get("references"),
-                )
-                if changed_aliases:
-                    changed_labels = "、".join(f"「{alias}」" for alias in changed_aliases)
-                    raise ShortFilmError(
-                        f"上一鏡使用的是舊版或不同參考素材（{changed_labels}）。"
-                        "為避免開頭先出現舊 AI 畫面，請先重新生成上一鏡，再續接這一鏡。"
-                    )
-                valid_cached_asset = False
-                if shot.get("continuation_job_id") != previous_job_id:
-                    continuation_asset_id = None
-                if continuation_asset_id and shot.get("continuation_job_id") == previous_job_id:
-                    try:
-                        assets.path_for(continuation_asset_id)
-                        valid_cached_asset = True
-                    except RequestError:
-                        continuation_asset_id = None
-                if not valid_cached_asset and request_payload.get("prepare_continuity", True):
-                    source_path = await jobs.job_output_path(previous_job)
-                    frame = await asyncio.to_thread(extract_continuation_frame, source_path, assets)
-                    continuation_asset_id = frame["id"]
-                    shot["continuation_asset_id"] = continuation_asset_id
-                    shot["continuation_job_id"] = previous_job_id
-                    project = shortfilms.update(project_id, project)
-                    flattened = flatten_shots(project)
-                    scene, shot = next((item for item in flattened if item[1]["id"] == shot_id), (scene, shot))
-
-            raw_payload, warnings = compile_shot_payload(
-                project,
-                scene["id"],
-                shot_id,
-                continuation_asset_id=continuation_asset_id,
+            data = await compile_shortfilm_payload(
+                request.match_info["project_id"], request.match_info["shot_id"], await request.json(),
             )
-            raw_payload.update({
-                "shortfilm_project_id": project_id,
-                "shortfilm_scene_id": scene["id"],
-                "shortfilm_shot_id": shot_id,
-                "shortfilm_scene_title": scene.get("title") or "場次",
-                "shortfilm_shot_title": shot.get("title") or "鏡頭",
-            })
-            compiled = compile_request(raw_payload)
-            for asset_id in required_asset_ids(compiled):
-                assets.path_for(asset_id)
-            data = asdict(compiled)
-            data["asset_count"] = len(required_asset_ids(compiled))
-            return web.json_response({
-                "project": project,
-                "payload": raw_payload,
-                "compiled": data,
-                "warnings": [*project_warnings(project), *warnings],
-            })
+            return web.json_response(data)
         except (ShortFilmError, RequestError, json.JSONDecodeError, OSError, ValueError) as error:
             conflict = "尚未完成" in str(error) or "重新生成上一鏡" in str(error)
             return json_response_error(error, 409 if conflict else 400)
 
+    async def compile_submit_shortfilm(
+        project_id: str, shot_id: str, project_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        data = await compile_shortfilm_payload(project_id, shot_id, {"prepare_continuity": True}, project_snapshot)
+        prepared = data["payload"]
+        if generation_source(shortfilms.get(project_id)) != generation_source(project_snapshot):
+            raise ShortFilmBatchError("專案設定已改變，請重新啟動批次以使用目前的設定。")
+        return jobs.create(compile_request(prepared), prepared)
+
+    app["compile_submit_shortfilm"] = compile_submit_shortfilm
+    shortfilm_batches = ShortFilmBatchManager(app, DATA_DIR, compile_submit_shortfilm)
+    app["shortfilm_batches"] = shortfilm_batches
+
+    async def list_shortfilm_batches(request: web.Request) -> web.Response:
+        return web.json_response(shortfilm_batches.list(request.query.get("project_id")))
+
+    async def start_shortfilm_batch(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await shortfilm_batches.start(request.match_info["project_id"]), status=202)
+        except (ShortFilmBatchError, ShortFilmError, RequestError, OSError, ValueError) as error:
+            return json_response_error(error, 409)
+
+    async def control_shortfilm_batch(request: web.Request) -> web.Response:
+        try:
+            if request.match_info["action"] == "cancel":
+                result = await shortfilm_batches.cancel(request.match_info["batch_id"])
+            else:
+                result = await shortfilm_batches.resume(request.match_info["batch_id"])
+            return web.json_response(result, status=202)
+        except (ShortFilmBatchError, ShortFilmError, RequestError, OSError, ValueError) as error:
+            return json_response_error(error, 409)
+
     async def compile_api(request: web.Request) -> web.Response:
         try:
-            payload = await request.json()
+            payload = await prepare_generation_payload(await request.json())
             compiled = compile_request(payload)
             for asset_id in required_asset_ids(compiled):
                 assets.path_for(asset_id)
@@ -2600,8 +2732,11 @@ def create_app() -> web.Application:
                 await jobs.continuation_source_path(compiled)
             data = asdict(compiled)
             data["asset_count"] = len(required_asset_ids(compiled))
+            data["prepared_payload"] = payload
+            data["warnings"] = list(dict.fromkeys([*compiled.warnings,
+                                                  *(payload.get("h3_preparation_warnings") or [])]))
             return web.json_response(data)
-        except (RequestError, json.JSONDecodeError) as error:
+        except (RequestError, json.JSONDecodeError, OSError, ValueError) as error:
             return json_response_error(error)
 
     async def face_repair_status(_: web.Request) -> web.Response:
@@ -2650,7 +2785,7 @@ def create_app() -> web.Application:
 
     async def render(request: web.Request) -> web.Response:
         try:
-            payload = await request.json()
+            payload = await prepare_generation_payload(await request.json())
             compiled = compile_request(payload)
             for asset_id in required_asset_ids(compiled):
                 assets.path_for(asset_id)
@@ -2673,7 +2808,7 @@ def create_app() -> web.Application:
                     return web.json_response(job, status=202)
             job = jobs.create(compiled, payload)
             return web.json_response(job, status=202)
-        except (RequestError, json.JSONDecodeError) as error:
+        except (RequestError, json.JSONDecodeError, OSError, ValueError) as error:
             return json_response_error(error)
 
     async def list_jobs(request: web.Request) -> web.Response:
@@ -3116,6 +3251,9 @@ def create_app() -> web.Application:
     app.router.add_put("/api/shortfilms/{project_id}", update_shortfilm)
     app.router.add_delete("/api/shortfilms/{project_id}", delete_shortfilm)
     app.router.add_post("/api/shortfilms/{project_id}/shots/{shot_id}/compile", compile_shortfilm_shot)
+    app.router.add_get("/api/shortfilm-batches", list_shortfilm_batches)
+    app.router.add_post("/api/shortfilms/{project_id}/batch", start_shortfilm_batch)
+    app.router.add_post("/api/shortfilm-batches/{batch_id}/{action:cancel|resume}", control_shortfilm_batch)
     app.router.add_post("/api/shortfilms/{project_id}/segments", append_shortfilm_segments)
     app.router.add_get("/api/shortfilms/{project_id}/jobs", list_shortfilm_jobs)
     app.router.add_post("/api/compile", compile_api)
@@ -3196,12 +3334,16 @@ def create_app() -> web.Application:
         if task:
             await task
 
+    async def cleanup_shortfilm_batches(_: web.Application) -> None:
+        await shortfilm_batches.shutdown()
+
     app.on_startup.append(auto_start_engine)
     app.on_startup.append(auto_start_gateway)
     app.on_startup.append(start_scriptwriting)
     app.on_cleanup.append(cleanup_gateway)
     app.on_cleanup.append(cleanup_voice)
     app.on_cleanup.append(cleanup_scriptwriting_start)
+    app.on_cleanup.append(cleanup_shortfilm_batches)
     return app
 
 

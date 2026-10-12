@@ -587,10 +587,14 @@ def compile_shot_payload(
             raise ShortFilmError("這個鏡頭有台詞，請指定說話角色。")
         if speaker not in speaker_ids:
             raise ShortFilmError(f"說話角色「{speaker}」必須先建立為角色或動物素材。")
-        dialogue = (
-            f" {speaker} ({speaker_ids[speaker]}) says "
-            f"<d>[{shot['dialogue_language']}] {shot['dialogue']}</d>."
-        )
+        spoken_text = shot["dialogue"]
+        if "<d>" in spoken_text or "</d>" in spoken_text:
+            if not re.fullmatch(r"<d>(?:(?!<d>|</d>).)*</d>", spoken_text, re.DOTALL):
+                raise ShortFilmError("台詞含重複、未配對或混合的標籤，請保留一組完整台詞標籤，或只填原始台詞。")
+            tagged_dialogue = spoken_text
+        else:
+            tagged_dialogue = f"<d>[{shot['dialogue_language']}] {spoken_text}</d>"
+        dialogue = f" {speaker} ({speaker_ids[speaker]}) says {tagged_dialogue}."
 
     storyboard_sentence = ""
     if shot["storyboard_asset_id"]:

@@ -132,7 +132,7 @@ class CompileRequestTests(unittest.TestCase):
         self.assertEqual(compiled.first_image, IMAGE_A)
         self.assertEqual(compiled.continuation_source_job, "job-before")
         self.assertTrue(compiled.continuation_merge)
-        self.assertIn("上一段影片的最後一幀", compiled.prompt)
+        self.assertIn("preceding video's final-frame pose", compiled.prompt)
         workflow = build_workflow(compiled, {IMAGE_A: "h3/last.png"}, "job")
         node = next(value for value in workflow.values() if value["class_type"] == "MiniMaxH3ImageToVideo")
         self.assertIn("first_frame", node["inputs"])
@@ -158,8 +158,8 @@ class CompileRequestTests(unittest.TestCase):
         self.assertEqual(compiled.mode, "replace")
         self.assertEqual(compiled.reference_images, [IMAGE_A])
         self.assertEqual(compiled.reference_videos, [VIDEO_A])
-        self.assertIn("原始表演影片", compiled.prompt)
-        self.assertIn("原角色的身份與外觀必須完全消失", compiled.prompt)
+        self.assertIn("source performance video", compiled.prompt)
+        self.assertIn("never show both identities or blend their faces", compiled.prompt)
         self.assertNotIn("<Subject 2>", compiled.prompt)
         workflow = build_workflow(compiled, {IMAGE_A: "h3/new.png", VIDEO_A: "h3/original.mp4"}, "job")
         self.assertTrue(any(value["class_type"] == "MiniMaxH3ReferenceToVideo" for value in workflow.values()))
@@ -234,7 +234,7 @@ class CompileRequestTests(unittest.TestCase):
         compiled = compile_request(payload)
         self.assertIn("replacement segment 2 of 4", compiled.prompt)
         self.assertIn("9.500s–20.500s", compiled.prompt)
-        self.assertIn("不得憑空加入 <Subject 1>", compiled.prompt)
+        self.assertIn("do not add <Subject 1> in source frames", compiled.prompt)
         self.assertIn("not a keyframe", compiled.prompt)
 
     def test_symbol_loop_forces_same_prepared_image_at_both_ends(self):
@@ -244,7 +244,8 @@ class CompileRequestTests(unittest.TestCase):
         compiled = compile_request(payload)
         self.assertEqual(compiled.first_image, IMAGE_A)
         self.assertEqual(compiled.last_image, IMAGE_A)
-        self.assertIn("精確起始畫面與精確結束畫面", compiled.prompt)
+        self.assertIn("Picture 1 (from Shot 1) aligns with the 0.00-second mark", compiled.prompt)
+        self.assertIn("Picture 2 (from Shot 1) aligns with the 5.17-second mark", compiled.prompt)
         workflow = build_workflow(compiled, {IMAGE_A: "h3/symbol.png"}, "job")
         node = next(value for value in workflow.values() if value["class_type"] == "MiniMaxH3ImageToVideo")
         self.assertEqual(node["inputs"]["first_frame"], node["inputs"]["last_frame"])
@@ -264,10 +265,10 @@ class CompileRequestTests(unittest.TestCase):
         compiled = compile_request(payload)
         self.assertEqual(compiled.mode, "popup_panel")
         self.assertEqual(compiled.reference_images, [IMAGE_A, IMAGE_B, IMAGE_C, IMAGE_D])
-        self.assertIn("逐像素保持固定", compiled.prompt)
-        self.assertIn("其餘已命名參考素材", compiled.prompt)
+        self.assertIn("Keep <Picture 1> fixed from the opening to the ending frame", compiled.prompt)
+        self.assertIn("Animate only named foreground panels", compiled.prompt)
         self.assertIn("分數", compiled.prompt)
-        self.assertIn("鏡頭必須完全鎖定", compiled.prompt)
+        self.assertIn("The camera is completely locked", compiled.prompt)
         self.assertIn("0.0秒～0.5秒", compiled.prompt)
         workflow = build_workflow(compiled, {
             IMAGE_A: "h3/background.png",
@@ -323,7 +324,7 @@ class CompileRequestTests(unittest.TestCase):
         self.assertIn("<Picture 2>", compiled.prompt)
         self.assertIn("<Audio 1>", compiled.prompt)
         self.assertEqual(compiled.mapping[0]["alias"], "小明")
-        self.assertIn("motion_direction:", compiled.prompt)
+        self.assertIn("Use continuous natural body and object mechanics", compiled.prompt)
 
     def test_multimodal_continuation_uses_last_frame_as_picture_one(self):
         payload = self.base("r2v")
@@ -337,7 +338,7 @@ class CompileRequestTests(unittest.TestCase):
         })
         compiled = compile_request(payload)
         self.assertEqual(compiled.reference_images, [IMAGE_A, IMAGE_B])
-        self.assertIn("<Picture 1> 是上一段動畫的最後一幀", compiled.prompt)
+        self.assertIn("<Picture 1> is the first-frame composition anchor from the preceding video's final frame", compiled.prompt)
         self.assertEqual(compiled.mapping[0]["picture_tags"], ["<Picture 2>"])
         workflow = build_workflow(compiled, {IMAGE_A: "h3/last.png", IMAGE_B: "h3/hero.png"}, "job")
         node = next(value for value in workflow.values() if value["class_type"] == "MiniMaxH3ReferenceToVideo")
@@ -365,9 +366,9 @@ class CompileRequestTests(unittest.TestCase):
         self.assertEqual(compiled.reference_videos, [VIDEO_A])
         self.assertEqual(compiled.reference_video_use_audio, [True])
         self.assertIn("<Video 1>", compiled.prompt)
-        self.assertIn("<Audio 1> 是 <Video 1>", compiled.prompt)
+        self.assertIn("<Audio 1> is the enabled synchronized audio track from <Video 1>", compiled.prompt)
         self.assertEqual(compiled.mapping[0]["audio_tag"], "<Audio 2>")
-        self.assertIn("蓄力", compiled.prompt)
+        self.assertIn("Show anticipation, acceleration, contact", compiled.prompt)
 
     def test_duplicate_alias_is_rejected(self):
         payload = self.base("r2v")
@@ -394,7 +395,7 @@ class CompileRequestTests(unittest.TestCase):
         self.assertEqual(compiled.reference_images, [])
         self.assertEqual([guide["frame_idx"] for guide in compiled.guides], [0, 48])
         self.assertEqual(required_asset_ids(compiled), [IMAGE_A, IMAGE_B])
-        self.assertIn("精確分鏡 Guide", compiled.prompt)
+        self.assertIn("The exact storyboard guide anchors composition", compiled.prompt)
 
         workflow = build_workflow(compiled, {IMAGE_A: "h3/shot-1.png", IMAGE_B: "h3/shot-2.png"}, "exact-guides")
         conditioning_id = next(node_id for node_id, node in workflow.items() if node["class_type"] == "MiniMaxH3ImageToVideo")

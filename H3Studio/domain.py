@@ -4,7 +4,8 @@ import math
 import re
 from dataclasses import dataclass, field
 from custom_loras import normalize_loras, active_loras, required_lora_triggers
-from dialogue import format_dialogue, map_outside_dialogue, visual_direction_text
+from dialogue import format_dialogue, visual_direction_text
+from h3_prompt_format import base_prompt as format_base_prompt, combine_storyboards, cut_time, language_warning, number_speakers, rewrite_aliases, unpack_prompt
 from typing import Any
 
 
@@ -13,7 +14,7 @@ MAX_REFERENCE_IMAGES = 9
 MAX_REFERENCE_AUDIOS = 3
 MAX_REFERENCE_VIDEOS = 3
 ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
-REFERENCE_SUBJECT_TYPES = {"character", "creature", "object"}
+REFERENCE_SUBJECT_TYPES = {"character", "creature", "object", "background", "style", "motion", "effect"}
 VIDEO_VAE_FILENAMES = {
     "int8": "minimax_h3_video_vae_int8_convrot.safetensors",
     "fp16": "minimax_h3_video_vae_fp16.safetensors",
@@ -61,34 +62,34 @@ TURBO_LORA_CANDIDATES: dict[str, tuple[str, ...]] = {
 }
 
 MOTION_PROFILES = {
-    "natural": "以自然、連續的人體與物體力學呈現動作；重心轉移、慣性、接觸、反作用力和收勢都要清楚，避免漂浮、瞬移或肢體抽動。",
-    "impact": "動作要有清楚的蓄力、加速、接觸、受力、回彈與穩定階段；打擊瞬間強調重量、速度差、身體連鎖反應與短促鏡頭回饋。",
-    "action": "安排連續且可讀的全身動作，讓起步、轉向、跨步、攻防與停頓之間有合理過渡，保持角色輪廓和空間方向一致。",
-    "dance": "動作遵循節拍，保持軀幹、四肢、重心與地面接觸協調；轉身和姿態切換流暢，避免腳步滑動。",
-    "chase": "強調速度、慣性、地形互動與前後景視差；角色奔跑週期自然，鏡頭追隨時保持主體可讀且空間連續。",
-    "vfx": "特效依照啟動、增長、爆發、消散的時序發展；能量軌跡與角色動作、接觸點和環境反應同步，不遮蔽主要肢體輪廓。",
+    "natural": "Use continuous natural body and object mechanics, with visible weight transfer, inertia, contact, reaction, and settling; avoid floating, teleportation, and limb twitching.",
+    "impact": "Show anticipation, acceleration, contact, force transfer, rebound, and settling; emphasize weight and connected body reactions at impact.",
+    "action": "Use readable continuous full-body action with natural transitions between starts, turns, steps, attacks, defenses, and stops; preserve silhouettes and spatial direction.",
+    "dance": "Follow the beat with coordinated torso, limbs, weight, and ground contact; keep turns and pose changes fluid without foot sliding.",
+    "chase": "Show speed, inertia, and terrain interaction with natural running cycles; keep the moving subject readable and spatially consistent.",
+    "vfx": "Develop effects through activation, growth, burst, and dissipation; synchronize energy paths with action, contact points, and environmental reactions without hiding the main silhouette.",
     "none": "",
 }
 
 MOTION_INTENSITIES = {
-    1: "動態幅度克制，以細微且可信的動作為主。",
-    2: "動態偏穩定，保留適量動作變化。",
-    3: "動態強度中等，兼顧自然度與畫面表現。",
-    4: "動態明顯，增加速度差、姿態變化與鏡頭反應。",
-    5: "動態非常強烈，但仍須維持解剖、物理與時間連續性。",
+    1: "Keep motion restrained, subtle, and physically credible.",
+    2: "Keep motion stable with moderate variation.",
+    3: "Use moderate motion intensity with natural, readable performance.",
+    4: "Use pronounced motion, speed changes, and pose variation.",
+    5: "Use very strong motion while preserving anatomy, physics, and temporal continuity.",
 }
 
 PHYSICS_STYLES = {
-    "realistic": "物理風格偏寫實：重量、碰撞、布料、頭髮和次級動態符合真實慣性。",
-    "balanced": "物理風格平衡：自然力學為基礎，允許適度電影化誇張。",
-    "stylized": "物理風格偏風格化：可誇張速度與姿勢，但動作因果、接觸點和重心必須連續。",
+    "realistic": "Use realistic weight, collisions, fabric, hair, and secondary inertia.",
+    "balanced": "Use natural mechanics with moderate cinematic exaggeration.",
+    "stylized": "Exaggerated speed and poses are allowed, but preserve causal motion, contact points, and continuous weight transfer.",
 }
 
 CAMERA_RESPONSES = {
-    "stable": "攝影機保持穩定，運鏡平滑，不使用無目的晃動。",
-    "follow": "攝影機平滑跟隨主體，以合理加減速維持構圖與視線方向。",
-    "handheld": "使用克制的手持感，晃動幅度小且有重量，不造成主體漂移。",
-    "impact": "只在碰撞或爆發瞬間加入短促震動與回穩，避免全程抖動。",
+    "stable": "The camera remains stable, with smooth intentional movement and no aimless shake.",
+    "follow": "The camera follows the subject smoothly with natural acceleration and deceleration, preserving composition and eyeline.",
+    "handheld": "Use restrained handheld movement with small amplitude and physical weight, without subject drift.",
+    "impact": "Use a brief shake and recovery only at an impact or burst, without continuous jitter.",
 }
 
 
@@ -132,6 +133,8 @@ class CompiledRequest:
     memory_optimization: bool = False
     face_repair: dict[str, Any] | None = None
     video_vae: str = "auto"
+    warnings: list[str] = field(default_factory=list)
+    official_mode: str = "T2VA"
 
 
 def resolve_video_vae(compiled: CompiledRequest, inventory: dict[str, bool]) -> str:
@@ -244,13 +247,14 @@ def aligned_frame_count(seconds: float) -> int:
 
 
 def _rewrite_aliases(text: str, aliases: dict[str, str]) -> str:
-    def rewrite(part: str) -> str:
-        for alias in sorted(aliases, key=len, reverse=True):
-            if alias:
-                part = part.replace(alias, aliases[alias])
-        return part
+    return rewrite_aliases(text, aliases)
 
-    return map_outside_dialogue(text, rewrite)
+
+def _spoken_text(text: str, speakers: tuple[str, ...], speaker_ids: dict[str, str], *, dialogue_field: bool = False) -> str:
+    try:
+        return number_speakers(format_dialogue(text, speakers=speakers, dialogue_field=dialogue_field), speakers, speaker_ids)
+    except ValueError as error:
+        raise RequestError(str(error)) from error
 
 
 def _motion_direction(payload: dict[str, Any]) -> str:
@@ -260,12 +264,13 @@ def _motion_direction(payload: dict[str, Any]) -> str:
         return ""
     intensity = min(5, max(1, _safe_int(payload.get("motion_intensity"), 3)))
     physics = _clean_text(payload.get("physics_style")) or "balanced"
-    camera = _clean_text(payload.get("camera_response")) or "follow"
+    locked = payload.get("mode") in {"symbol_loop", "popup_panel"}
+    camera = "stable" if locked else (_clean_text(payload.get("camera_response")) or "follow")
     return " ".join([
         profile_text,
         MOTION_INTENSITIES[intensity],
         PHYSICS_STYLES.get(physics, PHYSICS_STYLES["balanced"]),
-        CAMERA_RESPONSES.get(camera, CAMERA_RESPONSES["follow"]),
+        "The camera is completely locked; allow no camera movement, crop changes, scale drift, parallax, flicker, or lighting drift." if locked else CAMERA_RESPONSES.get(camera, CAMERA_RESPONSES["follow"]),
     ])
 
 
@@ -273,6 +278,7 @@ def _storyboard_text(
     storyboards: list[dict[str, Any]],
     aliases: dict[str, str],
     speakers: tuple[str, ...] = (),
+    speaker_ids: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     lines: list[str] = []
     image_assets: list[str] = []
@@ -283,19 +289,16 @@ def _storyboard_text(
         start = cursor
         end = cursor + duration
         cursor = end
-        description = _rewrite_aliases(
-            format_dialogue(_clean_text(shot.get("description")), speakers=speakers), aliases,
-        )
+        speaker_ids = speaker_ids if speaker_ids is not None else {}
+        description = _rewrite_aliases(_spoken_text(_clean_text(shot.get("description")), speakers, speaker_ids), aliases)
         camera = _clean_text(shot.get("camera"))
-        dialogue = _rewrite_aliases(
-            format_dialogue(_clean_text(shot.get("dialogue")), speakers=speakers, dialogue_field=True), aliases,
-        )
+        dialogue = _rewrite_aliases(_spoken_text(_clean_text(shot.get("dialogue")), speakers, speaker_ids, dialogue_field=True), aliases)
         sound = _clean_text(shot.get("sound"))
         motion_beats = _rewrite_aliases(_clean_text(shot.get("motion_beats")), aliases)
         effects = _rewrite_aliases(_clean_text(shot.get("effects")), aliases)
         image_id = _clean_text(shot.get("image_asset_id"))
         guide_mode = "exact" if shot.get("guide_mode") == "exact" else "reference"
-        parts = [f"[Shot {index}, {start:.1f}s-{end:.1f}s]"]
+        parts = ["[Shot 1]" if index == 1 else f"[Shot {index}] At {cut_time(start)},"]
         if image_id:
             if guide_mode == "exact":
                 frame_idx = min(max(0, round(start * FPS)), 3599)
@@ -306,12 +309,12 @@ def _storyboard_text(
                     "time": round(frame_idx / FPS, 3),
                 })
                 parts.append(
-                    f"精確分鏡 Guide 會在 {frame_idx / FPS:.3f} 秒（第 {frame_idx} 幀）鎖定這張圖的構圖、人物位置與鏡位；"
-                    "前後動作必須連續收斂並自然離開該畫面，不要把它當成切鏡或重新開場。"
+                    f"The exact storyboard guide anchors composition, subject positions, and viewpoint at {frame_idx / FPS:.3f} seconds (frame {frame_idx}); "
+                    "motion must converge continuously into this frame and leave it naturally, without restarting the scene."
                 )
             else:
                 image_assets.append(image_id)
-                parts.append("使用分鏡參考圖 {STORYBOARD_TAG} 的構圖、人物位置與鏡位，不要複製其中不相關的文字或浮水印。")
+                parts.append("Use storyboard {STORYBOARD_TAG} as this shot's composition anchor for subject positions and viewpoint, without copying unrelated text or watermarks.")
         if description:
             parts.append(description)
         if camera:
@@ -407,6 +410,31 @@ def _mg_animation_description(payload: dict[str, Any], aliases: dict[str, str], 
     return "\n".join(lines)
 
 
+def _sound_sections(payload: dict[str, Any], body: str, embedded_sound: str, embedded_music: str, mode: str) -> tuple[str, str]:
+    sound = _clean_text(payload.get("shortfilm_soundscape")) or _clean_text(payload.get("overall_soundscape")) or embedded_sound
+    music = _clean_text(payload.get("shortfilm_music")) or _clean_text(payload.get("non_diegetic_music")) or embedded_music
+    if not music:
+        # Quick-generation users describe music in the narrative, without a separate
+        # field. Carry explicit audience-only score instructions into its own section.
+        directions = visual_direction_text(body)
+        clauses = [part.strip() for part in re.split(r"(?<=[。！？])|(?<=[.!?])\s+|\n", directions) if part.strip()]
+        music_clauses = [part for part in clauses if re.search(
+            r"背景音[樂乐]|配[樂乐]|\b(?:background (?:music|score)|non[- ]diegetic music|audience[- ]only score|BGM)\b", part, re.I)]
+        negative = re.compile(
+            r"(?:無|无|不要|禁止|沒有|没有)(?:任何|加入)?(?:背景音[樂乐]|配[樂乐]|BGM)|"
+            r"\b(?:no|without|zero)\s+(?:background (?:music|score)|non[- ]diegetic music|audience[- ]only score|BGM)\b", re.I)
+        evolving = re.compile(r"直到|之後|之后|再|\b(?:until|then|later|after)\b", re.I)
+        requested = [part for part in music_clauses if not negative.search(part) or evolving.search(part)]
+        music = " ".join(requested[:3]) if requested else "N/A"
+    if not sound:
+        complete_silence = re.search(r"完全(?:靜音|静音|無聲|无声)|全程(?:靜音|静音|無聲|无声)|\b(?:complete silence|silent throughout|no sound at all)\b", visual_direction_text(body), re.I)
+        sound = "N/A" if complete_silence else (
+            "Synchronized reel-spin whirr, controlled deceleration, distinct stop clicks, and a restrained win chime after the symbols settle."
+            if mode == "mg_animation" else "Natural ambience and synchronized physical action sounds appropriate to the scene."
+        )
+    return sound, music
+
+
 def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     video_vae = _clean_text(payload.get("video_vae")) or "auto"
     if video_vae not in VIDEO_VAE_MODES:
@@ -499,6 +527,17 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         raise RequestError("請輸入影片敘述。")
     prompt_profile = _clean_text(payload.get("prompt_profile"))
     shortfilm_reference_continuity = prompt_profile == "shortfilm" and mode == "r2v"
+    base_prompt, embedded_soundscape, embedded_music = unpack_prompt(base_prompt)
+    warnings = [str(value) for value in (payload.get("h3_preparation_warnings") or [])]
+    user_directions = "\n".join([base_prompt, *[
+        _clean_text(item.get("description")) for item in (payload.get("references") or [])
+    ], *[_clean_text(payload.get(key)) for key in ("summary", "reference_style", "shortfilm_summary", "shortfilm_soundscape", "shortfilm_music", "overall_soundscape", "non_diegetic_music", "replacement_target")], *[
+        _clean_text(shot.get(key)) for shot in (payload.get("storyboards") or [])
+        for key in ("description", "camera", "sound", "motion_beats", "effects")
+    ], *[value for value in (payload.get("mg_animation") or {}).values() if isinstance(value, str)]])
+    alias_names = {_clean_text(item.get("alias")): "" for item in (payload.get("references") or []) if _clean_text(item.get("alias"))}
+    if language_warning(rewrite_aliases(user_directions, alias_names)) and not warnings:
+        warnings.append("部分畫面描述仍為中文；官方 H3 格式建議使用英文描述，對白與畫面文字會保留原文。")
 
     first_image = _clean_text(payload.get("first_image_asset_id")) or None
     last_image = _clean_text(payload.get("last_image_asset_id")) or None
@@ -573,8 +612,10 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         _clean_text(item.get("alias")) for item in references
         if item.get("type") in {"character", "creature"}
     )
-    base_prompt = format_dialogue(base_prompt, speakers=speakers)
-    base_prompt = _with_lora_triggers(base_prompt, custom_loras, "ref2va" if reference_mode else "fl2va")
+    speaker_ids: dict[str, str] = {}
+    base_prompt = _spoken_text(base_prompt, speakers, speaker_ids)
+    if mode != "mg_animation":
+        base_prompt = _with_lora_triggers(base_prompt, custom_loras, "ref2va" if reference_mode else "fl2va")
     storyboards = payload.get("storyboards") or []
     storyboard_duration = sum(min(15.0, max(0.5, _safe_float(shot.get("duration"), 2.0))) for shot in storyboards)
     if storyboard_duration > (length / FPS) + 0.05:
@@ -599,11 +640,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         if mode == "r2v" and first_image:
             picture_index = 1
             reference_images.append(first_image)
-            assignments.append(
-                "<Picture 1> 是上一段動畫的最後一幀，只作為新影片開頭的連續性參考："
-                "開場延續其中的人物位置、姿勢、構圖、鏡頭方向、場景、光線與動作趨勢，"
-                "再依照敘述自然發展；不要把它當成額外角色、額外場景或要求全片保持靜止。"
-            )
+            definitions.append("<Picture 1> is the first-frame composition anchor from the preceding video's final frame.")
+            assignments.append("The shot begins from <Picture 1>, preserving subject positions, pose, composition, camera direction, lighting, and ongoing momentum before continuing the action; do not add another subject or freeze the whole video.")
 
         def item_video_ids(item: dict[str, Any]) -> list[str]:
             values = [str(value) for value in (item.get("video_asset_ids") or []) if value]
@@ -612,8 +650,15 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 values.append(single)
             return values
 
+        def item_video_audio_flags(item: dict[str, Any]) -> list[bool]:
+            values = item_video_ids(item)
+            supplied = item.get("video_audio_flags")
+            if isinstance(supplied, list) and len(supplied) == len(values):
+                return [value is True for value in supplied]
+            return [bool(item.get("video_use_audio"))] * len(values)
+
         video_soundtrack_count = sum(
-            len(item_video_ids(item)) for item in references if bool(item.get("video_use_audio"))
+            sum(item_video_audio_flags(item)) for item in references
         )
         standalone_audio_index = video_soundtrack_count
         video_audio_index = 0
@@ -628,7 +673,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             item_type = _clean_text(item.get("type")) or "character"
             image_ids = [str(value) for value in (item.get("image_asset_ids") or []) if value]
             video_ids = item_video_ids(item)
-            video_use_audio = bool(item.get("video_use_audio"))
+            video_audio_flags = item_video_audio_flags(item)
             audio_id = _clean_text(item.get("audio_asset_id")) or None
             if not image_ids and not video_ids and not audio_id:
                 raise RequestError(f"參考素材「{alias}」至少需要圖片、影片或聲音其中一種。")
@@ -640,7 +685,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 picture_tags.append(f"<Picture {picture_index}>")
             video_tags: list[str] = []
             video_audio_tags: list[str] = []
-            for video_id in video_ids:
+            for video_id, video_use_audio in zip(video_ids, video_audio_flags):
                 video_index += 1
                 reference_videos.append(video_id)
                 reference_video_use_audio.append(video_use_audio)
@@ -656,13 +701,14 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 audio_tag = f"<Audio {standalone_audio_index}>"
 
             subject_tag = None
-            if item_type in REFERENCE_SUBJECT_TYPES:
+            if item_type in REFERENCE_SUBJECT_TYPES and not (mode == "popup_panel" and alias == "背景圖"):
                 subject_index += 1
                 subject_tag = f"<Subject {subject_index}>"
                 aliases[alias] = f"{subject_tag}（{alias}）"
-                visual_sources = picture_tags or video_tags
-                visual = "、".join(visual_sources) if visual_sources else "文字描述"
-                definitions.append(f"{subject_tag} 是「{alias}」，形象參考來自 {visual}。{description}".strip())
+                visual_sources = picture_tags + video_tags
+                visual = ", ".join(visual_sources) if visual_sources else "the textual description"
+                role = {"character": "character", "creature": "creature", "object": "object", "background": "scene and background", "style": "visual style", "motion": "action and pose", "effect": "visual effect"}[item_type]
+                definitions.append(f'{subject_tag} is the {role} named "{alias}", defined by {visual}. {description}'.strip())
                 if shortfilm_reference_continuity and item_type in {"character", "creature"}:
                     definitions[-1] += (
                         " Unless the story explicitly defines this alias as a group or distinct additional individuals, "
@@ -672,37 +718,45 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                         "Explicit story directions for twins, duplication, shadows, or reflections take precedence."
                     )
                 if picture_tags:
-                    assignments.append(f"{'、'.join(picture_tags)} 只用於保留 {subject_tag} 的身份、外觀與固定特徵。")
+                    assignments.append(f"{', '.join(picture_tags)} supply only {subject_tag}'s defined appearance and fixed visual attributes.")
                 for tag in video_tags:
                     if mode == "replace":
                         assignments.append(
-                            f"{tag} 是原始表演影片：讓 {subject_tag} 接手指定原角色的畫面位置、動作、姿勢、表演節奏與鏡頭關係；"
-                            "保留場景、光線、道具與未被指定替換的人物，但禁止保留或混入原角色的臉、髮型、服裝、身材與身份特徵。"
+                            f"{tag} is the source performance video: {subject_tag} replaces only the specified original character at their original positions, actions, poses, timing, and camera relationships. "
+                            "Preserve the scene, lighting, props, and all other people, without retaining or blending the original person's identity, face, hair, clothing, or body."
                         )
                     else:
-                        assignments.append(f"{tag} 只參考 {subject_tag} 的動作節奏、身體力學、姿態轉換與運鏡；除非文字明確要求，不要複製影片中的其他人物、服裝或背景。")
+                        assignments.append(f"{tag} supplies {subject_tag}'s timing, body mechanics, pose transitions, and camera rhythm; do not copy unrelated people, clothing, or backgrounds unless explicitly requested.")
                 if audio_tag:
                     voice_mode = _clean_text(item.get("voice_mode")) or "timbre"
                     if voice_mode == "reuse":
-                        assignments.append(f"{audio_tag} 是 {subject_tag} 要沿用的原始聲音內容與聲音表現。")
+                        assignments.append(f"{audio_tag} is reused for {subject_tag}'s original audio content and performance; preserve its spoken words and language without substituting new dialogue.")
                     else:
-                        assignments.append(f"{audio_tag} 只作為 {subject_tag} 的說話音色參考；生成新台詞時不要照抄原音訊文字。")
+                        assignments.append(f"{audio_tag} supplies only {subject_tag}'s voice timbre and delivery; generate the requested new dialogue without copying the source words.")
             else:
                 source_tags = picture_tags + video_tags
                 first_tag = source_tags[0] if source_tags else alias
                 aliases[alias] = f"{first_tag}（{alias}）"
-                role_name = {"background": "場景與背景", "style": "美術風格", "motion": "動作與運鏡", "effect": "特效時序與表現"}.get(item_type, "參考素材")
+                role_name = {"background": "scene and background", "style": "visual style", "motion": "motion and camera rhythm", "effect": "effect timing and appearance"}.get(item_type, "reference content")
                 if picture_tags:
-                    assignments.append(f"{'、'.join(picture_tags)} 是「{alias}」的{role_name}參考。{description}".strip())
+                    definitions.append(f'{", ".join(picture_tags)} define the {role_name} composition anchor named "{alias}". {description}'.strip())
                 for tag in video_tags:
                     if item_type == "effect":
-                        assignments.append(f"{tag} 是「{alias}」的特效時序、能量軌跡、衝擊回饋與鏡頭反應參考；保留主影片的角色、服裝與場景。{description}".strip())
+                        assignments.append(f'{tag} supplies "{alias}" effect timing, energy paths, and impact response while preserving the main subjects and scene. {description}'.strip())
                     else:
-                        assignments.append(f"{tag} 是「{alias}」的{role_name}參考；只採用動態、節奏與鏡頭資訊，不複製未被指定的內容。{description}".strip())
+                        assignments.append(f'{tag} supplies "{alias}" {role_name}; transfer only the specified temporal and camera information. {description}'.strip())
                 if audio_tag:
-                    assignments.append(f"{audio_tag} 是「{alias}」所對應的環境或效果聲參考。")
-            for tag, video_audio_tag in zip(video_tags, video_audio_tags):
-                assignments.append(f"{video_audio_tag} 是 {tag} 的同步聲音參考；讓動作、碰撞或特效聲與畫面時序一致。")
+                    assignments.append(f'{audio_tag} is the ambience or effect-sound reference for "{alias}".')
+            enabled_video_tags = [tag for tag, enabled in zip(video_tags, video_audio_flags) if enabled]
+            for tag, video_audio_tag in zip(enabled_video_tags, video_audio_tags):
+                definitions.append(f"{video_audio_tag} is the enabled synchronized audio track from {tag}.")
+                assignments.append(f"Reference {video_audio_tag} for synchronized action, impact, and effect sounds at the corresponding visual events.")
+            for tag in video_tags:
+                definitions.append(f"{tag} is {'the source video being edited' if mode == 'replace' else 'the temporal and camera-structure reference'} for {subject_tag or alias}.")
+            if audio_tag:
+                reuse = item.get("voice_mode") == "reuse"
+                vocal_id = f" ({speaker_ids[alias]})" if alias in speaker_ids else ""
+                definitions.append(f"{audio_tag} is {'the source audio to reuse' if reuse else 'the audio reference'} for {subject_tag or alias}{vocal_id}.")
             mapping.append({
                 "alias": alias,
                 "type": item_type,
@@ -711,6 +765,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 "video_tags": video_tags,
                 "video_audio_tags": video_audio_tags,
                 "audio_tag": audio_tag,
+                "voice_mode": "reuse" if item.get("voice_mode") == "reuse" else "timbre",
             })
 
         if replacement_source_images:
@@ -733,7 +788,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 "picture_tags": source_tags, "video_tags": [], "video_audio_tags": [], "audio_tag": None,
             })
 
-        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, aliases, speakers)
+        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, aliases, speakers, speaker_ids)
         guides.extend(storyboard_guides)
         for shot_index, image_id in enumerate(storyboard_images, start=1):
             picture_index += 1
@@ -744,7 +799,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 if marker in line:
                     shot_lines[line_index] = line.replace(marker, tag, 1)
                     break
-            assignments.append(f"{tag} 是第 {shot_index} 張分鏡構圖參考，只控制相對位置、鏡位與場景安排。")
+            definitions.append(f"{tag} is storyboard composition anchor {shot_index}, defining relative positions, viewpoint, and scene arrangement for its described shot.")
 
         if len(reference_images) > MAX_REFERENCE_IMAGES:
             raise RequestError(f"多模態模式最多可使用 {MAX_REFERENCE_IMAGES} 張圖片，目前為 {len(reference_images)} 張。")
@@ -756,212 +811,113 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             raise RequestError("多模態模式至少需要圖片、影片或聲音其中一種。")
 
         rewritten_prompt = _rewrite_aliases(base_prompt, aliases)
-        if prompt_profile == "shortfilm":
-            retention: list[str] = []
-            if first_image:
-                retention.append(
-                    "<Picture 1>: fully_preserved in the opening frame as the preceding shot's exact continuity anchor; "
-                    "its pose, composition, camera direction, lighting, and momentum lead naturally into the new action."
-                )
-            for item in mapping:
-                alias = item["alias"]
-                subject_tag = item.get("subject_tag")
-                picture_tags = item.get("picture_tags") or []
-                video_tags = item.get("video_tags") or []
-                audio_tag = item.get("audio_tag")
-                if item["type"] == "replacement_source":
-                    for tag in picture_tags:
-                        retention.append(f"{tag}: weak_reference only to identify the original person to replace in <Video 1>; do not transfer appearance to the output.")
-                elif subject_tag:
-                    if shortfilm_reference_continuity and item["type"] == "object":
-                        retention.append(
-                            f"{subject_tag}: fully_preserved whenever {alias} appears; keep its explicitly stated quantity, "
-                            "left/right pairing, appearance, positions, and state consistent across cuts until an explicit action changes them; "
-                            "a different view does not create an additional object or set."
-                        )
-                    else:
-                        retention.append(
-                            f"{subject_tag}: fully_preserved whenever {alias} appears; keep identity, face, body proportions, "
-                            "clothing, colors, and distinguishing features consistent across the shot."
-                        )
-                    if shortfilm_reference_continuity and item["type"] in {"character", "creature"}:
-                        retention[-1] += (
-                            " Retain the same physical individual across views and cuts; "
-                            "reference images and turnaround-sheet views supply appearance only, not extra people, bodies, panels, or labels. "
-                            "Do not duplicate this individual without explicit story direction; "
-                            "a story-defined group, distinct individuals, twins, duplication, shadows, or reflections remain allowed."
-                        )
-                    for tag in picture_tags:
-                        retention.append(
-                            f"{tag}: attribute_transfer to {subject_tag}; transfer appearance and fixed visual attributes only."
-                        )
-                else:
-                    for tag in picture_tags:
-                        retention.append(
-                            f"{tag}: fully_preserved as the visual reference for {alias}, including layout, palette, lighting, and spatial identity."
-                        )
-                for tag in video_tags:
-                    retention.append(
-                        f"{tag}: attribute_transfer for {alias}; transfer timing, motion mechanics, and camera rhythm without copying unrelated identities."
-                    )
-                if audio_tag:
-                    retention.append(
-                        f"{audio_tag}: reference for {alias}; use voice timbre and delivery characteristics without copying unrelated words."
-                    )
-            if not retention:
-                retention.append("N/A")
-            detail_parts = [rewritten_prompt]
-            if mode == "replace":
-                detail_parts.extend(assignments)
-            if shot_lines:
-                detail_parts.append("Storyboard guidance:\n" + "\n".join(shot_lines))
-            summary_prefix = "keyframe completion + reference generation" if first_image else "reference generation"
-            summary = _clean_text(payload.get("shortfilm_summary")) or "A coherent narrative short-film shot generated from the selected references."
-            soundscape = _clean_text(payload.get("shortfilm_soundscape")) or "Natural ambience and synchronized physical action sounds appropriate to the scene."
-            music = _clean_text(payload.get("shortfilm_music")) or "N/A"
-            sections = [
-                "subject_definitions:\n" + ("\n".join(definitions) if definitions else "N/A"),
-                f"summary:\n{summary_prefix}. {summary}",
-                "retention_analysis:\n" + "\n".join(retention),
-                "detailed_description:\n" + "\n\n".join(detail_parts),
-                "overall_soundscape:\n" + soundscape,
-                "non_diegetic_music:\n" + music,
-            ]
-            final_prompt = "\n\n".join(sections)
-        elif mode == "mg_animation":
+        if mode == "mg_animation":
             timeline = _mg_animation_description(payload, aliases, length / FPS)
-            retention = assignments + [
-                "Keep the background, visible reel window, and character as independent visual layers; do not merge, duplicate, or deform their identities.",
-                "Preserve every reel cell's width, height, pitch, center anchor, mask, and symbol identity. Animate only the visible reel-window presentation; never infer or alter mathematical reel-strip order or symbol frequency.",
-                "Keep titles, payout values, JP meters, and product-owned top or bottom UI readable and unchanged. Any glow or overflow effect must remain a separate restrained overlay.",
-            ]
-            detail_parts = [timeline]
-            if motion_direction:
-                detail_parts.append("Motion direction: " + motion_direction)
-            detail_parts.append("Additional user direction:\n" + rewritten_prompt)
-            if shot_lines:
-                detail_parts.append("Storyboard timeline:\n" + "\n".join(shot_lines))
-            sections = [
-                "subject_definitions:\n" + ("\n".join(definitions) if definitions else "N/A"),
-                "summary:\nA polished slot-game main-game performance in which the character, visible reel window, and background follow separate, readable animation responsibilities.",
-                "retention_analysis:\n" + "\n".join(retention),
-                "detailed_description:\n" + "\n\n".join(detail_parts),
-                "overall_soundscape:\nSynchronized reel-spin whirr, controlled deceleration, distinct stop clicks, and a restrained win chime after the symbols settle. No spoken dialogue unless explicitly requested.",
-                "non_diegetic_music:\nN/A unless explicitly requested in the user direction.",
-            ]
-            final_prompt = "\n\n".join(sections)
-        else:
-            sections = []
-            if definitions:
-                sections.append("subject_definitions:\n" + "\n".join(definitions))
-            if assignments:
-                sections.append("reference_assignments:\n" + "\n".join(assignments))
-            if motion_direction:
-                sections.append("motion_direction:\n" + motion_direction)
-            sections.append("detailed_description:\n" + rewritten_prompt)
-            if shot_lines:
-                sections.append("storyboard_timeline:\n" + "\n".join(shot_lines))
-            if mode == "replace":
-                sections.append(
-                    "replacement_rules:\n只生成 <Subject 1> 作為指定位置的新角色；原角色的身份與外觀必須完全消失，"
-                    "不得同時出現原角色與新角色，也不得把兩者的臉、頭髮、服裝或身體特徵混合。"
-                    "除指定角色外，盡量維持原影片的場景、構圖、鏡頭、道具與其他人物。"
-                    "如果指定原角色在某些畫面中沒有出現，保持那些畫面原樣，不得憑空加入 <Subject 1>。"
-                )
-                batch_segment = payload.get("replacement_batch_segment") or {}
-                if batch_segment:
-                    segment_index = max(1, _safe_int(batch_segment.get("index"), 1))
-                    segment_total = max(segment_index, _safe_int(batch_segment.get("total"), segment_index))
-                    source_start = max(0.0, _safe_float(batch_segment.get("source_start"), 0.0))
-                    source_end = max(source_start, _safe_float(batch_segment.get("source_end"), length / FPS))
-                    sections.append(
-                        "batch_continuity_rules:\n"
-                        f"This is replacement segment {segment_index} of {segment_total}, corresponding to source time "
-                        f"{source_start:.3f}s–{source_end:.3f}s. Preserve the source video's exact action timing, "
-                        "camera direction, spatial layout, lighting, props, and all non-target subjects. "
-                        "The opening and ending motion must continue naturally across adjacent segments without "
-                        "restarting the performance, adding a pause, changing identity, or resetting the pose. "
-                        "Any additional appearance picture attached to <Subject 1> from the preceding generated "
-                        "segment controls identity continuity only; it is not a keyframe and must not override <Video 1>."
-                    )
-            elif mode == "popup_panel":
-                sections.append(
-                    "popup_panel_rules:\n"
-                    "<Picture 1> 是背景圖，必須從第一幀到最後一幀逐像素保持固定；禁止平移、縮放、變形、閃爍、亮度漂移、景深變化、視差或新增物件。"
-                    "除 <Picture 1> 外，其餘已命名參考素材都屬於前景表演素材，可包含一個或多個面板、文字、分數、按鈕、標題、裝飾與特效；"
-                    "這些素材只能在前景或面板範圍內依照敘述產生動畫，不得改變、遮換或重新生成背景圖。"
-                    "鏡頭必須完全鎖定。彈窗面板消失後，最後畫面必須只剩與 <Picture 1> 完全一致的背景圖。"
-                )
+            rewritten_prompt = timeline + "\nAdditional user direction: " + re.sub(r"^\s*\[Shot 1\]\s*", "", rewritten_prompt)
+        try:
+            narrative, final_shot = combine_storyboards(rewritten_prompt, shot_lines, length / FPS)
+        except ValueError as error:
+            raise RequestError(str(error)) from error
+        retention: list[str] = []
+        if mode == "r2v" and first_image:
+            retention.append("<Picture 1>: fully_preserved in the opening frame as the preceding shot's exact continuity anchor; preserve its pose, composition, camera direction, lighting, and momentum.")
+        for item in mapping:
+            alias = item["alias"]
+            subject_tag = item.get("subject_tag")
+            if item["type"] == "replacement_source":
+                for tag in item["picture_tags"]:
+                    definitions.append(f"{tag} identifies the original person to replace in <Video 1>; it is not a target appearance or keyframe.")
+                    retention.append(f"{tag}: weak_reference only to identify the original person to replace in <Video 1>; do not transfer appearance to the output.")
+            elif subject_tag:
+                if item["type"] == "object" and shortfilm_reference_continuity:
+                    preservation = ("keep its explicitly stated quantity, left/right pairing, appearance, positions, and state consistent across cuts until an explicit action changes them; a different view does not create an additional object or set.")
+                elif item["type"] in {"character", "creature"}:
+                    preservation = "keep identity, face, body proportions, clothing, colors, and distinguishing features consistent."
+                    if shortfilm_reference_continuity:
+                        preservation += " Retain the same physical individual across views and cuts; reference images and turnaround-sheet views supply appearance only, not extra people, bodies, panels, or labels. Explicit story directions for twins, duplication, shadows, or reflections take precedence."
+                elif item["type"] == "object":
+                    preservation = "preserve appearance, dimensions, material, positions, orientation, and state unless the described action changes them."
+                else:
+                    preservation = "preserve the defined visual role, features, and reference characteristics where the action uses them."
+                retention.append(f"{subject_tag}: fully_preserved whenever {alias} appears; " + preservation)
             else:
-                sections.append("retention_rules:\n嚴格保持每個已命名角色的身份、臉部、服裝與聲音歸屬；不要把背景、風格或其他角色的特徵互相混合；動作參考只控制動態與時序，不得覆蓋角色身份；保持肢體結構、重心轉移、接觸和反作用力連續。")
-            final_prompt = "\n\n".join(sections)
+                for tag in item["picture_tags"]:
+                    retention.append(f"{tag}: fully_preserved as the composition anchor for {alias}, including layout, palette, lighting, and spatial identity.")
+            for tag in item["video_tags"]:
+                marker = "partially_preserved" if mode == "replace" else "attribute_transfer"
+                retention.append(f"{tag}: {marker} for {alias}; {'preserve source actions, timing, camera, environment, and all non-target subjects while replacing only the target identity' if mode == 'replace' else 'transfer timing, motion mechanics, and camera rhythm without copying unrelated identities'}.")
+            for tag in item["video_audio_tags"]:
+                retention.append(f"{tag}: reference for synchronized physical action and effect sounds from the enabled source-video soundtrack.")
+            if item.get("audio_tag"):
+                tag = item["audio_tag"]
+                if item.get("voice_mode") == "reuse":
+                    retention.append(f"{tag}: partially_copy; reuse the original audio content and performance at the matching target phase, preserving spoken words and language alongside the target scene's other sounds.")
+                else:
+                    retention.append(f"{tag}: reference for {alias}; use timbre, delivery, or sound texture without copying unrelated words.")
+        storyboard_tags = [f"<Picture {picture_index - len(storyboard_images) + index}>" for index in range(1, len(storyboard_images) + 1)]
+        retention.extend(f"{tag}: weak_reference as the described shot's composition and viewpoint planning anchor." for tag in storyboard_tags)
+        detail_parts = [narrative]
+        if assignments:
+            detail_parts.append("Reference behavior in the corresponding described shots: " + " ".join(assignments))
+        if motion_direction and prompt_profile != "shortfilm" and mode != "mg_animation":
+            detail_parts.append(motion_direction)
+        if mode == "replace":
+            detail_parts.append("Replace only the identified original person with <Subject 1>; never show both identities or blend their faces, hair, clothing, or bodies. Preserve other people and do not add <Subject 1> in source frames where the target person is absent.")
+            batch_segment = payload.get("replacement_batch_segment") or {}
+            if batch_segment:
+                segment_index = max(1, _safe_int(batch_segment.get("index"), 1))
+                segment_total = max(segment_index, _safe_int(batch_segment.get("total"), segment_index))
+                source_start = max(0.0, _safe_float(batch_segment.get("source_start"), 0.0))
+                source_end = max(source_start, _safe_float(batch_segment.get("source_end"), length / FPS))
+                detail_parts.append(f"This is replacement segment {segment_index} of {segment_total}, corresponding to source time {source_start:.3f}s–{source_end:.3f}s. Preserve exact source timing, camera, spatial layout, lighting, and non-target subjects across adjacent segments without restarting or resetting pose. Additional appearance pictures from the preceding generated segment control identity only; they are not a keyframe and must not override <Video 1>.")
+        elif mode == "popup_panel":
+            detail_parts.append("Keep <Picture 1> fixed from the opening to the ending frame: prohibit camera or background movement, pan, zoom, deformation, flicker, brightness drift, depth-of-field changes, parallax, and new background objects. Animate only named foreground panels, text, scores, buttons, decorations, and effects. After the panel exits, end with only the unchanged <Picture 1> background.")
+        elif mode == "mg_animation":
+            detail_parts.append("Keep the background, visible reel window, and character as independent layers. Preserve reel cell size, pitch, center anchors, masks, and symbol identities; never infer or alter mathematical reel-strip order or symbol frequency. Preserve titles, payout values, JP meters, and surrounding UI.")
+        style = _clean_text(payload.get("reference_style")) or "The target video follows the visual style, composition, and lighting established by its reference definitions and user direction."
+        detailed = style + "\n" + _with_lora_triggers("\n\n".join(detail_parts), custom_loras, "ref2va")
+        task_types = []
+        if (mode == "r2v" and first_image) or storyboard_guides:
+            task_types.append("keyframe completion")
+        if mode == "replace":
+            task_types.append("video editing")
+        task_types.append("reference generation")
+        if any(item.get("audio_tag") and item.get("voice_mode") == "reuse" for item in mapping):
+            task_types.append("audio reuse")
+        if any(item.get("video_audio_tags") or (item.get("audio_tag") and item.get("voice_mode") != "reuse") for item in mapping):
+            task_types.append("audio reference")
+        summary = _clean_text(payload.get("shortfilm_summary")) or _clean_text(payload.get("summary")) or "Generate the described audiovisual timeline using the defined references at their stated roles."
+        if mode == "replace":
+            summary = "The target video is an edited version of <Video 1>. " + summary
+        soundscape, music = _sound_sections(payload, base_prompt, embedded_soundscape, embedded_music, mode)
+        final_prompt = "\n\n".join([
+            "subject_definitions:\n" + ("\n".join(definitions) or "N/A"),
+            "summary:\n[" + " + ".join(task_types) + "] " + summary,
+            "retention_analysis:\n" + ("\n".join(retention) or "N/A"),
+            "detailed_description:\n" + detailed,
+            "overall_soundscape:\n" + soundscape,
+            "non_diegetic_music:\n" + music,
+        ])
+        official_mode = "Ref2VA"
     else:
-        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, {}, speakers)
+        shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, {}, speakers, speaker_ids)
         guides.extend(storyboard_guides)
         if storyboard_images:
             raise RequestError("中間分鏡圖片需要使用多模態參考模式；此模式仍可使用純文字分鏡。")
-        if prompt_profile == "shortfilm":
-            soundscape = _clean_text(payload.get("shortfilm_soundscape")) or "Natural ambience and synchronized physical action sounds appropriate to the scene."
-            music = _clean_text(payload.get("shortfilm_music")) or "N/A"
-            final_prompt = "\n\n".join([
-                "integrated_multimodal_description: " + base_prompt,
-                "overall_soundscape: " + soundscape,
-                "non_diegetic_music: " + music,
-            ])
-            return CompiledRequest(
-                mode=mode,
-                prompt=final_prompt,
-                width=width,
-                height=height,
-                length=length,
-                custom_loras=custom_loras,
-                memory_optimization=memory_optimization,
-                video_vae=video_vae,
-                requested_duration=requested_duration,
-                actual_duration=length / FPS,
-                seed=seed,
-                steps=steps,
-                scheduler=scheduler,
-                ref_image_size=ref_image_size,
-                quality_mode=quality_mode,
-                sampler_name=sampler_name,
-                turbo_profile=turbo_profile,
-                turbo_lora=turbo_lora,
-                turbo_lora_strength=turbo_lora_strength,
-                shift_video=shift_video,
-                shift_audio=shift_audio,
-                first_image=first_image,
-                last_image=last_image,
-                reference_images=reference_images,
-                reference_videos=reference_videos,
-                reference_video_use_audio=reference_video_use_audio,
-                reference_audios=reference_audios,
-                guides=guides,
-                continuation_source_job=continuation_source_job,
-                continuation_source_asset=continuation_source_asset,
-                continuation_merge=continuation_merge,
-                continuation_audio=continuation_audio,
-                mapping=mapping,
-            )
-        intro: list[str] = []
-        if mode == "fl2va" and first_image:
-            intro.append("<Picture 1> 是影片的精確起始畫面。")
-        if mode == "fl2va" and last_image:
-            tag_index = 2 if first_image else 1
-            intro.append(f"<Picture {tag_index}> 是影片的精確結束畫面。")
+        try:
+            narrative, final_shot = combine_storyboards(base_prompt, shot_lines, length / FPS)
+        except ValueError as error:
+            raise RequestError(str(error)) from error
         if mode == "extend":
-            intro.append("<Picture 1> 是上一段影片的最後一幀，也是本段影片的精確起始畫面。")
-            intro.append("從這個姿勢與時間點立即繼續表演；延續角色位置、肢體動量、視線、攝影機方向、場景光線與環境狀態，不要重新起步、定格或重設構圖。")
-        if mode == "symbol_loop":
-            intro.append("<Picture 1> 同時是影片的精確起始畫面與精確結束畫面。")
-            intro.append("畫布、中心錨點、圖騰比例、完整輪廓與四周留白必須固定；攝影機鎖定，不得縮放、平移、旋轉、裁切或重新構圖。")
-            intro.append("動畫只完成一個循環，結尾平順返回起始姿勢、材質、光線與效果狀態；禁止加入重複的停頓端點。")
-        final_prompt = "\n".join(intro)
-        if motion_direction:
-            final_prompt += ("\n\n" if final_prompt else "") + "motion_direction:\n" + motion_direction
-        final_prompt += ("\n\n" if final_prompt else "") + base_prompt
-        if shot_lines:
-            final_prompt += "\n\nstoryboard_timeline:\n" + "\n".join(shot_lines)
+            narrative += "\nBegin immediately from the preceding video's final-frame pose, preserving positions, body momentum, gaze, camera direction, lighting, and environmental state; continue without restarting or holding still."
+        elif mode == "symbol_loop":
+            if final_shot != 1:
+                raise RequestError("圖騰循環需要單一連續鏡頭，請移除切鏡。")
+            narrative += "\nUse one continuous action cycle. Lock canvas, center anchor, symbol scale, silhouette, margins, camera, crop, background, lighting, and material appearance. Permit only the named foreground motion; progressively return pose and effects to the opening state at the final frame without an extra pause at the seam."
+        if motion_direction and prompt_profile != "shortfilm":
+            narrative += "\n" + motion_direction
+        soundscape, music = _sound_sections(payload, base_prompt, embedded_soundscape, embedded_music, mode)
+        final_prompt, official_mode = format_base_prompt(narrative, soundscape, music, first=bool(first_image), last=bool(last_image), duration=length / FPS, final_shot=final_shot)
 
     return CompiledRequest(
         mode=mode,
@@ -997,6 +953,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         continuation_merge=continuation_merge,
         continuation_audio=continuation_audio,
         mapping=mapping,
+        warnings=list(dict.fromkeys(warnings)),
+        official_mode=official_mode,
     )
 
 

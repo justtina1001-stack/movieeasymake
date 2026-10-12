@@ -80,6 +80,7 @@ const expandedJobIds = new Set();
 let toastTimer;
 let engineStartingAt = 0;
 let keyframePrepareVersion = 0;
+let generationPreflight = null;
 let connectionSettings = null;
 let sharedGatewayStatus = null;
 let sharedQueueData = null;
@@ -112,6 +113,8 @@ if (workspaceLink.get("workspace") === "shortfilm") {
 }
 let shortFilmSaveTimer;
 let shortFilmBatchRunning = false;
+let shortFilmBatch = null;
+let shortFilmBatchLoading = false;
 let shortFilmStatusRefreshing = false;
 let shortFilmJobPage = 1;
 let shortFilmJobTotalPages = 1;
@@ -1015,7 +1018,14 @@ function renderBuiltinLoraHelp() {
 function bindLoraPanels() {
   for (const [scope, id] of [["quick", "quickLoraPanel"], ["sf", "sfLoraPanel"]]) {
     const panel = $(`#${id}`);
-    const save = () => scope === "sf" ? scheduleShortFilmSave() : persistForm();
+    const save = () => {
+      if (scope === "sf") {
+        const project = activeShortFilmProject();
+        if (project?.scenes) invalidateShortFilmRenders(project);
+        scheduleShortFilmSave();
+      }
+      else persistForm();
+    };
     panel.addEventListener("change", event => {
       if (event.target.hasAttribute("data-lora-picker")) {
         loraPickers[scope] = event.target.value;
@@ -1102,6 +1112,7 @@ function currentSettings() {
     physics_style: $("#physicsStyle").value,
     camera_response: $("#cameraResponse").value,
     prompt: $("#prompt").value.trim(),
+    translate_directions: $("#translateDirections").checked !== false,
     job_name: $("#jobName").value.trim(),
   };
 }
@@ -1136,6 +1147,7 @@ function restoreForm() {
     if (value !== undefined && $(`#${id}`)) $(`#${id}`).value = value;
   }
   const hasRetime = Number.isFinite(Number(form.retime_duration)) && Number(form.retime_duration) > 0;
+  $("#translateDirections").checked = form.translate_directions !== false;
   $("#retimeEnabled").checked = hasRetime;
   if (hasRetime) $("#retimeDuration").value = form.retime_duration;
   $("#retimeDuration").disabled = !hasRetime;
@@ -1797,19 +1809,58 @@ function validateReplacementSourceCompilation(payload, compiled) {
   }
 }
 
+function generationPreflightSignature(payload) {
+  const comparable = { ...payload };
+  delete comparable.seed;
+  return JSON.stringify(comparable);
+}
+
+function showGenerationPreflight(compiled) {
+  const modes = { T2VA: "文字生成", I2VA: "首圖帶動", FL2VA: "首尾圖片銜接", L2VA: "尾圖收束", Ref2VA: "多素材參考" };
+  const duration = Number(compiled.actual_duration);
+  const translation = compiled.prepared_payload?.h3_translation?.status;
+  const languageStatus = { translated: "已整理成英文，原文保留", not_needed: "已符合語言設定", unavailable: "保留原敘述，請查看提醒", disabled: "使用原敘述" }[translation];
+  $("#compileSummary").innerHTML = [
+    ["生成方式", modes[compiled.official_mode] || modeLabels[state.mode] || "依目前設定"],
+    ["實際片長", Number.isFinite(duration) && duration > 0 ? `${duration.toFixed(2)} 秒` : "依目前設定"],
+    ["參考素材", `${Number(compiled.asset_count || 0)} 個`],
+    ...(languageStatus ? [["敘述整理", languageStatus]] : []),
+  ].map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  const labels = { character: "角色", creature: "動物／生物", object: "物件", background: "背景", style: "風格", motion: "動作", effect: "特效", replacement_source: "原角色" };
+  const mapping = Array.isArray(compiled.mapping) ? compiled.mapping : [];
+  $("#compileMapping").innerHTML = mapping.length ? mapping.map(item => {
+    const tags = [item.subject_tag, ...(item.picture_tags || []), ...(item.video_tags || []), ...(item.video_audio_tags || []), item.audio_tag].filter(Boolean);
+    return `<p><strong>${escapeHtml(item.alias || labels[item.type] || "參考素材")}</strong> · ${escapeHtml(labels[item.type] || "參考")}<br><small>${escapeHtml(tags.join("、") || "文字設定")}</small></p>`;
+  }).join("") : "這次依文字與首尾圖片設定生成。";
+  const warnings = Array.isArray(compiled.warnings) ? compiled.warnings.filter(value => typeof value === "string" && value.trim()) : [];
+  $("#compileWarnings").innerHTML = warnings.length ? `<strong>生成提醒</strong><ul>${warnings.map(value => `<li>${escapeHtml(value)}</li>`).join("")}</ul>` : "";
+  $("#compileWarnings").classList.toggle("hidden", !warnings.length);
+  $("#compileSummaryPanel").classList.remove("hidden");
+  $("#compiledPrompt").textContent = compiled.prompt || "";
+  $("#compiledPanel").classList.remove("hidden");
+}
+
+async function prepareGeneration(payload, reuse = true) {
+  const signature = generationPreflightSignature(payload);
+  let compiled;
+  if (reuse && generationPreflight?.signature === signature) compiled = generationPreflight.compiled;
+  else {
+    compiled = await api("/api/compile", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    validateReplacementSourceCompilation(payload, compiled);
+    generationPreflight = { signature, compiled };
+  }
+  showGenerationPreflight(compiled);
+  return { compiled, payload: { ...(compiled.prepared_payload || payload), seed: payload.seed } };
+}
+
 async function compilePreview() {
   const button = $("#compileButton");
   setButtonBusy(button, true);
   try {
     const payload = collectPayload();
-    const result = await api("/api/compile", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    validateReplacementSourceCompilation(payload, result);
-    $("#compiledPrompt").textContent = result.prompt;
-    $("#compiledPanel").classList.remove("hidden");
+    const { compiled: result } = await prepareGeneration(payload);
     toast(`提示詞已編譯，使用 ${result.asset_count} 個素材`);
     return result;
   } catch (error) {
@@ -1838,13 +1889,7 @@ async function renderVideo() {
       $("#seed").value = randomVideoSeed($("#seed").value);
       persistForm();
     }
-    const payload = collectPayload();
-    if (payload.mode === "replace" && payload.replacement_source_image_asset_ids.length) {
-      const compiled = await api("/api/compile", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-      });
-      validateReplacementSourceCompilation(payload, compiled);
-    }
+    const { payload } = await prepareGeneration(collectPayload());
     const job = await api("/api/render", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2098,9 +2143,28 @@ async function showJobPrompt(jobId) {
   }
 }
 
+function originalGenerationRequest(request) {
+  const restored = structuredClone(request);
+  const fields = request.h3_translation?.source_texts;
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return restored;
+  const allowed = /^(?:prompt|shortfilm_summary|shortfilm_soundscape|shortfilm_music|soundscape|music|references\.\d+\.description|storyboards\.\d+\.(?:description|camera|sound|motion_beats|effects)|mg_animation\.(?:character_position_detail|character_motion|reel_motion|symbol_post_stop_motion|background_motion|camera_motion_detail))$/;
+  for (const [path, value] of Object.entries(fields)) {
+    if (!allowed.test(path) || typeof value !== "string") continue;
+    const keys = path.split(".");
+    let target = restored;
+    for (const key of keys.slice(0, -1)) {
+      if (!target || typeof target !== "object" || !Object.prototype.hasOwnProperty.call(target, key)) { target = null; break; }
+      target = target[key];
+    }
+    const key = keys.at(-1);
+    if (target && typeof target === "object" && Object.prototype.hasOwnProperty.call(target, key) && typeof target[key] === "string") target[key] = value;
+  }
+  return restored;
+}
+
 async function applyJobRecipe(jobId) {
   const recipe = await loadJobRecipe(jobId);
-  const raw = recipe.request || {};
+  const raw = originalGenerationRequest(recipe.request || {});
   const assets = recipe.assets || {};
   const mode = raw.mode || "t2v";
   keyframePrepareVersion++;
@@ -2127,6 +2191,7 @@ async function applyJobRecipe(jobId) {
   $("#retimeDuration").disabled = !hasRetime;
   $("#exportFrames").checked = raw.export_frames === true;
   $("#memoryOptimization").checked = raw.memory_optimization === true;
+  $("#translateDirections").checked = raw.translate_directions !== false;
   $("#jobName").value = recipe.job?.name || raw.job_name || "";
   state.modePrompts ||= {};
   state.modePrompts[mode] = raw.prompt || "";
@@ -2660,6 +2725,7 @@ async function loadShortFilmProjects(force = false) {
   if (!shortFilmProjects.some(project => project.id === activeShortFilmId)) activeShortFilmId = shortFilmProjects[0]?.id || "";
   localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
   renderShortFilmWorkspace();
+  await loadShortFilmBatchStatus();
 }
 
 async function createShortFilmProject() {
@@ -2709,6 +2775,40 @@ function scheduleShortFilmSave() {
 
 function shortFilmFlatten(project) {
   return (project?.scenes || []).flatMap(scene => (scene.shots || []).map(shot => ({ scene, shot })));
+}
+
+function shortFilmAssetShotIds(project, assetId) {
+  return shortFilmFlatten(project).filter(({ shot }) => shortFilmShotAssetSelection(project, shot).selectedIds.has(assetId)).map(({ shot }) => shot.id);
+}
+
+function invalidateShortFilmRenders(project, shotIds = null) {
+  if (!project) return;
+  const requested = shotIds === null ? null : new Set(shotIds);
+  let connected = false;
+  for (const { shot } of shortFilmFlatten(project)) {
+    const affected = requested === null || requested.has(shot.id) || (connected && shot.continue_previous);
+    connected = affected;
+    if (!affected) continue;
+    shot.job_id = null;
+    shot.status = "draft";
+    shot.continuation_asset_id = null;
+    shot.continuation_job_id = null;
+    if (typeof document !== "undefined") {
+      const badge = $(`[data-sf-shot-id="${shot.id}"] .shortfilm-shot-status`);
+      if (badge) badge.outerHTML = queueJobBadgeHtml({ id: null, status: "draft" }, "shortfilm-shot-status");
+    }
+  }
+}
+
+function updateShortFilmGenerationField(project, target, field, value, scope = {}) {
+  if (target[field] === value) return;
+  const priorAssetShots = scope.assetId ? shortFilmAssetShotIds(project, scope.assetId) : [];
+  target[field] = value;
+  if (["title", "synopsis", "target_duration"].includes(field)) return;
+  if (scope.shotId) invalidateShortFilmRenders(project, [scope.shotId]);
+  else if (scope.sceneId) invalidateShortFilmRenders(project, target.shots.map(shot => shot.id));
+  else if (scope.assetId && field !== "type") invalidateShortFilmRenders(project, [...priorAssetShots, ...shortFilmAssetShotIds(project, scope.assetId)]);
+  else invalidateShortFilmRenders(project);
 }
 
 function shortFilmSegmentDraft(project) {
@@ -3251,59 +3351,80 @@ async function waitForShortFilmJob(jobId) {
   return null;
 }
 
-async function runShortFilmBatch() {
+function renderShortFilmBatch(batch = shortFilmBatch) {
+  shortFilmBatch = batch;
+  shortFilmBatchRunning = Boolean(batch && ["queued", "running"].includes(batch.status));
+  setShortFilmBatchEditing(shortFilmBatchRunning);
+  const resumable = Boolean(batch && ["failed", "cancelled", "interrupted"].includes(batch.status));
+  $("#runShortfilmBatch").classList.toggle("hidden", shortFilmBatchRunning);
+  $("#runShortfilmBatch span").textContent = resumable ? "以目前設定開始新的流程" : "依序生成未完成鏡頭";
+  $("#resumeShortfilmBatch").classList.toggle("hidden", !resumable);
+  $("#stopShortfilmBatch").classList.toggle("hidden", !shortFilmBatchRunning);
+  if (shortFilmBatchRunning) {
+    const count = (batch.completed_shot_ids || []).length;
+    $("#shortfilmBatchNote").textContent = `已完成 ${count}/${(batch.shot_ids || []).length} 鏡頭${batch.current_shot_title ? ` · 目前：${batch.current_shot_title}` : ""}。關閉頁面後仍會由 Studio 主機接續製作。`;
+  } else if (batch?.status === "completed") $("#shortfilmBatchNote").textContent = "未完成鏡頭已依序製作完成，可在短片作品列表預覽。";
+  else if (batch) $("#shortfilmBatchNote").textContent = batch.error || "流程已暫停。接續會使用原設定；修改內容後請開始新的流程。";
+  else $("#shortfilmBatchNote").textContent = "連戲鏡頭會等待上一鏡完成並擷取尾幀。關閉頁面後仍會依序製作；Studio 主機需保持執行。";
+}
+
+async function loadShortFilmBatchStatus() {
+  const project = activeShortFilmProject();
+  if (!project || shortFilmBatchLoading) return;
+  const projectId = project.id;
+  shortFilmBatchLoading = true;
+  try {
+    const response = await api(`/api/shortfilm-batches?project_id=${encodeURIComponent(projectId)}`);
+    if (activeShortFilmProject()?.id !== projectId) return;
+    const batches = Array.isArray(response) ? response : response.items || [];
+    const batch = batches.find(item => ["queued", "running"].includes(item.status)) || batches[0] || null;
+    const wasRunning = shortFilmBatchRunning;
+    const nowRunning = Boolean(batch && ["queued", "running"].includes(batch.status));
+    if (nowRunning) { shortFilmBatchRunning = true; setShortFilmBatchEditing(true); }
+    if (nowRunning || wasRunning) {
+      const current = await api(`/api/shortfilms/${projectId}`);
+      if (activeShortFilmProject()?.id !== projectId) return;
+      const index = shortFilmProjects.findIndex(item => item.id === projectId);
+      if (index >= 0) shortFilmProjects[index] = current;
+      renderShortFilmScenes(); renderShortFilmSummary();
+    }
+    renderShortFilmBatch(batch);
+  } catch (error) {
+    if (shortFilmBatchRunning) $("#shortfilmBatchNote").textContent = `正在重新連接製作進度：${error.message}。已提交的流程仍由 Studio 主機執行。`;
+  } finally { shortFilmBatchLoading = false; }
+}
+
+async function runShortFilmBatch(resume = false) {
   if (shortFilmBatchRunning) return;
   const project = activeShortFilmProject();
   if (!project || !shortFilmFlatten(project).length) return toast("請先建立至少一個鏡頭。", true);
-  const blockers = shortFilmBatchBlockers(project);
-  if (blockers.length) {
-    renderShortFilmSummary(blockers);
-    return toast(`尚未送出：${blockers[0]}`, true);
+  if (!resume) {
+    const blockers = shortFilmBatchBlockers(project);
+    if (blockers.length) { renderShortFilmSummary(blockers); return toast(`尚未送出：${blockers[0]}`, true); }
   }
   shortFilmBatchRunning = true;
   setShortFilmBatchEditing(true);
-  let finishNote = "批次已停止。可再次按依序生成接續；目前已送出的鏡頭不會被取消。";
-  $("#runShortfilmBatch").classList.add("hidden");
-  $("#stopShortfilmBatch").classList.remove("hidden");
   try {
-    await refreshShortFilmShotStatuses(true);
-    const shotIds = shortFilmFlatten(activeShortFilmProject()).map(item => item.shot.id);
-    for (const shotId of shotIds) {
-      if (!shortFilmBatchRunning) break;
-      // Compilation replaces the project object and invalidates downstream renders.
-      // Always resolve the current shot instead of holding a stale snapshot.
-      const { shot } = findShortFilmShot(shotId);
-      if (shot.status === "completed") continue;
-      let jobId = shot.job_id;
-      if (jobId && ["queued", "preparing", "running"].includes(shot.status)) {
-        $("#shortfilmBatchNote").textContent = `等待既有鏡頭工作：${shot.title}`;
-      } else {
-        $("#shortfilmBatchNote").textContent = `正在編譯並送出：${shot.title}`;
-        const job = await compileShortFilmShot(shot.id, true);
-        jobId = job.id;
-      }
-      const completed = await waitForShortFilmJob(jobId);
-      if (!completed) break;
-      const current = findShortFilmShot(shot.id);
-      if (current) current.shot.status = "completed";
-      await saveShortFilmProject();
-      renderShortFilmScenes(); renderShortFilmSummary();
-    }
-    if (shortFilmBatchRunning) {
-      finishNote = "短片的未完成鏡頭已依序生成完畢，可在短片作品列表預覽各段影片。";
-      toast(finishNote);
-    }
+    await saveShortFilmProject();
+    const url = resume && shortFilmBatch ? `/api/shortfilm-batches/${shortFilmBatch.id}/resume` : `/api/shortfilms/${project.id}/batch`;
+    const batch = await api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    renderShortFilmBatch(batch);
+    toast(resume ? "已使用原設定接續依序製作。" : "已開始依序製作，關閉頁面後仍會繼續。" );
   } catch (error) {
-    finishNote = `批次已暫停：${error.message} 修正後可再次按依序生成接續。`;
-    toast(error.message, true);
-  } finally {
     shortFilmBatchRunning = false;
     setShortFilmBatchEditing(false);
-    $("#runShortfilmBatch").classList.remove("hidden");
-    $("#stopShortfilmBatch").classList.add("hidden");
-    $("#shortfilmBatchNote").textContent = finishNote;
-    refreshShortFilmShotStatuses();
+    renderShortFilmBatch(shortFilmBatch);
+    toast(error.message, true);
   }
+}
+
+async function stopShortFilmBatch() {
+  if (!shortFilmBatch?.id || !shortFilmBatchRunning) return;
+  try {
+    const batch = await api(`/api/shortfilm-batches/${shortFilmBatch.id}/cancel`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    renderShortFilmBatch(batch);
+    toast("已停止提交後續鏡頭；目前已送出的工作仍會完成。" );
+  } catch (error) { toast(error.message, true); }
 }
 
 function bindEvents() {
@@ -3339,6 +3460,8 @@ function bindEvents() {
     lastShortFilmJobsSignature = "";
     localStorage.setItem("h3studio-shortfilm-active-v1", activeShortFilmId);
     renderShortFilmWorkspace();
+    renderShortFilmBatch(null);
+    loadShortFilmBatchStatus();
   });
   $("#refreshShortfilmJobs").addEventListener("click", () => loadShortFilmJobs(true).catch(error => toast(error.message, true)));
   let shortFilmSearchTimer;
@@ -3435,7 +3558,7 @@ function bindEvents() {
     $(`#${id}`).addEventListener("input", event => {
       const project = activeShortFilmProject();
       if (!project) return;
-      project[field] = ["target_duration", "megapixels"].includes(field) ? Number(event.target.value) : event.target.value;
+      updateShortFilmGenerationField(project, project, field, ["target_duration", "megapixels"].includes(field) ? Number(event.target.value) : event.target.value);
       if (field === "title") {
         const option = $(`#shortfilmProjectSelect option[value='${project.id}']`);
         if (option) option.textContent = project.title || "未命名短片";
@@ -3453,7 +3576,7 @@ function bindEvents() {
   $("#sfMemoryOptimization").addEventListener("change", event => {
     const project = activeShortFilmProject();
     if (!project) return;
-    project.memory_optimization = event.target.checked;
+    updateShortFilmGenerationField(project, project, "memory_optimization", event.target.checked);
     syncShortFilmAcceleration();
     scheduleShortFilmSave();
   });
@@ -3472,7 +3595,7 @@ function bindEvents() {
     if (!card || !field) return;
     const asset = activeShortFilmProject()?.assets.find(item => item.id === card.dataset.sfAssetId);
     if (!asset) return;
-    asset[field] = event.target.value;
+    updateShortFilmGenerationField(activeShortFilmProject(), asset, field, event.target.value, { assetId: asset.id });
     scheduleShortFilmSave(); renderShortFilmSummary();
   });
   $("#shortfilmAssetList").addEventListener("change", event => {
@@ -3494,6 +3617,7 @@ function bindEvents() {
     event.preventDefault(); zone.classList.remove("drag-active");
     const asset = activeShortFilmProject()?.assets.find(item => item.id === card.dataset.sfAssetId);
     if (!asset) return;
+    const before = JSON.stringify(asset);
     try {
       if (zone.dataset.sfDrop === "images") {
         const files = [...event.dataTransfer.files].filter(file => acceptsReferenceFile(file, "images")).slice(0, Math.max(0, 9 - asset.image_asset_ids.length));
@@ -3502,6 +3626,7 @@ function bindEvents() {
         const file = [...event.dataTransfer.files].find(value => acceptsReferenceFile(value, "audio"));
         if (file) asset.audio_asset_id = (await uploadFile(file, "shortfilm-reference-audio")).id;
       }
+      if (JSON.stringify(asset) !== before) invalidateShortFilmRenders(activeShortFilmProject(), shortFilmAssetShotIds(activeShortFilmProject(), asset.id));
       renderShortFilmAssets(); scheduleShortFilmSave();
     } catch (error) { toast(error.message, true); }
   });
@@ -3511,6 +3636,8 @@ function bindEvents() {
     const project = activeShortFilmProject();
     const asset = project?.assets.find(item => item.id === card.dataset.sfAssetId);
     if (!project || !asset) return;
+    const before = JSON.stringify(asset);
+    const affectedShotIds = shortFilmAssetShotIds(project, asset.id);
     try {
       if (event.target.closest("[data-sf-delete-asset]")) {
         if (!confirm(`刪除素材「${asset.alias}」？分鏡中的選取也會一起移除。`)) return;
@@ -3530,6 +3657,7 @@ function bindEvents() {
         if (!removeImage) return;
         asset.image_asset_ids.splice(Number(removeImage.dataset.sfRemoveImage), 1);
       }
+      if (JSON.stringify(asset) !== before || !project.assets.includes(asset)) invalidateShortFilmRenders(project, ["character", "creature"].includes(asset.type) && !project.assets.includes(asset) ? null : affectedShotIds);
       renderShortFilmAssets(); renderShortFilmScenes(); renderShortFilmSummary(); scheduleShortFilmSave();
     } catch (error) { toast(error.message, true); }
   });
@@ -3546,7 +3674,7 @@ function bindEvents() {
     const scene = project?.scenes.find(item => item.id === sceneCard?.dataset.sfSceneId);
     if (!scene) return;
     if (event.target.dataset.sfSceneField) {
-      scene[event.target.dataset.sfSceneField] = event.target.value;
+      updateShortFilmGenerationField(project, scene, event.target.dataset.sfSceneField, event.target.value, { sceneId: scene.id });
       for (const shot of scene.shots) {
         const card = $(`[data-sf-shot-id='${shot.id}']`, sceneCard);
         updateShortFilmShotAssetState(card, project, shot);
@@ -3556,9 +3684,10 @@ function bindEvents() {
       const shot = scene.shots.find(item => item.id === shotCard.dataset.sfShotId);
       const field = event.target.dataset.sfShotField;
       if (shot) {
-        if (event.target.type === "checkbox") shot[field] = event.target.checked;
-        else if (field === "retime_duration") shot[field] = event.target.value === "" ? null : Number(event.target.value);
-        else shot[field] = ["duration", "seed"].includes(field) ? Number(event.target.value) : event.target.value;
+        const value = event.target.type === "checkbox" ? event.target.checked
+          : field === "retime_duration" ? (event.target.value === "" ? null : Number(event.target.value))
+          : ["duration", "seed"].includes(field) ? Number(event.target.value) : event.target.value;
+        updateShortFilmGenerationField(project, shot, field, value, { shotId: shot.id });
         updateShortFilmShotAssetState(shotCard, project, shot);
       }
     }
@@ -3570,6 +3699,7 @@ function bindEvents() {
     if (!shotCard || !assetId) return;
     const found = findShortFilmShot(shotCard.dataset.sfShotId);
     if (!found) return;
+    invalidateShortFilmRenders(activeShortFilmProject(), [found.shot.id]);
     if (event.target.checked && !found.shot.asset_ids.includes(assetId)) found.shot.asset_ids.push(assetId);
     if (!event.target.checked) found.shot.asset_ids = found.shot.asset_ids.filter(id => id !== assetId);
     event.target.closest(".shortfilm-asset-chip")?.classList.toggle("selected", event.target.checked);
@@ -3587,6 +3717,7 @@ function bindEvents() {
     try {
       if (event.target.closest("[data-sf-delete-scene]")) {
         if (!confirm(`刪除「${scene.title}」及其中所有分鏡？已生成影片不會刪除。`)) return;
+        invalidateShortFilmRenders(project, scene.shots.map(shot => shot.id));
         project.scenes = project.scenes.filter(item => item.id !== scene.id);
       } else if (event.target.closest("[data-sf-add-shot]")) {
         const globalIndex = shortFilmFlatten(project).length + 1;
@@ -3598,13 +3729,16 @@ function bindEvents() {
         });
       } else if (shot && event.target.closest("[data-sf-delete-shot]")) {
         if (!confirm(`刪除分鏡「${shot.title}」？已生成工作與影片不會刪除。`)) return;
+        invalidateShortFilmRenders(project, [shot.id]);
         scene.shots = scene.shots.filter(item => item.id !== shot.id);
       } else if (shot && event.target.closest("[data-sf-add-storyboard]")) {
+        const originalStoryboard = shot.storyboard_asset_id;
         if (event.target.closest("[data-sf-remove-storyboard]")) shot.storyboard_asset_id = null;
         else {
           const file = (await chooseFiles("image/*"))[0];
           if (file) shot.storyboard_asset_id = (await uploadFile(file, "shortfilm-storyboard")).id;
         }
+        if (shot.storyboard_asset_id !== originalStoryboard) invalidateShortFilmRenders(project, [shot.id]);
       } else if (shot && event.target.closest("[data-sf-preview-shot]")) {
         const button = event.target.closest("[data-sf-preview-shot]"); setButtonBusy(button, true);
         try { await compileShortFilmShot(shot.id, false); } finally { setButtonBusy(button, false); }
@@ -3622,13 +3756,14 @@ function bindEvents() {
   $("#copyShortfilmCompiled").addEventListener("click", async () => {
     await navigator.clipboard.writeText($("#shortfilmCompiledPrompt").textContent || ""); toast("已複製鏡頭提示詞。")
   });
-  $("#runShortfilmBatch").addEventListener("click", runShortFilmBatch);
-  $("#stopShortfilmBatch").addEventListener("click", () => { shortFilmBatchRunning = false; toast("目前鏡頭完成後不再送出後續鏡頭。") });
+  $("#runShortfilmBatch").addEventListener("click", () => runShortFilmBatch(false));
+  $("#resumeShortfilmBatch").addEventListener("click", () => runShortFilmBatch(true));
+  $("#stopShortfilmBatch").addEventListener("click", stopShortFilmBatch);
   $("#modeGrid").addEventListener("click", event => {
     const card = event.target.closest(".mode-card");
     if (card) setMode(card.dataset.mode);
   });
-  ["aspectRatio", "megapixels", "duration", "retimeDuration", "seed", "steps", "scheduler", "refImageSize", "videoVae", "keyframeFit", "motionProfile", "motionIntensity", "physicsStyle", "cameraResponse", "prompt", "jobName"].forEach(id => {
+  ["aspectRatio", "megapixels", "duration", "retimeDuration", "seed", "steps", "scheduler", "refImageSize", "videoVae", "keyframeFit", "motionProfile", "motionIntensity", "physicsStyle", "cameraResponse", "prompt", "jobName", "translateDirections"].forEach(id => {
     $(`#${id}`).addEventListener("input", updateSummary);
     $(`#${id}`).addEventListener("change", updateSummary);
   });
@@ -4505,6 +4640,9 @@ function initialize() {
     if (studioWorkspace === "shortfilm") loadShortFilmJobs().catch(error => console.warn("短片作品更新失敗：", error));
   }, 3000);
   setInterval(() => refreshShortFilmShotStatuses().catch(error => console.warn("短片工作狀態更新失敗：", error)), 5000);
+  setInterval(() => {
+    if (studioWorkspace === "shortfilm") loadShortFilmBatchStatus();
+  }, 3000);
   setInterval(() => {
     if ($("#musicModal").classList.contains("hidden")) return;
     loadMusicStatus().catch(error => console.warn(error));

@@ -20,6 +20,7 @@ class SegmentAPITests(unittest.IsolatedAsyncioTestCase):
                                     CONFIG_PATH=self.root / 'config.json')
         self.paths.start()
         self.app = studio.create_app()
+        self.app["h3_prompt_translator"].prepare = AsyncMock(side_effect=lambda payload: payload)
         # No engine starts, job recovery, gateway, or network model checks in tests.
         self.app.on_startup.clear()
         self.app.on_cleanup.clear()

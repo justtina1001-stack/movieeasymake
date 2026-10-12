@@ -141,7 +141,7 @@ class ShortFilmContinuityTests(unittest.TestCase):
         payload, compiled = self.compiled(project, scene, shot)
         self.assertNotIn("橙色髮束與灰色眼睛", payload["prompt"])
         self.assertEqual(compiled.prompt.count("橙色髮束與灰色眼睛"), 1)
-        self.assertIn("文字描述", compiled.prompt)
+        self.assertIn("textual description", compiled.prompt)
         self.assertEqual(compiled.reference_audios, [AUDIO_A])
 
     def test_audio_only_non_subject_description_is_not_lost(self):
@@ -337,7 +337,7 @@ class ShortFilmContinuityTests(unittest.TestCase):
                 self.assertNotIn("same physical individual across views and cuts", compiled.prompt)
                 self.assertNotIn("explicitly stated quantity", compiled.prompt)
                 if payload["mode"] == "replace":
-                    self.assertIn("禁止保留或混入原角色的臉", compiled.prompt)
+                    self.assertIn("without retaining or blending the original person's identity", compiled.prompt)
                 if payload["mode"] == "mg_animation":
                     self.assertIn("visible reel window", compiled.prompt)
 

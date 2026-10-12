@@ -40,8 +40,9 @@ function fixture() {
   vm.runInContext(source.slice(start, source.indexOf("\n};", start) + 3) + "\nglobalThis.defaultState = defaultState;", context);
   context.state = structuredClone(context.defaultState);
   for (const name of [
-    "currentSettings", "persistForm", "restoreForm", "saveState", "collectPayload", "recipeAsset", "applyJobRecipe",
+    "currentSettings", "persistForm", "restoreForm", "saveState", "collectPayload", "recipeAsset", "originalGenerationRequest", "applyJobRecipe",
     "videoVaeBackendIsStale", "videoVaeHint", "syncVideoVaeHints", "activeShortFilmProject", "renderShortFilmWorkspace", "saveShortFilmProject",
+    "shortFilmFlatten", "shortFilmAliasMentioned", "shortFilmShotAssetSelection", "shortFilmAssetShotIds", "invalidateShortFilmRenders", "updateShortFilmGenerationField",
   ]) {
     const index = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(index, -1, `${name} exists`);

@@ -8,18 +8,27 @@ const source = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8')
 function fixture(shots = []) {
   const elements = new Map();
   const element = selector => {
-    if (!elements.has(selector)) elements.set(selector, {value: '', disabled: false, textContent: '', classList: {add() {}, remove() {}}});
+    if (!elements.has(selector)) elements.set(selector, {value: '', disabled: false, textContent: '', classList: {add() {}, remove() {}, toggle() {}}});
     return elements.get(selector);
   };
   const context = vm.createContext({
     project: {id: 'project', assets: [], scenes: [{id: 'scene', title: 'scene', shots}]},
-    shortFilmBatchRunning: false, messages: [], submissions: [], waits: [], locks: [],
+    shortFilmBatchRunning: false, shortFilmBatch: null, shortFilmBatchLoading: false,
+    shortFilmProjects: [], messages: [], submissions: [], waits: [], locks: [], calls: [],
     $: element, structuredClone, confirm: () => true,
     toast(message) { context.messages.push(message); },
     renderShortFilmSummary() {}, renderShortFilmScenes() {}, scheduleShortFilmSave() {},
     setShortFilmBatchEditing(locked) { context.locks.push(locked); },
     activeShortFilmProject() { return context.project; },
     async saveShortFilmProject() {}, async refreshShortFilmShotStatuses() {},
+    async api(url) {
+      context.calls.push(url);
+      if (url.startsWith('/api/shortfilm-batches?')) return context.serverBatch ? [context.serverBatch] : [];
+      if (url === '/api/shortfilms/project') return structuredClone(context.project);
+      context.serverBatch = {id: 'batch', project_id: 'project', status: url.endsWith('/cancel') ? 'cancelled' : 'queued',
+        shot_ids: context.project.scenes[0].shots.map(shot => shot.id), completed_shot_ids: []};
+      return context.serverBatch;
+    },
     async compileShortFilmShot(id) {
       context.submissions.push(id);
       context.project = structuredClone(context.project);
@@ -33,7 +42,7 @@ function fixture(shots = []) {
     },
     async waitForShortFilmJob(id) { context.waits.push(id); return {status: 'completed'}; },
   });
-  for (const name of ['shortFilmFlatten', 'shortFilmSegmentDraft', 'shortFilmSegmentPreview', 'shortFilmAliasMentioned', 'shortFilmShotAssetSelection', 'shortFilmShotReferenceUsage', 'shortFilmBatchBlockers', 'buildShortFilmSegmentRows', 'findShortFilmShot', 'runShortFilmBatch']) {
+  for (const name of ['shortFilmFlatten', 'shortFilmSegmentDraft', 'shortFilmSegmentPreview', 'shortFilmAliasMentioned', 'shortFilmShotAssetSelection', 'shortFilmShotReferenceUsage', 'shortFilmBatchBlockers', 'buildShortFilmSegmentRows', 'findShortFilmShot', 'renderShortFilmBatch', 'loadShortFilmBatchStatus', 'runShortFilmBatch', 'stopShortFilmBatch']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), context);
@@ -79,43 +88,43 @@ test('counts shared multiimage assets, alias matches and tail frame before submi
   assert.match(context.messages[0], /10\/9/);
 });
 
-test('12 shots are strictly submitted then awaited in sequence', async () => {
+test('12 shots submit one host-owned batch without browser-owned rendering', async () => {
   const {context, run} = fixture(Array.from({length: 12}, (_, i) => shot(i)));
-  context.waitForShortFilmJob = async id => {
-    assert.equal(context.submissions.length, context.waits.length + 1);
-    context.waits.push(id); return {status: 'completed'};
-  };
   await run('runShortFilmBatch()');
-  assert.equal(context.submissions.length, 12);
-  assert.equal(context.waits.length, 12);
-  assert.ok(context.project.scenes[0].shots.every(s => s.status === 'completed'));
-  assert.deepEqual(context.locks, [true, false]);
+  assert.deepEqual(context.calls, ['/api/shortfilms/project/batch']);
+  assert.equal(context.submissions.length, 0);
+  assert.equal(context.waits.length, 0);
+  assert.equal(context.shortFilmBatchRunning, true);
 });
 
-test('failure stops downstream work; retry skips completed and continues remaining', async () => {
+test('reload restores active host batch and stopped batches expose explicit resume', async () => {
   const {context, run} = fixture([shot(0), shot(1), shot(2)]);
-  context.waitForShortFilmJob = async id => {
-    if (id === 'job-s1') { context.project.scenes[0].shots[1].status = 'failed'; throw Error('OOM'); }
-    return {status: 'completed'};
-  };
-  await run('runShortFilmBatch()');
-  assert.deepEqual(context.submissions, ['s0', 's1']);
-  context.waitForShortFilmJob = async () => ({status: 'completed'});
-  await run('runShortFilmBatch()');
-  assert.deepEqual(context.submissions, ['s0', 's1', 's1', 's2']);
+  context.serverBatch = {id: 'saved', status: 'running', shot_ids: ['s0','s1','s2'], completed_shot_ids: ['s0']};
+  await run('loadShortFilmBatchStatus()');
+  assert.equal(context.shortFilmBatchRunning, true);
+  context.serverBatch.status = 'interrupted';
+  await run('loadShortFilmBatchStatus()');
+  assert.equal(context.shortFilmBatchRunning, false);
+  await run('runShortFilmBatch(true)');
+  assert.equal(context.calls.at(-1), '/api/shortfilm-batches/saved/resume');
 });
 
-test('regenerating an earlier shot does not skip invalidated completed descendants', async () => {
-  const {context, run} = fixture([shot(0), shot(1, {status: 'completed', job_id: 'old'})]);
+test('stop requests the server without cancelling the active video job', async () => {
+  const {context, run} = fixture([shot(0), shot(1)]);
   await run('runShortFilmBatch()');
-  assert.deepEqual(context.submissions, ['s0', 's1']);
+  await run('stopShortFilmBatch()');
+  assert.equal(context.calls.at(-1), '/api/shortfilm-batches/batch/cancel');
+  assert.equal(context.shortFilmBatchRunning, false);
+  assert.ok(context.calls.every(url => !url.includes('/api/jobs/')));
 });
 
-test('existing running job is awaited without duplication and stop sends no next job', async () => {
-  const {context, run} = fixture([shot(0, {status: 'running', job_id: 'existing'}), shot(1)]);
-  context.waitForShortFilmJob = async id => { context.waits.push(id); context.shortFilmBatchRunning = false; return null; };
+test('submission failure unlocks editing and preserves unsent shot content', async () => {
+  const {context, run} = fixture([shot(0), shot(1)]);
+  context.api = async () => { throw Error('模型尚未準備好'); };
   await run('runShortFilmBatch()');
-  assert.deepEqual(context.waits, ['existing']);
-  assert.deepEqual(context.submissions, []);
-  assert.deepEqual(context.locks, [true, false]);
+  assert.equal(context.project.scenes[0].shots[0].action, 'walk');
+  assert.equal(context.shortFilmBatchRunning, false);
+  assert.match(context.messages[0], /模型尚未準備好/);
+  assert.equal(context.locks[0], true);
+  assert.equal(context.locks.at(-1), false);
 });

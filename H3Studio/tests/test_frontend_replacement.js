@@ -9,7 +9,7 @@ function fixture() {
   const elements = new Map();
   const element = selector => {
     if (!elements.has(selector)) elements.set(selector, {
-      value: '', classList: {add() {}, remove() {}}, scrollIntoView() {},
+      value: '', classList: {add() {}, remove() {}, toggle() {}}, scrollIntoView() {},
       getAttribute: () => 'false', querySelector: () => ({textContent: ''}),
     });
     return elements.get(selector);
@@ -26,13 +26,13 @@ function fixture() {
     setMode(mode) { context.state.mode = mode; },
     async loadJobRecipe() { return context.recipe; },
     async prepareReplacementVideo() {},
-    promptKeywords: () => [], setButtonBusy() {}, async loadJobs() {},
+    promptKeywords: () => [], setButtonBusy() {}, async loadJobs() {}, generationPreflight: null, modeLabels: {},
   });
   const start = source.indexOf('const defaultState =');
   vm.runInContext(source.slice(start, source.indexOf('\n};', start) + 3) + '\nglobalThis.defaultState = defaultState;', context);
   context.state = structuredClone(context.defaultState);
   context.state.mode = 'replace';
-  for (const name of ['renderReplacement', 'addReplacementFiles', 'collectPayload', 'recipeAsset', 'applyJobRecipe', 'validateReplacementSourceCompilation', 'renderVideo']) {
+  for (const name of ['renderReplacement', 'addReplacementFiles', 'collectPayload', 'recipeAsset', 'originalGenerationRequest', 'applyJobRecipe', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'renderVideo']) {
     const index = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(index, -1);
     vm.runInContext(source.slice(index, source.indexOf('\n}', index) + 2), context);

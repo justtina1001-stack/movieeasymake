@@ -137,7 +137,7 @@ test("shortfilm memory persistence and incompatibility notices match project set
   assert.equal(element("#sfMemoryOptimization").disabled, false);
   assert.match(source, /title: "未命名短片", memory_optimization: true/);
   assert.match(source, /\$\("#sfMemoryOptimization"\)\.checked = project\.memory_optimization === true;/);
-  assert.match(source, /project\.memory_optimization = event\.target\.checked;/);
+  assert.match(source, /updateShortFilmGenerationField\(project, project, "memory_optimization", event\.target\.checked\);/);
 });
 
 test("shortfilm mode classification accounts for aliases, storyboard and continuation", () => {

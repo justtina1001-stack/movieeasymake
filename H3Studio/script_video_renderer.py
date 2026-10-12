@@ -9,12 +9,19 @@ from domain import compile_request, required_asset_ids, validate_runtime_invento
 from scriptwriting import ScriptwritingError, local_base_url
 from shortfilm import compile_shot_payload, flatten_shots, resolve_shot_asset_ids, validate_shot_references
 from custom_loras import active_loras, validate_loras_for_family
+from h3_prompt_translation import prepare_h3_payload, payload_digest
 
 
 class ScriptVideoRenderer:
     def __init__(self, app):
         self.app = app
         self._assemble_lock = asyncio.Lock()
+
+    async def _prepare_payload(self, raw):
+        prepare = self.app.get("prepare_generation_payload")
+        if callable(prepare):
+            return await prepare(raw)
+        return await prepare_h3_payload(self.app, raw)
 
     def _local_engine(self):
         comfy = self.app.get("comfy")
@@ -104,11 +111,16 @@ class ScriptVideoRenderer:
         inventory = await self._local_engine().model_inventory(refresh=True)
         for scene, shot in shots:
             raw = self._public_payload(project, scene, shot, pipeline_id)
-            compiled = compile_request(raw)
+            prepared = await self._prepare_payload(raw)
+            compiled = compile_request(prepared)
             for asset_id in required_asset_ids(compiled):
                 self.app["assets"].path_for(asset_id)
             validate_runtime_inventory(compiled, inventory)
-            manifests.append({"scene_id": scene["id"], "shot_id": shot["id"], "payload": raw})
+            manifest = {"scene_id": scene["id"], "shot_id": shot["id"], "payload": raw}
+            if prepared != raw:
+                manifest["prepared_payload"] = prepared
+                manifest["prepared_source_digest"] = payload_digest(raw)
+            manifests.append(manifest)
         return manifests
 
     @staticmethod
@@ -178,10 +190,23 @@ class ScriptVideoRenderer:
             if frozen_raw is None:
                 raise ScriptwritingError("自動分鏡或參考素材已被修改，請開始新的流程；已完成的片段仍保留。", 409)
             raw = frozen_raw
-        compiled = compile_request(raw)
+        # Keep source comparison strict, while reusing the validated English preparation
+        # recorded at preflight rather than translating every resumed shot again.
+        prepared = None
+        pipelines = getattr(self.app.get("script_video"), "pipelines", {})
+        pipeline = pipelines.get(pipeline_id, {}) if isinstance(pipelines, dict) else {}
+        for item in pipeline.get("render_plan") or []:
+            candidate = item.get("prepared_payload") if isinstance(item, dict) else None
+            if (isinstance(candidate, dict) and item.get("payload") == raw
+                    and item.get("prepared_source_digest") == payload_digest(raw)):
+                prepared = copy.deepcopy(candidate)
+                break
+        if prepared is None:
+            prepared = await self._prepare_payload(raw)
+        compiled = compile_request(prepared)
         for asset_id in required_asset_ids(compiled):
             self.app["assets"].path_for(asset_id)
-        video = self.app["jobs"].create(compiled, raw)
+        video = self.app["jobs"].create(compiled, prepared)
         shot.update(job_id=video["id"], status=video["status"])
         try:
             self.app["shortfilms"].update(shortfilm_id, project)

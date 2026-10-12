@@ -342,6 +342,8 @@
           <textarea id="prompt" rows="10" placeholder="例如：小明走進神殿，看見金色佛像後停下腳步。攝影機從背後緩慢推進，小明轉頭說：「有人在這裡嗎？」背景只有微弱風聲與遠處鐘聲。"></textarea>
           <div class="prompt-footer"><span id="promptCount">0 字</span><button id="insertPromptTemplate" class="text-button" type="button">插入提示詞範本</button></div>
           <p class="render-note">對白請明確寫成「小明說：『你好。』」或「旁白：『故事開始了。』」。預覽與送出時會自動補上台詞標籤，保留原文；已加標籤的台詞不會重複處理。</p>
+          <label class="check-row"><input id="translateDirections" type="checkbox" checked><span>自動整理成英文敘述</span></label>
+          <p class="render-note">使用本機文字模型整理動作、鏡頭與素材描述，保留台詞及畫面文字原文。首次整理可能需要稍候；原敘述仍會保留。</p>
           <div id="promptTemplateHelp" class="prompt-template-help hidden">
             <div><strong>快速替換關鍵字</strong><span id="promptKeywordStatus">點一下標籤，即可選取提示詞中的對應內容</span></div>
             <div id="promptKeywordList" class="prompt-keyword-list"></div>
@@ -377,6 +379,12 @@
             <p id="renderNote" class="render-note">工作會依序進入本機 GPU 佇列。</p>
           </section>
 
+          <section id="compileSummaryPanel" class="panel hidden" aria-live="polite">
+            <div class="mini-title"><h3>生成前確認</h3></div>
+            <div id="compileSummary" class="summary-list"></div>
+            <details><summary>素材對照</summary><div id="compileMapping" class="connection-hint"></div></details>
+            <div id="compileWarnings" class="shortfilm-warnings hidden"></div>
+          </section>
           <section id="compiledPanel" class="panel compiled-panel hidden">
             <div class="mini-title"><h3>編譯後提示詞</h3><button id="copyCompiled" class="text-button" type="button">複製</button></div>
             <pre id="compiledPrompt"></pre>
@@ -491,8 +499,9 @@
                 </div>
                 <div id="shortfilmWarnings" class="shortfilm-warnings"><p>建立鏡頭後會顯示規則檢查。</p></div>
                 <button id="runShortfilmBatch" class="button primary wide" type="button"><span>依序生成未完成鏡頭</span></button>
+                <button id="resumeShortfilmBatch" class="button secondary wide hidden" type="button">接續原設定</button>
                 <button id="stopShortfilmBatch" class="button ghost wide hidden" type="button">停止後續鏡頭</button>
-                <p id="shortfilmBatchNote" class="render-note">連戲鏡頭會等待上一鏡完成並自動擷取尾幀；請保持 H3 Studio 開啟。</p>
+                <p id="shortfilmBatchNote" class="render-note">連戲鏡頭會等待上一鏡完成並擷取尾幀。關閉瀏覽頁面後仍會依序製作；Studio 主機需保持執行。</p>
               </section>
 
               <section id="shortfilmCompiledPanel" class="panel compiled-panel hidden">
@@ -890,7 +899,7 @@ non_diegetic_music: ...</pre></div>
     </section>
   </div>
   <script src="/static/lora-help.js?v=20261005-lora-help"></script>
-  <script src="/static/app.js?v=20261005-lora-help"></script>
+  <script src="/static/app.js?v=20261012-h3-preflight-batch1"></script>
   <script src="/static/face-repair.js?v=20260917-face-repair"></script>
 </body>
 </html>

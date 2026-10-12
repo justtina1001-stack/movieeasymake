@@ -42,7 +42,7 @@ class DialogueCompileTests(unittest.TestCase):
         ))
         self.assertEqual(spoken_blocks(compiled.prompt), ['[Chinese] 請等我回來。'])
         self.assertIn('法力震鳴「嗡——」', compiled.prompt)
-        self.assertIn('<Subject 1>（少年）清冷低語：<d>[Chinese] 請等我回來。</d>', compiled.prompt)
+        self.assertIn('<Subject 1>（少年） (S1)清冷低語：<d>[Chinese] 請等我回來。</d>', compiled.prompt)
 
     def test_inline_chinese_speech_is_tagged_without_changing_the_words(self):
         compiled = compile_request(request_payload("小明走進車站。小明說：「你好，歡迎回來……！」"))
@@ -202,6 +202,11 @@ class DialogueSubmissionAPITests(unittest.IsolatedAsyncioTestCase):
             CONFIG_PATH=self.root / "config.json",
         )
         self.paths.start()
+        async def preserve_payload(app, payload):
+            return copy.deepcopy(payload)
+        # This suite verifies compiler speech preservation; translation has its own tests.
+        self.preparation = patch.object(studio, "prepare_h3_payload", side_effect=preserve_payload)
+        self.preparation.start()
         self.app = studio.create_app()
         # Exercise real HTTP handlers without engine startup, job recovery, or GPU work.
         self.app.on_startup.clear()
@@ -212,6 +217,7 @@ class DialogueSubmissionAPITests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         self.paths.stop()
+        self.preparation.stop()
         self.temp.cleanup()
 
     async def test_preview_and_submission_compile_identical_unicode_dialogue(self):
@@ -232,7 +238,7 @@ class DialogueSubmissionAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spoken_blocks(submitted.prompt), [
             "[Chinese] 你好，歡迎來到未來的世界。", "[Chinese] 明天見！",
         ])
-        self.assertEqual(original_request, payload)
+        self.assertEqual({key: original_request[key] for key in payload}, payload)
         self.assertNotIn("????", submitted.prompt)
 
 
