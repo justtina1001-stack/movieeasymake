@@ -6,6 +6,8 @@ import copy
 import hashlib
 import json
 import re
+import secrets
+import time
 from collections import Counter, OrderedDict
 from typing import Any
 from urllib.parse import urlsplit
@@ -32,6 +34,8 @@ _SYSTEM = (
     "Preserve negation, counts, spatial relationships, event order, and the ending state."
 )
 _WARNING = "英文敘述整理未完成，已保留原文；可先啟動本機編劇模型，再重新預覽。"
+_FALLBACK_HANDOFF_TTL = 120
+_FALLBACK_HANDOFF_LIMIT = 128
 
 
 def payload_digest(payload: dict) -> str:
@@ -39,6 +43,15 @@ def payload_digest(payload: dict) -> str:
               if key not in {"h3_translation", "h3_preparation_warnings"}}
     return hashlib.sha256(json.dumps(source, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()
+
+
+def _fallback_digest(payload: dict) -> str:
+    # Stream inspection may regenerate notes before submission; its media facts
+    # and normalized asset IDs still belong to this particular preparation.
+    source = dict(payload)
+    if isinstance(source.get("media_preflight"), dict):
+        source["media_preflight"] = {key: value for key, value in source["media_preflight"].items() if key != "warnings"}
+    return payload_digest(source)
 
 
 def original_h3_payload(payload: dict) -> dict:
@@ -128,6 +141,43 @@ class H3PromptTranslator:
         self.app = app
         self._lock = asyncio.Lock()
         self._cache: OrderedDict[tuple, str] = OrderedDict()
+        self._fallback_handoffs: OrderedDict[str, dict] = OrderedDict()
+
+    def _prune_fallback_handoffs(self) -> None:
+        now = time.monotonic()
+        expired = [token for token, value in self._fallback_handoffs.items() if value["expires_at"] <= now]
+        for token in expired:
+            del self._fallback_handoffs[token]
+        while len(self._fallback_handoffs) > _FALLBACK_HANDOFF_LIMIT:
+            self._fallback_handoffs.popitem(last=False)
+
+    @staticmethod
+    def _settings_identity(settings: dict) -> str:
+        return hashlib.sha256(json.dumps(settings, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":")).encode()).hexdigest()
+
+    def _reuse_fallback_handoff(self, payload: dict, settings: dict) -> bool:
+        self._prune_fallback_handoffs()
+        metadata = payload.get("h3_translation")
+        token = metadata.get("fallback_handoff") if isinstance(metadata, dict) else None
+        record = self._fallback_handoffs.get(token) if isinstance(token, str) else None
+        if (record is None or record["payload_digest"] != _fallback_digest(payload)
+                or record["settings_identity"] != self._settings_identity(settings)):
+            return False
+        # Never trust a client-provided status, source text, or warning to suppress work.
+        payload["h3_translation"] = copy.deepcopy(record["metadata"])
+        payload["h3_preparation_warnings"] = list(record["warnings"])
+        return True
+
+    def _remember_fallback_handoff(self, payload: dict, settings: dict) -> None:
+        token = secrets.token_urlsafe(24)
+        payload["h3_translation"]["fallback_handoff"] = token
+        self._fallback_handoffs[token] = {"expires_at": time.monotonic() + _FALLBACK_HANDOFF_TTL,
+                                           "payload_digest": _fallback_digest(payload),
+                                           "settings_identity": self._settings_identity(settings),
+                                           "metadata": copy.deepcopy(payload["h3_translation"]),
+                                           "warnings": list(payload["h3_preparation_warnings"])}
+        self._prune_fallback_handoffs()
 
     async def _request(self, values: dict[str, str], settings: dict) -> dict:
         """Use local CPU inference so preparation never evicts a running H3 job."""
@@ -212,6 +262,8 @@ class H3PromptTranslator:
         # Embedded callers with no writer keep their established deterministic contract.
         if not isinstance(settings, dict):
             return payload
+        if self._reuse_fallback_handoff(payload, settings):
+            return payload
         aliases = [str(item.get("alias", "")) for item in payload.get("references") or [] if isinstance(item, dict)]
         speakers = [str(item.get("alias", "")) for item in payload.get("references") or []
                     if isinstance(item, dict) and item.get("type") in {"character", "creature"}]
@@ -271,6 +323,8 @@ class H3PromptTranslator:
             warnings.append(_WARNING)
             payload["h3_translation"] = {"status": "unavailable", "source_texts": original}
         payload["h3_preparation_warnings"] = list(dict.fromkeys(warnings))
+        if payload.get("h3_translation", {}).get("status") == "unavailable":
+            self._remember_fallback_handoff(payload, settings)
         return payload
 
 

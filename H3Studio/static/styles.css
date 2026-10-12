@@ -283,7 +283,13 @@ a.button { color: inherit; text-decoration: none; display: inline-flex; align-it
 .button:disabled { opacity: .45; cursor: wait; transform: none; }
 .job-video-label { margin: 13px 0 7px; color: var(--accent-2); font-size: 10px; font-weight: 750; letter-spacing: .08em; }
 .text-button { border: 0; background: none; color: var(--accent-2); font-size: 11px; cursor: pointer; padding: 3px; }
-.button[aria-busy="true"] { opacity: .82; cursor: progress; }
+.button[aria-busy="true"] {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  opacity: .82;
+  cursor: progress;
+}
 .button[aria-busy="true"]:before {
   content: "";
   position: absolute;
@@ -730,6 +736,8 @@ a.button { color: inherit; text-decoration: none; display: inline-flex; align-it
 .shortfilm-scene-heading input,.shortfilm-shot-heading input { margin: 0; font-weight: 700; }
 .shortfilm-shot-list { margin-top: 17px; }
 .shortfilm-shot-card { padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: #10141b; box-shadow: 0 10px 26px rgba(0,0,0,.1); }
+.shortfilm-shot-feedback { width: 100%; min-width: 0; margin: 10px 0 0; color: var(--muted); line-height: 1.6; white-space: normal; overflow-wrap: anywhere; }
+.shortfilm-shot-feedback.error { color: #ffb0bb; }
 .shortfilm-shot-heading { display: grid; grid-template-columns: minmax(0,1fr) auto auto; }
 .shortfilm-shot-heading > div:first-child { min-width: 0; display: grid; grid-template-columns: 70px minmax(0,1fr); align-items: center; gap: 8px; }
 .shortfilm-shot-status { padding: 5px 8px; border-radius: 7px; background: rgba(255,255,255,.05); color: var(--muted); font-size: 8px; }

@@ -121,6 +121,7 @@ let shortFilmJobTotalPages = 1;
 let shortFilmJobSearch = "";
 let lastShortFilmJobsSignature = "";
 const expandedShortFilmJobIds = new Set();
+const shortFilmShotRequests = new Map();
 
 const modeLabels = { t2v: "文生影片", fl2va: "首尾圖片", r2v: "多模態參考", replace: "角色替換", symbol_loop: "圖騰循環", extend: "續接影片", popup_panel: "彈窗面板動畫", mg_animation: "MG 動畫" };
 const promptGuideModeAdvice = {
@@ -2756,9 +2757,8 @@ async function deleteShortFilmProject() {
   toast("短片專案已刪除；已生成影片仍保留。")
 }
 
-async function saveShortFilmProject() {
+async function saveShortFilmProject(project = activeShortFilmProject()) {
   clearTimeout(shortFilmSaveTimer);
-  const project = activeShortFilmProject();
   if (!project) return null;
   const updated = await api(`/api/shortfilms/${project.id}`, {
     method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(project),
@@ -3158,6 +3158,7 @@ function renderShortFilmScenes() {
           <label>Seed<input data-sf-shot-field="seed" type="number" min="0" value="${escapeHtml(shot.seed ?? 1)}"></label>
           <div class="shortfilm-shot-actions"><button class="button ghost small" type="button" data-sf-preview-shot>預覽提示詞</button><button class="button primary small" type="button" data-sf-generate-shot>生成此鏡頭</button>${shot.job_id ? '<button class="button ghost small" type="button" data-sf-open-jobs>查看工作</button>' : ""}</div>
         </div>
+        <p class="render-note shortfilm-shot-feedback hidden" data-sf-shot-feedback role="status" aria-live="polite"></p>
       </article>`;
     }).join("");
     return `<section class="shortfilm-scene-card" data-sf-scene-id="${scene.id}">
@@ -3167,6 +3168,7 @@ function renderShortFilmScenes() {
       <div class="shortfilm-shot-list">${shots || '<div class="empty-state compact"><span>＋</span><strong>這個場次還沒有鏡頭</strong></div>'}</div>
     </section>`;
   }).join("");
+  renderShortFilmShotRequests();
 }
 
 function renderShortFilmSummary(extraWarnings = null) {
@@ -3213,6 +3215,7 @@ async function loadShortFilmJobs(force = false) {
   }
   const query = encodeURIComponent(shortFilmJobSearch);
   const response = await api(`/api/shortfilms/${project.id}/jobs?page=${shortFilmJobPage}&page_size=20&q=${query}`);
+  if (activeShortFilmId !== project.id) return;
   const jobs = response.items || [];
   shortFilmJobPage = response.page || 1;
   shortFilmJobTotalPages = response.total_pages || 1;
@@ -3274,46 +3277,120 @@ function findShortFilmShot(shotId) {
   return shortFilmFlatten(activeShortFilmProject()).find(item => item.shot.id === shotId) || null;
 }
 
-async function compileShortFilmShot(shotId, generate = false) {
-  await saveShortFilmProject();
+function shortFilmGenerationSignature(project) {
+  const source = structuredClone(project);
+  for (const field of ["created_at", "updated_at", "segment_draft"]) delete source[field];
+  for (const { shot } of shortFilmFlatten(source)) {
+    for (const field of ["job_id", "status", "continuation_asset_id", "continuation_job_id"]) delete shot[field];
+  }
+  return JSON.stringify(source);
+}
+
+function renderShortFilmShotRequests() {
   const project = activeShortFilmProject();
-  const item = findShortFilmShot(shotId);
-  if (!project || !item) throw new Error("找不到短片鏡頭。");
-  const result = await api(`/api/shortfilms/${project.id}/shots/${shotId}/compile`, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prepare_continuity: true }),
+  if (!project) return;
+  $$("[data-sf-shot-id]", $("#shortfilmSceneList")).forEach(card => {
+    const request = shortFilmShotRequests.get(`${project.id}:${card.dataset.sfShotId}`);
+    const busy = Boolean(request && request.phase !== "error");
+    for (const [selector, label, generate] of [["[data-sf-preview-shot]", "預覽提示詞", false], ["[data-sf-generate-shot]", "生成此鏡頭", true]]) {
+      const button = $(selector, card);
+      setButtonBusy(button, busy && request.generate === generate);
+      button.disabled = busy || shortFilmBatchRunning;
+      button.textContent = busy && request.generate === generate ? (request.phase === "submitting" ? "正在送出…" : "正在準備…") : label;
+    }
+    const note = $("[data-sf-shot-feedback]", card);
+    note.classList.toggle("hidden", !request);
+    note.classList.toggle("error", request?.phase === "error");
+    note.textContent = request?.message || "";
   });
-  const projectIndex = shortFilmProjects.findIndex(value => value.id === project.id);
-  if (projectIndex >= 0) shortFilmProjects[projectIndex] = result.project;
-  $("#shortfilmCompiledTitle").textContent = `${item.scene.title}／${item.shot.title}`;
-  $("#shortfilmCompiledPrompt").textContent = result.compiled.prompt;
-  $("#shortfilmCompiledPanel").classList.remove("hidden");
-  renderShortFilmSummary(result.warnings);
-  if (!generate) {
-    toast(`提示詞已依官方格式編譯，使用 ${result.compiled.asset_count} 個素材。`);
+}
+
+async function compileShortFilmShot(shotId, generate = false) {
+  const original = activeShortFilmProject();
+  if (!original || !shortFilmFlatten(original).some(item => item.shot.id === shotId)) throw new Error("找不到短片鏡頭。");
+  const projectId = original.id;
+  const requestKey = `${projectId}:${shotId}`;
+  if (shortFilmShotRequests.get(requestKey)?.phase && shortFilmShotRequests.get(requestKey).phase !== "error") return null;
+  if ([...shortFilmShotRequests].some(([key, request]) => key.startsWith(`${projectId}:`) && request.phase !== "error")) {
+    toast("另一個鏡頭正在準備，請等它送出後再操作。");
     return null;
   }
-  const job = await api("/api/render", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(result.payload),
-  });
-  const refreshed = findShortFilmShot(shotId);
-  refreshed.shot.job_id = job.id;
-  refreshed.shot.status = job.status || "queued";
-  refreshed.shot.continuation_asset_id = result.project.scenes.flatMap(scene => scene.shots).find(shot => shot.id === shotId)?.continuation_asset_id || null;
-  const flattened = shortFilmFlatten(activeShortFilmProject());
-  const refreshedIndex = flattened.findIndex(item => item.shot.id === shotId);
-  for (let index = refreshedIndex + 1; index < flattened.length && flattened[index].shot.continue_previous; index += 1) {
-    flattened[index].shot.continuation_asset_id = null;
-    flattened[index].shot.continuation_job_id = null;
-    flattened[index].shot.job_id = null;
-    flattened[index].shot.status = "draft";
+  const update = (phase, message) => {
+    shortFilmShotRequests.set(requestKey, { phase, message, generate });
+    renderShortFilmShotRequests();
+  };
+  let submittedJob = null;
+  update("saving", "正在儲存鏡頭設定…");
+  try {
+    const saved = await saveShortFilmProject(original);
+    const signature = shortFilmGenerationSignature(saved);
+    const item = shortFilmFlatten(saved).find(item => item.shot.id === shotId);
+    update("preparing", "正在整理提示詞與參考素材；本機英文整理可能需幾分鐘，完成後才會送入生成佇列。");
+    const result = await api(`/api/shortfilms/${projectId}/shots/${shotId}/compile`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prepare_continuity: true }),
+    });
+    const current = shortFilmProjects.find(value => value.id === projectId);
+    if (!current || shortFilmGenerationSignature(current) !== signature) throw new Error("準備期間鏡頭內容已變更，這次未送出。請確認設定後再次生成。");
+    const refreshed = shortFilmFlatten(current).find(item => item.shot.id === shotId);
+    const preparedShot = shortFilmFlatten(result.project).find(item => item.shot.id === shotId)?.shot;
+    for (const field of ["continuation_asset_id", "continuation_job_id"]) refreshed.shot[field] = preparedShot?.[field] || null;
+    if (activeShortFilmId === projectId) {
+      $("#shortfilmCompiledTitle").textContent = `${item.scene.title}／${item.shot.title}`;
+      $("#shortfilmCompiledPrompt").textContent = result.compiled.prompt;
+      $("#shortfilmCompiledPanel").classList.remove("hidden");
+      renderShortFilmSummary(result.warnings);
+    }
+    if (!generate) {
+      toast(`提示詞已依官方格式編譯，使用 ${result.compiled.asset_count} 個素材。`);
+      return null;
+    }
+    update("submitting", result.payload?.h3_translation?.status === "unavailable"
+      ? "英文整理未完成，已保留原文；正在送入生成佇列…"
+      : "內容準備完成，正在送入生成佇列…");
+    const job = await api("/api/render", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(result.payload),
+    });
+    submittedJob = job;
+    const target = shortFilmProjects.find(value => value.id === projectId);
+    if (target && shortFilmGenerationSignature(target) === signature) {
+      const refreshed = shortFilmFlatten(target).find(item => item.shot.id === shotId);
+      refreshed.shot.job_id = job.id;
+      refreshed.shot.status = job.status || "queued";
+      const flattened = shortFilmFlatten(target);
+      const refreshedIndex = flattened.findIndex(item => item.shot.id === shotId);
+      for (let index = refreshedIndex + 1; index < flattened.length && flattened[index].shot.continue_previous; index += 1) {
+        flattened[index].shot.continuation_asset_id = null;
+        flattened[index].shot.continuation_job_id = null;
+        flattened[index].shot.job_id = null;
+        flattened[index].shot.status = "draft";
+      }
+      await saveShortFilmProject(target);
+    }
+    if (activeShortFilmId === projectId) {
+      renderShortFilmScenes();
+      renderShortFilmSummary();
+      expandedShortFilmJobIds.add(job.id);
+      await loadShortFilmJobs(true).catch(error => console.warn("短片作品載入失敗：", error));
+      $(".shortfilm-jobs-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    loadJobs(true).catch(error => console.warn("工作列表載入失敗：", error));
+    toast(`${item.scene.title}／${item.shot.title} 已加入生成佇列，可在短片作品查看進度。`);
+    return job;
+  } catch (error) {
+    const message = submittedJob ? `影片已送出（${submittedJob.id.slice(0, 8)}），但分鏡紀錄尚未同步：${error.message}。請查看短片作品。` : `準備失敗：${error.message}`;
+    update("error", message);
+    if (submittedJob && activeShortFilmId === projectId) {
+      expandedShortFilmJobIds.add(submittedJob.id);
+      loadShortFilmJobs(true).catch(error => console.warn("短片作品載入失敗：", error));
+      toast(message, true);
+      return submittedJob;
+    }
+    if (submittedJob) { toast(message, true); return submittedJob; }
+    throw error;
+  } finally {
+    if (shortFilmShotRequests.get(requestKey)?.phase !== "error") shortFilmShotRequests.delete(requestKey);
+    renderShortFilmShotRequests();
   }
-  await saveShortFilmProject();
-  renderShortFilmScenes();
-  renderShortFilmSummary();
-  loadJobs(true);
-  loadShortFilmJobs(true).catch(error => console.warn("短片作品載入失敗：", error));
-  toast(`${refreshed.scene.title}／${refreshed.shot.title} 已加入生成佇列。`);
-  return job;
 }
 
 async function refreshShortFilmShotStatuses(force = false) {
@@ -3323,6 +3400,7 @@ async function refreshShortFilmShotStatuses(force = false) {
   try {
     const project = activeShortFilmProject();
     if (!project) return;
+    if ([...shortFilmShotRequests].some(([key, request]) => key.startsWith(`${project.id}:`) && request.phase !== "error")) return;
     const tracked = shortFilmFlatten(project).filter(item => item.shot.job_id);
     let changed = false;
     await Promise.all(tracked.map(async item => {
@@ -3331,9 +3409,11 @@ async function refreshShortFilmShotStatuses(force = false) {
         if (item.shot.status !== job.status) { item.shot.status = job.status; changed = true; }
       } catch { /* deleted jobs remain linked for traceability */ }
     }));
+    if (shortFilmProjects.find(value => value.id === project.id) !== project
+      || [...shortFilmShotRequests].some(([key, request]) => key.startsWith(`${project.id}:`) && request.phase !== "error")) return;
     if (changed) {
-      await saveShortFilmProject();
-      if (studioWorkspace === "shortfilm") { renderShortFilmScenes(); renderShortFilmSummary(); }
+      await saveShortFilmProject(project);
+      if (studioWorkspace === "shortfilm" && activeShortFilmId === project.id) { renderShortFilmScenes(); renderShortFilmSummary(); }
     }
   } finally {
     shortFilmStatusRefreshing = false;
@@ -3740,15 +3820,15 @@ function bindEvents() {
         }
         if (shot.storyboard_asset_id !== originalStoryboard) invalidateShortFilmRenders(project, [shot.id]);
       } else if (shot && event.target.closest("[data-sf-preview-shot]")) {
-        const button = event.target.closest("[data-sf-preview-shot]"); setButtonBusy(button, true);
-        try { await compileShortFilmShot(shot.id, false); } finally { setButtonBusy(button, false); }
+        await compileShortFilmShot(shot.id, false);
         return;
       } else if (shot && event.target.closest("[data-sf-generate-shot]")) {
-        const button = event.target.closest("[data-sf-generate-shot]"); setButtonBusy(button, true);
-        try { await compileShortFilmShot(shot.id, true); } finally { setButtonBusy(button, false); }
+        await compileShortFilmShot(shot.id, true);
         return;
       } else if (shot && event.target.closest("[data-sf-open-jobs]")) {
-        setWorkspace("quick"); setTimeout(() => $(".jobs-section").scrollIntoView({ behavior: "smooth" }), 120); return;
+        expandedShortFilmJobIds.add(shot.job_id);
+        await loadShortFilmJobs(true);
+        $(".shortfilm-jobs-section").scrollIntoView({ behavior: "smooth", block: "start" }); return;
       } else return;
       renderShortFilmScenes(); renderShortFilmSummary(); scheduleShortFilmSave();
     } catch (error) { toast(error.message, true); }
