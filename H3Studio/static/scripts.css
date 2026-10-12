@@ -105,6 +105,11 @@
 .script-auto-video-option strong { font-size: 11px; font-weight: 550; }
 .script-auto-video-option small { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.8; }
 .script-video-setup > label { font-size: 10px; }
+.script-video-format-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+.script-video-format-fields > label, .script-video-format-fields > label:first-child { margin-top: 0; min-width: 0; font-size: 10px; }
+.script-video-format-fields > label:last-child { grid-column: 1 / -1; }
+.script-video-format-fields select { width: 100%; margin-top: 6px; }
+.script-video-format-summary { margin: 12px 0 0; color: #b5ddd9; font-size: 10px; line-height: 1.8; overflow-wrap: anywhere; }
 #startScriptVideoPipeline { margin-top: 14px; font-size: 11px; }
 .script-video-stages { display: flex; gap: 8px; list-style: none; padding: 0; margin: 22px 0 16px; flex-wrap: wrap; }
 .script-video-stages li { flex: 1 1 90px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: 10px; text-align: center; }

@@ -1,12 +1,15 @@
 "use strict";
 
 const SCRIPT_FIELDS = ["title", "idea", "genre", "duration", "characters", "style", "instructions", "content", "writing_skill"];
-const SCRIPT_PROJECT_FIELDS = [...SCRIPT_FIELDS, "character_references", "custom_loras"];
+const SCRIPT_PROJECT_FIELDS = [...SCRIPT_FIELDS, "character_references", "custom_loras", "video_settings"];
 const SCRIPT_ACTIONS = { outline: "故事大綱", screenplay: "完整劇本", rewrite: "潤飾劇本", storyboard: "影片分鏡", appearance: "角色外觀" };
 const SCRIPT_REFERENCE_TYPES = { character: "角色", creature: "生物", object: "物件", background: "場景" };
 const SCRIPT_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const SCRIPT_DRAFT_PREFIX = "h3studio.scripts.draft.";
 const SCRIPT_SAVED_PREFIX = "h3studio.scripts.saved.";
+const SCRIPT_VIDEO_DEFAULTS = { aspect_ratio: "16:9", megapixels: 0.4, output_resolution: "native" };
+const SCRIPT_VIDEO_ASPECTS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"];
+const SCRIPT_VIDEO_PRECISION = [0.4, 0.7, 0.9, 0.98];
 const SCRIPT_DEFAULT_STYLE = "精緻 3D CG 遊戲動畫風格，色彩明亮；依場景保留少量神祕冒險氛圍。";
 const SCRIPT_DEFAULT_INSTRUCTIONS = "以繁體中文編寫可直接製作的劇本。全片不要配樂／零 BGM，只保留場景環境音、蟲鳴、樹葉摩擦、腳步聲、遺跡能量聲等適合情境的聲音，以及角色動作音效與對白。\n先列全片風格、聲音規則及角色／場景與參考圖片的固定對應，再以連續時間碼分段；起點為 0.0s，最後一段結束於目標片長，沒有空白或重疊。每段清楚列出：鏡頭／景別（焦段與機位）、地點、角色／位置與空間關係、動作／行為與表情、運鏡、VFX、聲音、對白；沒有對白請寫「無」。動作與對白須能在段落時長內完成，前後鏡頭保持角色外觀、位置、方向與因果連續，收尾交代最後反應、定格或切黑。\n若提供「角色＝圖一；角色＝圖二；場景＝圖三」等對應，全片固定使用；未提供圖片時不要虛構圖片內容。角色與故事依本次設定發展。\n詳細描寫應增加段落內的可見資訊，不增加片長。動作寫準備→移動／接觸→反應與收勢，補上視線、手勢、重心與位置變化；運鏡交代方向、速度及最後構圖。禁止用「同上」或重複結尾補長，目標片長到達後立即停止。";
 const SCRIPT_MONKEY_EXAMPLE_INSTRUCTIONS = `範例全長固定 15.0 秒，共 8 段。金猴爺＝圖一；神祕女子＝圖二；古代遺跡＝圖三。這是參考圖對應設定，圖片須另行提供，不代表已上傳。叢林明亮，遺跡區帶少量神祕冒險氛圍。
@@ -35,9 +38,52 @@ function normalizeScriptProject(value = {}) {
   result.writing_skill = typeof value.writing_skill === "string" ? value.writing_skill.trim() : "";
   result.character_references = normalizeScriptReferences(value.character_references);
   result.custom_loras = normalizeScriptLoras(value.custom_loras);
+  result.video_settings = normalizeScriptVideoSettings(value.video_settings);
   result.created_at = value.created_at || "";
   result.updated_at = value.updated_at || "";
   return result;
+}
+
+function normalizeScriptVideoSettings(value) {
+  const settings = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  return {
+    aspect_ratio: SCRIPT_VIDEO_ASPECTS.includes(settings.aspect_ratio) ? settings.aspect_ratio : SCRIPT_VIDEO_DEFAULTS.aspect_ratio,
+    megapixels: SCRIPT_VIDEO_PRECISION.includes(settings.megapixels) ? settings.megapixels : SCRIPT_VIDEO_DEFAULTS.megapixels,
+    output_resolution: ["native", "720p", "1080p"].includes(settings.output_resolution) ? settings.output_resolution : SCRIPT_VIDEO_DEFAULTS.output_resolution,
+  };
+}
+
+function scriptVideoDimensions(value) {
+  const settings = normalizeScriptVideoSettings(value);
+  const nativeLandscape = { 0.4: [864, 480], 0.7: [1152, 640], 0.9: [1280, 736], 0.98: [1344, 768] };
+  let generated;
+  if (["16:9", "9:16"].includes(settings.aspect_ratio)) {
+    generated = [...nativeLandscape[settings.megapixels]];
+    if (settings.aspect_ratio === "9:16") generated.reverse();
+  } else {
+    const [wide, high] = settings.aspect_ratio.split(":").map(Number), ratio = wide / high, area = settings.megapixels * 1e6;
+    generated = [Math.round(Math.sqrt(area * ratio) / 32) * 32, Math.round(Math.sqrt(area / ratio) / 32) * 32];
+  }
+  const outputLandscape = { "16:9": [1280, 720], "9:16": [720, 1280], "1:1": [720, 720],
+    "4:3": [960, 720], "3:4": [720, 960], "21:9": [1680, 720] };
+  const output = settings.output_resolution === "native" ? [...generated] : outputLandscape[settings.aspect_ratio].map(size => settings.output_resolution === "1080p" ? size * 1.5 : size);
+  return { generation_width: generated[0], generation_height: generated[1], output_width: output[0], output_height: output[1], fps: 24, container: "mp4" };
+}
+
+function scriptPipelineVideoFormat(pipeline) {
+  const settings = pipeline?.video_settings || pipeline?.snapshot?.video_settings || pipeline?.snapshot?.project?.video_settings;
+  const computed = scriptVideoDimensions(settings);
+  const actual = pipeline?.video_format;
+  if (!actual || typeof actual !== "object") return computed;
+  const result = { ...computed };
+  for (const key of ["generation_width", "generation_height", "output_width", "output_height"]) {
+    if (Number.isSafeInteger(actual[key]) && actual[key] > 0) result[key] = actual[key];
+  }
+  return result;
+}
+
+function scriptVideoFormatLabel(format) {
+  return `生成 ${format.generation_width} × ${format.generation_height} → 成片 ${format.output_width} × ${format.output_height} · MP4 · 24 fps`;
 }
 
 function normalizeScriptLoras(value) {
@@ -126,7 +172,7 @@ function scriptSaveOutcome(saved, live, sent) {
 function scriptDraftCandidates(records, project, serverProject) {
   const id = project?.id || null;
   return records.filter(record => record && record.project && (record.project.id || null) === id &&
-    (SCRIPT_FIELDS.some(field => String(record.project[field] ?? "").trim()) || normalizeScriptReferences(record.project.character_references).length > 0) &&
+    (SCRIPT_FIELDS.some(field => String(record.project[field] ?? "").trim()) || normalizeScriptReferences(record.project.character_references).length > 0 || JSON.stringify(normalizeScriptVideoSettings(record.project.video_settings)) !== JSON.stringify(SCRIPT_VIDEO_DEFAULTS)) &&
     (!serverProject || scriptProjectSignature(record.project) !== scriptProjectSignature(serverProject)))
     .sort((a, b) => Number(b.savedAt || 0) - Number(a.savedAt || 0));
 }
@@ -172,7 +218,7 @@ function scriptVideoHistoryRecord(pipeline) {
   if (!url) return null;
   const title = [pipeline.project_title, pipeline.title, pipeline.snapshot?.title].find(value => typeof value === "string" && value.trim()) || "未命名影片";
   const duration = pipeline.snapshot?.duration ?? pipeline.duration;
-  return { id: pipeline.id, project_id: typeof pipeline.project_id === "string" ? pipeline.project_id : "", title, completed_at: pipeline.completed_at || pipeline.updated_at || pipeline.created_at || "", duration: typeof duration === "number" && Number.isFinite(duration) && duration > 0 ? duration : null, video_url: url, editor_url: safeId(pipeline.editor_project_id) ? `/editor?project=${pipeline.editor_project_id}` : "" };
+  return { id: pipeline.id, project_id: typeof pipeline.project_id === "string" ? pipeline.project_id : "", title, completed_at: pipeline.completed_at || pipeline.updated_at || pipeline.created_at || "", duration: typeof duration === "number" && Number.isFinite(duration) && duration > 0 ? duration : null, video_url: url, video_format: scriptPipelineVideoFormat(pipeline), editor_url: safeId(pipeline.editor_project_id) ? `/editor?project=${pipeline.editor_project_id}` : "" };
 }
 
 function scriptVideoHistoryDownloadUrl(url) {
@@ -252,11 +298,13 @@ if (typeof module !== "undefined" && module.exports) {
 }
 
 if (typeof module !== "undefined" && module.exports) Object.assign(module.exports, { normalizeScriptLoras, scriptLoraSourceUrl, scriptLoraSelectionError, scriptLoraSaveConfirmed });
+if (typeof module !== "undefined" && module.exports) Object.assign(module.exports, { normalizeScriptVideoSettings, scriptVideoDimensions, scriptPipelineVideoFormat, scriptVideoFormatLabel });
 
 if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
   const clientId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const fieldIds = { title: "scriptTitle", idea: "scriptIdea", genre: "scriptGenre", duration: "scriptDuration", characters: "scriptCharacters", style: "scriptStyle", instructions: "scriptInstructions", content: "scriptContent", writing_skill: "scriptWritingSkill" };
+  const videoFieldIds = { aspect_ratio: "scriptVideoAspectRatio", megapixels: "scriptVideoMegapixels", output_resolution: "scriptVideoResolution" };
   const state = { project: createNewScriptProject(), projects: [], jobs: [], job: null, selectedJobId: null, ready: false, visionReady: false, referencesSupported: false, referencesSupportKnown: false, referencesSaveWaiting: false, engineCheckPromise: null, messageKind: "", settings: null, dirty: false, loading: false, saving: false, starting: false, importing: false, pollBusy: false, settingsDirty: false, settingsSaving: false, conflict: null, recovery: null, ownDrafts: {}, newDraftCounter: 1, newDraftId: "__new__-1", draftAvailable: true, jobsRevision: 0, generation: 0, referenceControls: new Map(), referenceUploads: new Map(), referenceCounter: 0, historyScope: "all", historyPersistent: false, historyStorage: "loading", historyError: "", activeJobs: [], deletingJobIds: new Set(), deletedJobIds: new Set(), historyDeleteControls: new Map(), autoVideo: false, videoPipelinesSupported: false, videoReady: false, videoError: "", pipelines: [], pipeline: null, selectedPipelineId: null, pipelineStarting: false, pipelinePollBusy: false, pipelinesRevision: 0 };
   Object.assign(state, { writingSkills: [], skillsSupported: false, skillsSupportKnown: false, skillsCatalogReady: false, skillsLoading: false, skillsError: "", skillsSaveWaiting: false });
   Object.assign(state, { videoHistoryScope: "all", historyVideos: [], selectedHistoryVideoId: null, historyPreviewVideo: null, historyPreviewError: "", videoHistoryStatus: "loading", videoHistoryError: "", videoHistoryWarning: "", videoHistoryBusy: false });
@@ -288,12 +336,18 @@ if (typeof document !== "undefined") {
 
   function listItems(data) { return Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : []; }
   function dateLabel(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-TW", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
-  function readProject() { const value = { ...state.project, character_references: normalizeScriptReferences(state.project.character_references), custom_loras: normalizeScriptLoras(state.project.custom_loras) }; for (const [field, id] of Object.entries(fieldIds)) value[field] = field === "duration" ? Number($(id).value) : $(id).value; return value; }
+  function readProject() {
+    const value = { ...state.project, character_references: normalizeScriptReferences(state.project.character_references), custom_loras: normalizeScriptLoras(state.project.custom_loras) };
+    for (const [field, id] of Object.entries(fieldIds)) value[field] = field === "duration" ? Number($(id).value) : $(id).value;
+    value.video_settings = normalizeScriptVideoSettings(Object.fromEntries(Object.entries(videoFieldIds).map(([field, id]) => [field, field === "megapixels" ? Number($(id).value) : $(id).value])));
+    return value;
+  }
   function writeProject(project) {
     const value = normalizeScriptProject(project);
     if (!Array.from($("scriptGenre").options).some(option => option.value === value.genre)) $("scriptGenre").add(new Option(value.genre, value.genre));
     renderWritingSkills(value.writing_skill);
     for (const [field, id] of Object.entries(fieldIds)) $(id).value = value[field];
+    for (const [field, id] of Object.entries(videoFieldIds)) $(id).value = String(value.video_settings[field]);
     state.project = value;
     renderWritingSkillDetails();
     renderReferences();
@@ -542,6 +596,8 @@ if (typeof document !== "undefined") {
     for (const controls of state.loraControls) { for (const key of ["select", "strength", "enabled", "remove"]) controls[key].disabled = state.loading; const family = loraFamily(loraMetadata(controls.row.name)); controls.family.disabled = state.loading || Boolean(family && family !== "both"); }
     $("exportScript").disabled = state.loading || state.saving;
     for (const id of Object.values(fieldIds)) $(id).disabled = state.loading;
+    for (const id of Object.values(videoFieldIds)) $(id).disabled = state.loading;
+    $("scriptVideoFormatSummary").textContent = scriptVideoFormatLabel(scriptVideoDimensions(readProject().video_settings));
     for (const option of Array.from($("scriptWritingSkill").options)) option.disabled = Boolean(option.value) && (!writingSkillsAvailable() || !state.writingSkills.some(skill => skill.id === option.value));
     const recommendation = writingSkillsAvailable() ? scriptRecommendedWritingSkill(readProject(), state.writingSkills) : null;
     $("applyScriptSkillRecommendation").disabled = state.loading || !recommendation || recommendation.id === $("scriptWritingSkill").value;
@@ -561,6 +617,7 @@ if (typeof document !== "undefined") {
     $("importScriptStoryboard").disabled = !presentation.canImport || !ownJob || busy || state.importing || deletingSelected;
     $("openScriptJobProject").disabled = busy || state.importing || !state.projects.some(project => project.id === state.job?.project_id);
     const activePipeline = state.pipelines.some(pipeline => pipeline.project_id === state.project.id && scriptPipelinePresentation(pipeline).active) || (state.pipeline?.project_id === state.project.id && scriptPipelinePresentation(state.pipeline).active);
+    $("scriptVideoFormatFutureHint").classList.toggle("hidden", !activePipeline);
     $("scriptAutoVideo").checked = state.autoVideo;
     $("scriptAutoVideo").disabled = busy || !state.videoPipelinesSupported;
     $("scriptVideoSource").disabled = busy;
@@ -644,6 +701,10 @@ if (typeof document !== "undefined") {
     updateControls();
     try {
       const saved = await api(sent.id && !copy ? `/api/scripts/projects/${encodeURIComponent(sent.id)}` : "/api/scripts/projects", { method: sent.id && !copy ? "PUT" : "POST", body: JSON.stringify(payload) });
+      if (JSON.stringify(normalizeScriptVideoSettings(saved.video_settings)) !== JSON.stringify(sent.video_settings)) {
+        state.dirty = true;
+        throw new Error("主機未完整保存影片格式，設定與本機草稿已保留；請更新主機並重新儲存後再製作影片。");
+      }
       if (sent.custom_loras.length && !scriptLoraSaveConfirmed(sent.custom_loras, saved.custom_loras)) { state.lorasSupportKnown = false; state.lorasSupported = false; state.dirty = true; const error = new Error("主機未確認完整保存所選 LoRA，編輯稿與本機草稿已保留；請重新檢查主機功能再儲存。"); error.kind = "loras-support"; throw error; }
       if (sent.writing_skill && saved.writing_skill !== sent.writing_skill.trim()) {
         state.skillsSupportKnown = false; state.skillsSupported = false; state.dirty = true;
@@ -914,7 +975,7 @@ if (typeof document !== "undefined") {
     return Number.isNaN(date.getTime()) ? "完成日期未提供" : date.toLocaleString("zh-TW", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
-  function historyVideoDetail(record) { return `完成於 ${historyVideoDate(record.completed_at)} · ${record.duration ? `目標片長 ${Number(record.duration.toFixed(3))} 秒` : "片長未提供"}`; }
+  function historyVideoDetail(record) { return `完成於 ${historyVideoDate(record.completed_at)} · ${record.duration ? `目標片長 ${Number(record.duration.toFixed(3))} 秒` : "片長未提供"} · ${scriptVideoFormatLabel(record.video_format || scriptVideoDimensions())}`; }
 
   function renderVideoHistory() {
     const records = state.videoHistoryScope === "all" ? state.historyVideos : state.historyVideos.filter(item => item.project_id === state.project.id);
@@ -972,13 +1033,14 @@ if (typeof document !== "undefined") {
     for (const pipeline of pipelines) {
       const button = document.createElement("button"), title = document.createElement("strong"), detail = document.createElement("small");
       button.type = "button"; button.className = `script-pipeline-row${pipeline.id === state.selectedPipelineId ? " selected" : ""}`; button.dataset.pipelineId = pipeline.id; button.setAttribute("aria-pressed", String(pipeline.id === state.selectedPipelineId));
-      title.textContent = pipelineTitle(pipeline); const view = scriptPipelinePresentation(pipeline); detail.textContent = `${dateLabel(pipeline.created_at)} · ${view.label} · ${view.stage}`;
+      title.textContent = pipelineTitle(pipeline); const view = scriptPipelinePresentation(pipeline); detail.textContent = `${dateLabel(pipeline.created_at)} · ${view.label} · ${view.stage} · ${scriptVideoFormatLabel(scriptPipelineVideoFormat(pipeline))}`;
       button.append(title, detail); button.addEventListener("click", () => selectPipeline(pipeline.id)); list.append(button);
     }
     const pipeline = state.pipeline, view = scriptPipelinePresentation(pipeline);
     $("scriptVideoPipelineBadge").textContent = view.label; $("scriptVideoPipelineBadge").className = `script-job-badge ${pipeline?.status || ""}`;
     $("scriptVideoPipelineStage").textContent = pipeline ? `${pipelineTitle(pipeline)} · ${view.stage}` : view.stage;
     $("scriptVideoPipelineDetail").textContent = pipeline?.error || pipeline?.waiting_reason || (pipeline ? view.active ? "由 Studio 主機接續製作；生成稿會保留，可繼續編輯原稿。" : pipeline.status === "completed" ? "影片製作完成，可播放、下載或開啟短片接續編輯。" : "目前成果與生成紀錄已保留，檢查後可接續製作。" : "劇本 → 分鏡 → 短片 → 多模態影片 → 組片；原編輯稿不會被覆寫。");
+    if (pipeline) $("scriptVideoPipelineDetail").textContent += ` · ${scriptVideoFormatLabel(scriptPipelineVideoFormat(pipeline))}`;
     $("scriptVideoPipelineDetail").classList.toggle("error", pipeline?.status === "failed");
     $("scriptVideoPipelineProgress").value = view.progress; $("scriptVideoPipelineProgressText").textContent = `${Math.round(view.progress)}%`;
     const steps = $("scriptVideoStageList"); steps.replaceChildren(); const ordered = ["screenplay", "storyboard", "import", "render", "assemble"], current = pipeline?.status === "completed" ? ordered.length : ordered.indexOf(pipeline?.stage);
@@ -1026,7 +1088,7 @@ if (typeof document !== "undefined") {
     const error = videoPreflight(initial); if (error) { message(error, true); return; }
     state.pipelineStarting = true; updateControls();
     try {
-      if (state.dirty || !state.project.id || writingSkillNeedsCheck()) { if (!await saveProject()) return; }
+      if (state.dirty || !state.project.id || writingSkillNeedsCheck() || JSON.stringify(initial.video_settings) !== JSON.stringify(normalizeScriptVideoSettings(state.project.video_settings))) { if (!await saveProject()) return; }
       const projectId = state.project.id, generation = state.generation;
       const pipeline = await api("/api/scripts/video-pipelines", { method: "POST", body: JSON.stringify({ project_id: projectId, ...(source ? { source_job_id: source.id } : {}) }) });
       state.pipelinesRevision++; upsertPipeline(pipeline);
@@ -1146,7 +1208,7 @@ if (typeof document !== "undefined") {
     state.starting = true;
     updateControls();
     try {
-      if (state.dirty || !state.project.id || writingSkillNeedsCheck()) {
+      if (state.dirty || !state.project.id || writingSkillNeedsCheck() || (autoVideo && JSON.stringify(initial.video_settings) !== JSON.stringify(normalizeScriptVideoSettings(state.project.video_settings)))) {
         const saved = await saveProject();
         if (!saved) return;
       }
@@ -1255,6 +1317,7 @@ if (typeof document !== "undefined") {
 
   function bindEvents() {
     for (const id of Object.values(fieldIds)) $(id).addEventListener("input", markDirty);
+    for (const id of Object.values(videoFieldIds)) $(id).addEventListener("change", markDirty);
     $("scriptWritingSkill").addEventListener("change", markDirty);
     $("scriptGenre").addEventListener("change", markDirty);
     $("applyScriptSkillRecommendation").addEventListener("click", applyWritingSkillRecommendation);

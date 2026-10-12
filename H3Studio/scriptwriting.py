@@ -26,6 +26,7 @@ from script_references import (
 from script_video import ScriptVideoError, ScriptVideoManager
 from script_storyboard_cuts import StoryboardPackingError, pack_storyboard_cuts
 from script_skills import list_skills, normalize_skill_id, skill_prompt
+from script_video_format import ScriptVideoFormatError, normalize_video_settings
 from custom_loras import normalize_loras, validate_loras_for_family
 
 
@@ -146,6 +147,7 @@ def normalize_project(raw: Any, previous: dict[str, Any] | None = None) -> dict[
     try:
         result["writing_skill"] = normalize_skill_id(raw.get("writing_skill", result.get("writing_skill", "")))
         result["custom_loras"] = normalize_loras(raw.get("custom_loras", result.get("custom_loras", [])))
+        result["video_settings"] = normalize_video_settings(raw.get("video_settings"), previous=result.get("video_settings"))
     except ValueError as error:
         raise ScriptwritingError(str(error)) from error
     for key, limit in FIELD_LIMITS.items():
@@ -938,6 +940,7 @@ class ScriptwritingManager:
             # Older snapshots omitted the field, which meant no writing method.
             frozen.setdefault("writing_skill", "")
             frozen.setdefault("custom_loras", [])
+            frozen.setdefault("video_settings", normalize_video_settings())
             project = normalize_project(frozen, project)
         action = raw.get("action")
         if not isinstance(action, str) or action not in ACTIONS:
@@ -1289,6 +1292,11 @@ class ScriptwritingManager:
             job["updated_at"] = utc_now()
             self._save_jobs(job_id)
         project = new_project(storyboard["title"])
+        try:
+            video_settings = normalize_video_settings(job.get("input", {}).get("project", {}).get("video_settings"))
+        except ScriptVideoFormatError as error:
+            raise ScriptwritingError(str(error)) from error
+        project.update(aspect_ratio=video_settings["aspect_ratio"], megapixels=video_settings["megapixels"])
         project["custom_loras"] = copy.deepcopy(custom_loras)
         project["id"] = project_id
         project["synopsis"] = storyboard["synopsis"]

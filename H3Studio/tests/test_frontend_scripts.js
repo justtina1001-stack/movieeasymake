@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { normalizeScriptLoras, scriptLoraSourceUrl, scriptLoraSelectionError, scriptLoraSaveConfirmed } = require('../static/scripts.js');
+const { normalizeScriptVideoSettings, scriptVideoDimensions, scriptPipelineVideoFormat, scriptVideoFormatLabel } = require('../static/scripts.js');
 const loraHelpSource = fs.readFileSync(path.join(__dirname, '../static/lora-help.js'), 'utf8');
 const { normalizeScriptProject, normalizeScriptReferences, createNewScriptProject, createMonkeyScriptExample, scriptProjectSignature, scriptSaveOutcome, scriptDraftCandidates, scriptJobPresentation, scriptCanDeleteJob, scriptAppearanceApplyTarget, scriptPipelinePresentation, scriptPipelineVideoUrl, scriptVideoReferencesError, scriptLocalEndpoint, normalizeScriptSkills, scriptSkillSourceUrl, scriptRecommendedWritingSkill, scriptVideoHistoryRecord, scriptVideoHistoryDownloadUrl } = require('../static/scripts.js');
 const source = fs.readFileSync(path.join(__dirname, '../static/scripts.js'), 'utf8');
@@ -66,7 +67,7 @@ function fixture(handler, { confirm = () => true, referencesSupported = true, re
 
 function response(data, status = 200) { return { ok: status >= 200 && status < 300, status, async json() { return data; } }; }
 function deferred() { let resolve; const promise = new Promise(callback => { resolve = callback; }); return { promise, resolve }; }
-function project(overrides = {}) { return { id: 'project-a', title: '雨停之前', idea: '咖啡店裡一段相遇', genre: '劇情', duration: 60, characters: '', character_references: [], custom_loras: [], style: '', instructions: '', content: '原始編輯稿', writing_skill: '', revision: 3, created_at: '2026-10-02T00:00:00Z', updated_at: '2026-10-02T00:00:00Z', ...overrides }; }
+function project(overrides = {}) { return { id: 'project-a', title: '雨停之前', idea: '咖啡店裡一段相遇', genre: '劇情', duration: 60, characters: '', character_references: [], custom_loras: [], video_settings: { aspect_ratio: '16:9', megapixels: 0.4, output_resolution: 'native' }, style: '', instructions: '', content: '原始編輯稿', writing_skill: '', revision: 3, created_at: '2026-10-02T00:00:00Z', updated_at: '2026-10-02T00:00:00Z', ...overrides }; }
 function reference(overrides = {}) { return { id: 'a'.repeat(32), name: '金猴爺', type: 'character', image_asset_id: 'b'.repeat(32), image_name: '金猴爺.png', appearance: '紅金色服裝、小巧體型、金色鬍鬚', ...overrides }; }
 function appearanceJob(original = reference(), overrides = {}) { return { id: 'appearance-job', project_id: 'project-a', status: 'completed', action: 'appearance', reference_id: original.id, reference_name: original.name, content: '頭戴紅金帽，短腿與金色鬍鬚，胸前有金色飾物。', input: { project: project({ character_references: [original] }) }, ...overrides }; }
 
@@ -412,7 +413,7 @@ test('old short-cut validation failures show a recovery hint without changing th
     ui.state.job = { ...ui.state.job, error, action: 'storyboard', status: 'failed', ...change }; ui.renderPreview();
     assert.doesNotMatch(elements.get('scriptJobDetail').textContent, /短切鏡需合併/);
   }
-  assert.match(html, /scripts\.js\?v=20261005-script-loras/);
+  assert.match(html, /scripts\.js\?v=20261012-video-format/);
 });
 
 function cameraCorrection(overrides = {}) { return { scene_index: 0, shot_index: 0, original_camera: '35mm low-angle tracking shot', original_camera_detail: '鏡頭跟隨主角前進', camera: 'custom', camera_detail: '35mm low-angle tracking shot\n鏡頭跟隨主角前進', ...overrides }; }
@@ -1072,7 +1073,7 @@ test('pipeline stages, progress, failed details and original-settings resume con
   ui.state.pipelines = [pipeline]; ui.state.pipeline = pipeline; ui.state.selectedPipelineId = pipeline.id; ui.renderPipelines();
   assert.equal(elements.get('scriptVideoPipelineStage').textContent, '雨停之前 · 生成影片');
   assert.equal(elements.get('scriptVideoPipelineProgress').value, 67);
-  assert.equal(elements.get('scriptVideoPipelineDetail').textContent, pipeline.error);
+  assert.equal(elements.get('scriptVideoPipelineDetail').textContent, `${pipeline.error} · 生成 864 × 480 → 成片 864 × 480 · MP4 · 24 fps`);
   assert.equal(elements.get('resumeScriptVideoPipeline').classes.has('hidden'), false);
   assert.equal(elements.get('scriptVideoResumeHint').classes.has('hidden'), false);
   assert.match(html, /接續使用原設定與原參考圖/);
@@ -1532,7 +1533,7 @@ test('history titles render literal text and invalid editor identifiers never pr
   assert.equal(card.children[0].textContent, title); assert.equal(card.children[2].children.length, 2);
   ui.selectHistoryVideo(completedVideo().id); assert.equal(elements.get('scriptHistoryVideoTitle').textContent, title);
   assert.equal(elements.get('openScriptHistoryVideoEditor').classes.has('hidden'), true); assert.doesNotMatch(source, /\.innerHTML\s*=/);
-  assert.match(html, /scripts\.css\?v=20261005-script-loras/);
+  assert.match(html, /scripts\.css\?v=20261012-video-format/);
 });
 
 function lora(overrides = {}) { return { name: 'wushu_h3_r2v_v7_2000.safetensors', strength: 0.5, enabled: true, family: 'ref2va', ...overrides }; }
@@ -1678,4 +1679,134 @@ test('resuming and importing validate frozen LoRA snapshots independently of the
   await ui.resumePipeline(); assert.ok(calls.some(call => call.url.endsWith('/resume')));
   ui.state.job = { id: 'frozen-job', project_id: 'project-a', action: 'storyboard', status: 'completed', content: '{}', input: { project: project({ custom_loras: [lora()] }) } }; await ui.importStoryboard();
   assert.ok(calls.some(call => call.url.endsWith('/shortfilm'))); assert.equal(ui.readProject().custom_loras[0].family, 'fl2va');
+});
+test('video settings default for legacy projects and valid selections are deep copied signature fields', () => {
+  const defaults = { aspect_ratio: '16:9', megapixels: 0.4, output_resolution: 'native' };
+  for (const value of [undefined, null, [], false, { aspect_ratio: 'invalid', megapixels: '0.7', output_resolution: '4k' }]) assert.deepEqual(normalizeScriptVideoSettings(value), defaults);
+  assert.deepEqual(normalizeScriptProject({}).video_settings, defaults);
+  const settings = { aspect_ratio: '9:16', megapixels: 0.7, output_resolution: '1080p' };
+  const original = project({ video_settings: settings }), normalized = normalizeScriptProject(original);
+  assert.deepEqual(normalized.video_settings, settings); assert.notEqual(normalized.video_settings, settings);
+  normalized.video_settings.output_resolution = '720p'; assert.equal(settings.output_resolution, '1080p');
+  assert.notEqual(scriptProjectSignature(normalized), scriptProjectSignature(original));
+  const outcome = scriptSaveOutcome(project({ ...original, revision: 4 }), normalized, original);
+  assert.equal(outcome.dirty, true); assert.equal(outcome.project.video_settings.output_resolution, '720p');
+});
+
+test('all six aspect ratios and four precision choices show exact H3 dimensions and configured MP4 dimensions', () => {
+  const grids = {
+    '16:9': [[864,480],[1152,640],[1280,736],[1344,768]],
+    '9:16': [[480,864],[640,1152],[736,1280],[768,1344]],
+    '1:1': [[640,640],[832,832],[960,960],[992,992]],
+    '4:3': [[736,544],[960,736],[1088,832],[1152,864]],
+    '3:4': [[544,736],[736,960],[832,1088],[864,1152]],
+    '21:9': [[960,416],[1280,544],[1440,608],[1504,640]],
+  };
+  const hd = { '16:9':[1280,720], '9:16':[720,1280], '1:1':[720,720], '4:3':[960,720], '3:4':[720,960], '21:9':[1680,720] };
+  for (const [aspect_ratio, sizes] of Object.entries(grids)) {
+    [0.4,0.7,0.9,0.98].forEach((megapixels, index) => {
+      for (const output_resolution of ['native','720p','1080p']) {
+        const format = scriptVideoDimensions({ aspect_ratio, megapixels, output_resolution });
+        assert.deepEqual([format.generation_width,format.generation_height], sizes[index]);
+        assert.deepEqual([format.output_width,format.output_height], output_resolution === 'native' ? sizes[index] : hd[aspect_ratio].map(size => output_resolution === '1080p' ? size * 1.5 : size));
+        assert.equal(format.fps,24); assert.equal(format.container,'mp4');
+      }
+    });
+  }
+});
+
+test('video selectors persist changes in crash drafts and JSON export while previewing actual dimensions', async () => {
+  const { ui, elements, stored, downloads } = fixture(); ui.bindEvents(); ui.writeProject(project());
+  elements.get('scriptVideoAspectRatio').value = '9:16'; await elements.get('scriptVideoAspectRatio').dispatch('change');
+  elements.get('scriptVideoMegapixels').value = '0.9'; await elements.get('scriptVideoMegapixels').dispatch('change');
+  elements.get('scriptVideoResolution').value = '1080p'; await elements.get('scriptVideoResolution').dispatch('change');
+  const expected = { aspect_ratio:'9:16',megapixels:0.9,output_resolution:'1080p' };
+  assert.equal(ui.state.dirty,true); assert.deepEqual(JSON.parse(JSON.stringify(ui.readProject().video_settings)),expected);
+  assert.equal(elements.get('scriptVideoFormatSummary').textContent,'生成 736 × 1280 → 成片 1080 × 1920 · MP4 · 24 fps');
+  assert.deepEqual(JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))['project-a'].project.video_settings,expected);
+  elements.get('scriptExportFormat').value = 'json'; ui.exportDraft();
+  assert.deepEqual(JSON.parse(await downloads[0].text()).video_settings,expected);
+  assert.match(html,/升尺度不會新增細節/); assert.match(html,/必要黑邊/); assert.doesNotMatch(html,/多模態 Ref2VA · 16:9/);
+});
+
+test('video settings survive draft recovery and settings-only drafts remain recoverable', async () => {
+  const settings = { aspect_ratio:'1:1',megapixels:0.98,output_resolution:'720p' };
+  const draft = { writer:'other-tab',savedAt:20,project:project({video_settings:settings}) };
+  const { ui, elements } = fixture(); ui.writeProject(project()); ui.state.recovery=draft; await ui.restoreDraft();
+  assert.equal(elements.get('scriptVideoAspectRatio').value,'1:1'); assert.equal(elements.get('scriptVideoMegapixels').value,'0.98');
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.readProject().video_settings)),settings);
+  const settingsOnly={writer:'tab',savedAt:2,project:{video_settings:settings}};
+  assert.equal(scriptDraftCandidates([settingsOnly], {}, null).length,1);
+});
+
+test('one-click and automatic writing save changed video settings before creating their frozen pipeline', async () => {
+  const chosen={aspect_ratio:'3:4',megapixels:0.7,output_resolution:'1080p'};
+  for (const action of ['pipeline','screenplay','rewrite']) {
+    let saved;
+    const pipeline=pipelineRecord({video_settings:chosen});
+    const {ui,elements,calls}=fixture(async (url,options) => {
+      if(options.method==='PUT') { saved=JSON.parse(options.body); return response(project({...saved,revision:4})); }
+      if(url==='/api/scripts/video-pipelines' || url.startsWith('/api/scripts/video-pipelines/')) return response(pipeline);
+      return response(historyJob({action,status:'queued',video_pipeline_id:pipeline.id}));
+    });
+    prepareVideo(ui); ui.bindEvents();
+    elements.get('scriptVideoAspectRatio').value=chosen.aspect_ratio; await elements.get('scriptVideoAspectRatio').dispatch('change');
+    elements.get('scriptVideoMegapixels').value=String(chosen.megapixels); await elements.get('scriptVideoMegapixels').dispatch('change');
+    elements.get('scriptVideoResolution').value=chosen.output_resolution; await elements.get('scriptVideoResolution').dispatch('change');
+    if(action==='pipeline') await ui.startVideoPipeline(); else { ui.state.autoVideo=true; await ui.generate(action); }
+    assert.equal(calls[0].options.method,'PUT'); assert.deepEqual(saved.video_settings,chosen);
+    assert.equal(calls[1].url,action==='pipeline'?'/api/scripts/video-pipelines':'/api/scripts/jobs');
+    assert.equal(ui.state.pipeline.id,pipeline.id); assert.equal(elements.get('scriptContent').value,'原始編輯稿');
+  }
+});
+
+test('video selection changed during saving aborts both pipeline launch routes and preserves newer settings', async () => {
+  for(const action of ['pipeline','screenplay']) {
+    const pending=deferred(), first={aspect_ratio:'9:16',megapixels:0.7,output_resolution:'720p'};
+    const {ui,elements,calls,stored}=fixture(async()=>pending.promise); prepareVideo(ui,{video_settings:first}); ui.markDirty();
+    ui.state.autoVideo=true; const starting=action==='pipeline'?ui.startVideoPipeline():ui.generate(action);
+    assert.equal(calls[0].options.method,'PUT');
+    elements.get('scriptVideoResolution').value='1080p'; ui.markDirty();
+    pending.resolve(response(project({duration:15,character_references:[reference()],video_settings:first,revision:4}))); await starting;
+    assert.equal(calls.length,1); assert.equal(ui.state.pipeline,null); assert.equal(ui.state.dirty,true);
+    assert.equal(ui.readProject().video_settings.output_resolution,'1080p');
+    assert.equal(JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))['project-a'].project.video_settings.output_resolution,'1080p');
+  }
+});
+
+test('a backend that drops chosen video settings cannot start a pipeline or discard its draft', async () => {
+  const chosen={aspect_ratio:'21:9',megapixels:0.98,output_resolution:'1080p'};
+  const {ui,elements,calls,stored}=fixture(async()=>response(project({duration:15,character_references:[reference()],revision:4})));
+  prepareVideo(ui,{video_settings:chosen}); ui.markDirty(); await ui.startVideoPipeline();
+  assert.equal(calls.length,1); assert.equal(ui.state.pipeline,null); assert.equal(ui.state.dirty,true);
+  assert.match(elements.get('scriptMessage').textContent,/未完整保存影片格式/);
+  assert.deepEqual(JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))['project-a'].project.video_settings,chosen);
+});
+
+test('running pipelines and completed history display frozen exact formats while live changes affect future work', async () => {
+  const chosen={aspect_ratio:'9:16',megapixels:0.9,output_resolution:'1080p'}, frozen={aspect_ratio:'21:9',megapixels:0.7,output_resolution:'720p'};
+  const actual={generation_width:1280,generation_height:544,output_width:1680,output_height:720,fps:24,container:'mp4'};
+  const pipeline=pipelineRecord({video_settings:frozen,video_format:actual,snapshot:{video_settings:chosen}});
+  const before=JSON.stringify(pipeline),{ui,elements}=fixture(); prepareVideo(ui,{video_settings:chosen}); ui.bindEvents();
+  ui.state.pipelines=[pipeline]; ui.state.pipeline=pipeline; ui.renderPipelines();
+  assert.match(elements.get('scriptVideoPipelineDetail').textContent,/生成 1280 × 544 → 成片 1680 × 720/);
+  assert.equal(elements.get('scriptVideoFormatFutureHint').classes.has('hidden'),false);
+  assert.equal(elements.get('scriptVideoAspectRatio').disabled,false);
+  elements.get('scriptVideoAspectRatio').value='1:1'; await elements.get('scriptVideoAspectRatio').dispatch('change'); ui.renderPipelines();
+  assert.equal(JSON.stringify(pipeline),before); assert.match(elements.get('scriptVideoPipelineDetail').textContent,/生成 1280 × 544 → 成片 1680 × 720/);
+  const completed={...pipeline,status:'completed',video_url:`/api/editor/exports/${'d'.repeat(32)}/file`};
+  assert.deepEqual(scriptVideoHistoryRecord(completed).video_format,actual);
+  ui.receiveVideoHistory({items:[completed]}); ui.selectHistoryVideo(completed.id);
+  assert.match(elements.get('scriptHistoryVideoDetail').textContent,/生成 1280 × 544 → 成片 1680 × 720 · MP4 · 24 fps/);
+  assert.equal(scriptVideoFormatLabel(scriptPipelineVideoFormat(pipelineRecord())),'生成 864 × 480 → 成片 864 × 480 · MP4 · 24 fps');
+});
+
+test('resume uses its frozen format without saving or sending the edited future video settings', async () => {
+  const frozen={aspect_ratio:'9:16',megapixels:0.7,output_resolution:'720p'}, edited={aspect_ratio:'1:1',megapixels:0.98,output_resolution:'1080p'};
+  const previous=pipelineRecord({status:'interrupted',video_settings:frozen});
+  const {ui,elements,calls}=fixture(async()=>response({...previous,status:'running'})); prepareVideo(ui,{video_settings:edited}); ui.markDirty();
+  ui.state.pipeline=previous; ui.state.selectedPipelineId=previous.id; await ui.resumePipeline();
+  assert.equal(calls.length,1); assert.equal(calls[0].options.body,'{}'); assert.ok(calls[0].url.endsWith('/resume'));
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.readProject().video_settings)),edited);
+  assert.match(elements.get('scriptVideoPipelineDetail').textContent,/生成 640 × 1152 → 成片 720 × 1280/);
 });

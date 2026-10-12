@@ -26,12 +26,16 @@ from aiohttp import web
 
 from editor_speed import clip_duration, source_at, validate_speed_curve
 from editor_animations import MainTransitionCompositor, animate_main_frame, validate_animations, validate_transition_pairs, validate_transition_setting
+from domain import ASPECT_RATIOS, compute_dimensions
 
 
 LOGGER = logging.getLogger(__name__)
 SAFE_ID = re.compile(r"[a-f0-9]{32}\Z")
 CLIP_ID = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 DIMENSIONS = {360, 480, 512, 576, 640, 720, 768, 854, 864, 960, 1024, 1080, 1280, 1440, 1920}
+DIMENSIONS.update(side for ratio in ASPECT_RATIOS for megapixels in (0.4, 0.7, 0.9, 0.98)
+                  for side in compute_dimensions(ratio, megapixels))
+DIMENSIONS.update({1680, 2520})
 FRAME_RATES = {24, 25, 30, 60}
 SAMPLE_RATE = 48000
 ACTIVE = {"queued", "running"}
@@ -780,7 +784,9 @@ class EditorStore:
         width, height = payload.get("width", current.get("width", 1280)), payload.get("height", current.get("height", 720))
         fps = payload.get("fps", current.get("fps", 24))
         if type(width) is not int or type(height) is not int or width not in DIMENSIONS or height not in DIMENSIONS:
-            raise EditorError("請使用支援的常用偶數尺寸，任一邊最多 1920 像素。")
+            raise EditorError("請使用支援的影片尺寸，任一邊最多 1920 像素；21:9 影片可使用 2520×1080。")
+        if max(width, height) > 1920 and (width, height) not in {(2520, 1080), (1080, 2520)}:
+            raise EditorError("超過 1920 像素的尺寸僅支援 21:9 的 2520×1080。")
         if type(fps) is not int or fps not in FRAME_RATES:
             raise EditorError("幀率只能使用 24、25、30 或 60。")
         clips = payload.get("clips", current.get("clips", []))

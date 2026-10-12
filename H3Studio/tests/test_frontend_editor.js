@@ -8,6 +8,7 @@ const {
   clone, duration, totalDuration, signature, locateTime, validateProject,
   splitAt, reorder, ProjectSession, speedOf, audioGain, audioClips, freeAudioTrack,
   splitAudioAt, detachAudio, audioPreviewCandidates, VideoDeck, AudioPreview, requireCapabilities, requireTextStyleSupport, requireAnimationSupport,
+  resolveDraft, validateCanvasDimensions, syncOutputSize,
 } = require("../static/editor.js");
 
 const project = () => ({ id: "project-a", name: "測試", width: 1280, height: 720, fps: 24, updated_at: "r1",
@@ -18,6 +19,63 @@ const project = () => ({ id: "project-a", name: "測試", width: 1280, height: 7
 });
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = () => new Promise(resolve => setImmediate(resolve));
+
+test("native generated canvases and wide HD canvases retain their sizes in recovered drafts", () => {
+  for (const [width, height] of [[736,1280],[992,992],[2520,1080],[1080,2520],[1504,640],[1680,720]]) {
+    const server = { ...project(), width, height }, draft = clone(server); draft.name = "未儲存的剪輯";
+    const source = { project: draft, savedSignature: signature(server) }, before = clone(source);
+    assert.doesNotThrow(() => validateCanvasDimensions(width,height));
+    const result = resolveDraft(server,source);
+    assert.equal(result.status,"recoverable"); assert.equal(result.project.width,width); assert.equal(result.project.height,height);
+    assert.equal(result.project.name,"未儲存的剪輯"); assert.deepEqual(source,before);
+  }
+});
+
+test("draft canvas validation still rejects square 2520, odd, unsupported and nonfinite sizes", () => {
+  for (const [width,height] of [[2520,2520],[2520,720],[1920,2520],[737,1280],[1280,721],[1600,900],[992.5,992],[Infinity,720],[NaN,720],["736",1280]]) {
+    const server=project(), draft={...server,width,height}, before=clone(server);
+    assert.throws(() => validateCanvasDimensions(width,height),/尺寸/);
+    const result=resolveDraft(server,{project:draft,savedSignature:signature(server)});
+    assert.equal(result.status,"invalid"); assert.deepEqual(result.project,before); assert.match(result.reason,/尺寸|設定/);
+  }
+});
+
+function outputSizeFixture() {
+  const select={options:[{value:"1280x720",textContent:"橫式",dataset:{}},{value:"1920x1080",textContent:"1080p",dataset:{}}],
+    add(option) { this.options.push(option); }, remove(index) { this.options.splice(index,1); },
+    set value(value) { this.selected=this.options.some(option=>option.value===value)?value:""; }, get value() { return this.selected; }};
+  return {select,makeOption:()=>({value:"",textContent:"",dataset:{}})};
+}
+
+test("output sizes add exactly one selected current option and remove it when switching projects", () => {
+  const {select,makeOption}=outputSizeFixture();
+  for(const [width,height] of [[736,1280],[992,992],[2520,1080]]) {
+    syncOutputSize(select,width,height,makeOption); syncOutputSize(select,width,height,makeOption);
+    assert.equal(select.value,`${width}x${height}`);
+    assert.equal(select.options.length,3); assert.equal(select.options[2].textContent,`目前尺寸 · ${width} × ${height}`);
+    assert.equal(select.options.filter(option=>option.dataset.currentCanvasSize==="true").length,1);
+  }
+  syncOutputSize(select,1280,720,makeOption); assert.equal(select.value,"1280x720"); assert.equal(select.options.length,2);
+  const before=JSON.stringify(select.options); assert.throws(()=>syncOutputSize(select,2520,2520,makeOption)); assert.equal(JSON.stringify(select.options),before);
+});
+
+test("production render preserves portrait, square and ultrawide imported canvas sizes without selecting 720p", () => {
+  const {select,makeOption}=outputSizeFixture(), elements=new Map([["outputSize",select]]);
+  let value=project();
+  const element=id=> { if(!elements.has(id)) elements.set(id,{classList:{toggle() {}},value:"",textContent:""}); return elements.get(id); };
+  const context=vm.createContext({ $:element,project:()=>value,document:{activeElement:null},totalDuration,
+    syncOutputSize:(target,width,height)=>syncOutputSize(target,width,height,makeOption),
+    renderProjectList() {},renderTimeline() {},renderInspector() {},renderStatus() {},renderExport() {},fitCanvas() {},renderCacheStatus() {},renderOverlayPreview() {} });
+  const renderStart=browserSource.search(/  function render\(\) \{\r?\n    if \(!project\(\)\) return;/);
+  assert.notEqual(renderStart,-1); const renderEnd=browserSource.indexOf("\n  function updatePlayhead",renderStart);
+  vm.runInContext(browserSource.slice(renderStart,renderEnd),context);
+  for(const [width,height] of [[736,1280],[992,992],[2520,1080],[1280,720]]) {
+    value={...project(),width,height}; const before=clone(value); context.render();
+    assert.equal(select.value,`${width}x${height}`); assert.equal(element("canvasBadge").textContent,`${width} × ${height}`);
+    assert.deepEqual(value,before); assert.equal(element("outputFps").value,"24");
+    assert.equal(select.options.filter(option=>option.dataset.currentCanvasSize==="true").length,width===1280&&height===720?0:1);
+  }
+});
 
 test("sequential preview maps exact boundaries to the next source in-point, including repeated media", () => {
   const value = project();

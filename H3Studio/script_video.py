@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from custom_loras import validate_loras_for_family
+from script_video_format import normalize_video_settings, video_dimensions
 
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -107,6 +108,7 @@ class ScriptVideoManager:
 
     def _check_snapshot(self, snapshot: dict[str, Any]) -> None:
         try:
+            normalize_video_settings(snapshot.get("video_settings"))
             snapshot["custom_loras"] = validate_loras_for_family(snapshot.get("custom_loras", []), "ref2va")
         except ValueError as error:
             raise ScriptVideoError(str(error)) from error
@@ -165,6 +167,7 @@ class ScriptVideoManager:
             if not source or source.get("status") == "completed":
                 self._validate_timeline(snapshot)
             await self.preflight(snapshot)
+            snapshot["video_settings"] = normalize_video_settings(snapshot.get("video_settings"))
             self._check_duplicate(project["id"])
             timestamp = utc_now()
             pipeline = {
@@ -175,6 +178,8 @@ class ScriptVideoManager:
                 "video_job_ids": [], "video_shots": [], "render_plan": [], "shortfilm_snapshot": None,
                 "video_url": None, "editor_project_id": None, "export_id": None,
                 "created_at": timestamp, "updated_at": timestamp, "snapshot": snapshot,
+                "video_settings": copy.deepcopy(snapshot["video_settings"]),
+                "video_format": {**video_dimensions(snapshot["video_settings"]), "container": "mp4"},
                 "automatic_source": allow_active_source, "source_action": source.get("action") if source else None,
             }
             self._save(pipeline)

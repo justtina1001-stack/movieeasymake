@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>腳本編寫 · MiniMax H3 Studio</title>
   <link rel="stylesheet" href="/static/styles.css?v=20261002-scripts">
-  <link rel="stylesheet" href="/static/scripts.css?v=20261005-script-loras-layout">
+  <link rel="stylesheet" href="/static/scripts.css?v=20261012-video-format">
   <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-help">
 </head>
 <body class="script-body">
@@ -59,7 +59,22 @@
           <label>創作要求<textarea id="scriptInstructions" rows="5" maxlength="12000" placeholder="總長嚴格 15 秒；只寫 0–2、2–4、4–6.5、6.5–9、9–12、12–15 秒六段，15 秒結束。&#10;每段交代焦段（mm）／景別／機位、角色方向與距離；動作按準備→變化→反應→結束姿態寫出 2–4 個可見變化。&#10;具體描述眼神、表情、手部與重心；運鏡方向／速度／結束構圖，並列 VFX、音效與逐字對白。&#10;只補細節，不新增時間段或重複收尾；全片零 BGM。"></textarea></label>
           <p class="script-hint">寫細一點：先分配時間，再要求每段的可見動作、空間關係與鏡頭變化。例如「眼神移向門口→右手停住→重心後移」，比「他很驚訝」更容易表演；細節需在該段秒數內完成，最後時間碼等於目標片長。</p>
         </div>
-        <section class="script-video-setup" aria-labelledby="scriptVideoSetupTitle"><h3 id="scriptVideoSetupTitle">劇本接續影片</h3><label class="script-auto-video-option"><input id="scriptAutoVideo" type="checkbox"><span><strong>自動生成影片</strong><small>編寫完整劇本或潤飾完成後，自動接續分鏡、影片與組片。一般手動編寫預設關閉。</small></span></label><label>一鍵製作來源<select id="scriptVideoSource"><option value="current">編輯稿／故事想法</option><option value="preview">目前選擇的已完成劇本</option></select></label><button id="startScriptVideoPipeline" class="button primary wide" type="button" disabled>劇本 → 自動生成影片</button><p class="script-hint">多模態 Ref2VA · 16:9 · 原生品質。至少提供一張角色、場景或物件圖；每個角色需有對應圖片與外觀描述。原編輯稿與生成紀錄保留。</p><p id="scriptVideoReadyStatus" class="script-hint" role="status" aria-live="polite">正在檢查自動影片功能…</p></section>
+        <section class="script-video-setup" aria-labelledby="scriptVideoSetupTitle">
+          <h3 id="scriptVideoSetupTitle">劇本接續影片</h3>
+          <label class="script-auto-video-option"><input id="scriptAutoVideo" type="checkbox"><span><strong>自動生成影片</strong><small>編寫完整劇本或潤飾完成後，自動接續分鏡、影片與組片。一般手動編寫預設關閉。</small></span></label>
+          <div class="script-video-format-fields">
+            <label>畫面比例<select id="scriptVideoAspectRatio"><option value="16:9">16:9 橫式</option><option value="9:16">9:16 直式</option><option value="1:1">1:1 正方形</option><option value="4:3">4:3 橫式</option><option value="3:4">3:4 直式</option><option value="21:9">21:9 寬螢幕</option></select></label>
+            <label>生成精細度<select id="scriptVideoMegapixels"><option value="0.4">0.4 MP · 標準</option><option value="0.7">0.7 MP · 較細緻</option><option value="0.9">0.9 MP · 高精細</option><option value="0.98">0.98 MP · 最高精細</option></select></label>
+            <label>成片解析度<select id="scriptVideoResolution"><option value="native">跟隨生成尺寸</option><option value="720p">720p</option><option value="1080p">1080p</option></select></label>
+          </div>
+          <p id="scriptVideoFormatSummary" class="script-video-format-summary" role="status" aria-live="polite">生成 864 × 480 → 成片 864 × 480 · MP4 · 24 fps</p>
+          <p class="script-hint">提高生成精細度會增加生成負擔。成片升尺度不會新增細節；影片比例與成片尺寸不同時，會補上必要黑邊以保留完整畫面。</p>
+          <p id="scriptVideoFormatFutureHint" class="script-hint hidden">影片流程使用啟動時保存的格式；目前變更只供下一個新流程使用。接續仍沿用原格式。</p>
+          <label>一鍵製作來源<select id="scriptVideoSource"><option value="current">編輯稿／故事想法</option><option value="preview">目前選擇的已完成劇本</option></select></label>
+          <button id="startScriptVideoPipeline" class="button primary wide" type="button" disabled>劇本 → 自動生成影片</button>
+          <p class="script-hint">多模態 Ref2VA · 原生品質。至少提供一張角色、場景或物件圖；每個角色需有對應圖片與外觀描述。原編輯稿與生成紀錄保留。</p>
+          <p id="scriptVideoReadyStatus" class="script-hint" role="status" aria-live="polite">正在檢查自動影片功能…</p>
+        </section>
         <div class="script-ai-actions" aria-label="AI 寫作功能">
           <button class="button secondary" type="button" data-script-action="outline"><span>01</span><strong>故事大綱</strong><small>發展主題與起承轉合</small></button>
           <button class="button primary" type="button" data-script-action="screenplay"><span>02</span><strong>編寫完整劇本</strong><small>場景、動作與角色對白</small></button>
@@ -92,6 +107,6 @@
     <footer class="script-page-footer">MiniMax H3 Studio <span>從文字開始，把故事帶到畫面。</span></footer>
   </main>
   <script src="/static/lora-help.js?v=20261005-lora-help" defer></script>
-  <script src="/static/scripts.js?v=20261005-script-loras" defer></script>
+  <script src="/static/scripts.js?v=20261012-video-format" defer></script>
 </body>
 </html>

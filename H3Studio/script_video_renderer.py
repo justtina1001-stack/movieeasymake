@@ -10,6 +10,7 @@ from scriptwriting import ScriptwritingError, local_base_url
 from shortfilm import compile_shot_payload, flatten_shots, resolve_shot_asset_ids, validate_shot_references
 from custom_loras import active_loras, validate_loras_for_family
 from h3_prompt_translation import prepare_h3_payload, payload_digest
+from script_video_format import normalize_video_settings, video_dimensions, ScriptVideoFormatError
 
 
 class ScriptVideoRenderer:
@@ -54,6 +55,7 @@ class ScriptVideoRenderer:
 
     async def preflight(self, project):
         try:
+            normalize_video_settings(project.get("video_settings"))
             loras = validate_loras_for_family(project.get("custom_loras", []), "ref2va")
         except ValueError as error:
             raise ScriptwritingError(str(error)) from error
@@ -104,6 +106,9 @@ class ScriptVideoRenderer:
 
     async def compile_all(self, shortfilm_id, pipeline_id):
         project = self.app["shortfilms"].get(shortfilm_id)
+        pipelines = getattr(self.app.get("script_video"), "pipelines", {})
+        pipeline = pipelines.get(pipeline_id, {}) if isinstance(pipelines, dict) else {}
+        self._validate_frozen_format(project, pipeline)
         shots = flatten_shots(project)
         if not 1 <= len(shots) <= 50 or sum(shot["duration"] for _, shot in shots) > 600:
             raise ScriptwritingError("自動影片最多 50 個片段、合計最多 600 秒，請縮短劇本後重試。")
@@ -122,6 +127,24 @@ class ScriptVideoRenderer:
                 manifest["prepared_source_digest"] = payload_digest(raw)
             manifests.append(manifest)
         return manifests
+
+    @staticmethod
+    def _video_settings(pipeline):
+        snapshot = pipeline.get("snapshot") or {}
+        value = pipeline.get("video_settings") if "video_settings" in pipeline else snapshot.get("video_settings")
+        try:
+            return normalize_video_settings(value)
+        except ScriptVideoFormatError as error:
+            raise ScriptwritingError(str(error)) from error
+
+    @classmethod
+    def _validate_frozen_format(cls, project, pipeline):
+        snapshot = pipeline.get("snapshot") or {}
+        if "video_settings" not in pipeline and "video_settings" not in snapshot:
+            return
+        settings = cls._video_settings(pipeline)
+        if project.get("aspect_ratio", "16:9") != settings["aspect_ratio"] or project.get("megapixels", 0.4) != settings["megapixels"]:
+            raise ScriptwritingError("影片比例或生成解析度已被修改，請開始新的流程；已完成的片段仍保留。", 409)
 
     @staticmethod
     def _generation_source(project):
@@ -175,6 +198,9 @@ class ScriptVideoRenderer:
 
     async def render_shot(self, shortfilm_id, scene_id, shot_id, pipeline_id, *, expected_payload=None):
         project = self.app["shortfilms"].get(shortfilm_id)
+        pipelines = getattr(self.app.get("script_video"), "pipelines", {})
+        pipeline = pipelines.get(pipeline_id, {}) if isinstance(pipelines, dict) else {}
+        self._validate_frozen_format(project, pipeline)
         found = next(((scene, shot) for scene, shot in flatten_shots(project) if scene["id"] == scene_id and shot["id"] == shot_id), None)
         if found is None:
             raise ScriptwritingError("自動分鏡已被修改或刪除；請開始新的流程，避免混用不同版本。", 409)
@@ -219,6 +245,7 @@ class ScriptVideoRenderer:
         async with self._assemble_lock:
             editor = self.app["editor"]
             pipeline = self.app["script_video"].pipelines[pipeline_id]
+            dimensions = video_dimensions(self._video_settings(pipeline))
             if pipeline.get("export_id"):
                 saved_export = editor.exports.get(pipeline["export_id"])
                 if saved_export and saved_export["status"] == "completed":
@@ -238,9 +265,9 @@ class ScriptVideoRenderer:
                 clips.append({"id": f"clip-{index + 1}", "media_id": media["id"], "in": 0,
                               "out": min(requested, media["duration"]), "volume": 1, "speed": 1,
                               "fade_in": 0, "fade_out": 0})
-            # 864x480 is the existing H3 0.4MP profile and an editor-supported canvas.
-            edited = editor.create_project({"name": f"{project['title']} · 自動影片", "width": 864, "height": 480,
-                                            "fps": 24, "clips": clips, "audio_clips": [], "overlays": []})
+            edited = editor.create_project({"name": f"{project['title']} · 自動影片", "width": dimensions["output_width"],
+                                            "height": dimensions["output_height"], "fps": dimensions["fps"],
+                                            "clips": clips, "audio_clips": [], "overlays": []})
             pipeline["editor_project_id"] = edited["id"]
             await progress_callback({"editor_project_id": edited["id"]})
             while editor.export_task is not None and not editor.export_task.done():

@@ -17,6 +17,24 @@
   const speedLabel = clip => speedCurve(clip).length ? "曲線變速" : `${speedOf(clip)}×`;
   const audioClips = project => project.audio_clips || [];
   const overlays = project => project.overlays || [];
+  const EDITOR_DIMENSIONS = new Set([360, 416, 480, 512, 544, 576, 608, 640, 720, 736, 768, 832, 854, 864, 960, 992, 1024, 1080, 1088, 1152, 1280, 1344, 1440, 1504, 1680, 1920, 2520]);
+  function validateCanvasDimensions(width, height) {
+    if (!Number.isInteger(width) || !Number.isInteger(height) || !EDITOR_DIMENSIONS.has(width) || !EDITOR_DIMENSIONS.has(height) || (Math.max(width, height) > 1920 && !((width === 2520 && height === 1080) || (width === 1080 && height === 2520)))) throw new Error("專案畫面尺寸不在支援範圍內。");
+  }
+  function syncOutputSize(select, width, height, makeOption = () => root.document.createElement("option")) {
+    validateCanvasDimensions(width, height);
+    const value = `${width}x${height}`;
+    for (let index = select.options.length - 1; index >= 0; index--) {
+      const option = select.options[index];
+      if (option.dataset?.currentCanvasSize === "true" && option.value !== value) select.remove(index);
+    }
+    if (!Array.from(select.options).some(option => option.value === value)) {
+      const option = makeOption();
+      option.value = value; option.textContent = `目前尺寸 · ${width} × ${height}`; option.dataset.currentCanvasSize = "true";
+      select.add(option);
+    }
+    select.value = value;
+  }
   const mediaKind = media => media?.kind || "video";
   const mainDuration = project => project.clips.reduce((sum, clip) => sum + duration(clip), 0);
   const totalDuration = project => Math.max(mainDuration(project), ...overlays(project).filter(layer => layer.kind === "video").map(layer => layer.end), 0);
@@ -243,8 +261,8 @@
     if (record === null || record === undefined) return { status: "none", project: current };
     try {
       const draft = record.project;
-      const dimensions = [360, 480, 512, 576, 640, 720, 768, 854, 864, 960, 1024, 1080, 1280, 1440, 1920];
-      if (!draft || draft.id !== serverProject.id || typeof draft.name !== "string" || draft.name.length > 200 || ![draft.width, draft.height, draft.fps].every(Number.isFinite) || ![24, 25, 30, 60].includes(draft.fps) || !dimensions.includes(draft.width) || !dimensions.includes(draft.height)) throw new Error("草稿的專案設定不完整或無效。");
+      if (!draft || draft.id !== serverProject.id || typeof draft.name !== "string" || draft.name.length > 200 || ![draft.width, draft.height, draft.fps].every(Number.isFinite) || ![24, 25, 30, 60].includes(draft.fps)) throw new Error("草稿的專案設定不完整或無效。");
+      validateCanvasDimensions(draft.width, draft.height);
       validateProject(draft, media);
       for (const clip of [...draft.clips, ...audioClips(draft)]) if (typeof clip.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(clip.id) || typeof clip.media_id !== "string") throw new Error("草稿片段識別碼無效。");
       const restored = { ...current, ...editableContent(draft) };
@@ -783,6 +801,7 @@
   const core = { ...motion, ...speedMath, ...animationsCore, normalizeProjectAnimations, requireAnimationSupport, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities, editorHistoryVideoUrl, editorVideoHistoryItems, filterEditorVideoHistory, createEditorVideoHistory };
   const trackDragModule = typeof module !== "undefined" && module.exports ? require("./editor_track_drag.js") : root.H3EditorTrackDrag;
   Object.assign(core, trackDragModule.createTrackDragCore(core));
+  Object.assign(core, { validateCanvasDimensions, syncOutputSize });
   if (typeof module !== "undefined" && module.exports) module.exports = core;
   root.H3EditorCore = core;
   if (typeof document === "undefined") return;
@@ -1751,7 +1770,7 @@
     if (!project()) return;
     $("previewEmpty").classList.toggle("hidden", Boolean(totalDuration(project())));
     if (document.activeElement !== $("projectName")) $("projectName").value = project().name;
-    $("outputSize").value = `${project().width}x${project().height}`; $("outputFps").value = String(project().fps);
+    syncOutputSize($("outputSize"), project().width, project().height); $("outputFps").value = String(project().fps);
     $("canvasBadge").textContent = `${project().width} × ${project().height}`;
     renderProjectList(); renderTimeline(); renderInspector(); renderStatus(); renderExport(); fitCanvas(); renderCacheStatus(); renderOverlayPreview();
   }
