@@ -103,7 +103,8 @@ class ScriptAPITests(unittest.IsolatedAsyncioTestCase):
         self.lock = asyncio.Lock()
         self.mode = "normal"
         self.tags = [{"name": DEFAULT_SETTINGS["model"], "size": 18_000_000_000}]
-        self.show = {"capabilities": ["completion", "thinking"]}
+        self.show = {"capabilities": ["completion", "thinking"],
+                     "model_info": {"general.architecture": "qwen3", "qwen3.context_length": 40_960}}
         self.reply = "第 1 場 外景 車站 日\n阿青：我們回家吧。"
         self.chat_requests = []
         self.unloads = []

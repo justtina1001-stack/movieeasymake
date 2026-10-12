@@ -33,7 +33,7 @@ class PromptTriggerTests(unittest.TestCase):
         compiled = compile_request(raw)
         self.assertEqual(raw, original)
         self.assertTrue(compiled.prompt.startswith("subject_definitions:"))
-        self.assertIn("detailed_description:\n[Shot 1] wushu_action,", compiled.prompt)
+        self.assertIn("[Shot 1] wushu_action,", compiled.prompt.split("detailed_description:\n", 1)[1])
         self.assertIn("<d>[English] hello.</d>", compiled.prompt)
         self.assertNotIn("prfight2", compiled.prompt)
         workflow = build_workflow(compiled, {"a" * 32: "a.png"}, "test")

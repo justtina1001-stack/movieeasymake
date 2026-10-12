@@ -193,7 +193,11 @@ function scriptVideoReferencesError(project) {
 
 function scriptOutputBudgetNote(job) {
   const budget = job?.input?.settings?.num_predict;
-  return job?.output_budget_adjusted === true && Number.isSafeInteger(budget) && budget > 0 ? `依稿件長度，本次輸出上限調整為 ${budget} Token。` : "";
+  const capacity = job?.input?.settings?.num_ctx;
+  const notes = [];
+  if (job?.context_budget_adjusted === true && Number.isSafeInteger(capacity) && capacity > 0) notes.push("已依完整稿件調整本次處理容量，原文保留。");
+  if (job?.output_budget_adjusted === true && Number.isSafeInteger(budget) && budget > 0) notes.push(`依稿件長度，本次輸出上限調整為 ${budget} Token。`);
+  return notes.join(" ");
 }
 
 function scriptStoryboardNote(job) {

@@ -40,6 +40,8 @@ ACTIONS = {"outline", "screenplay", "rewrite", "storyboard", "appearance"}
 ACTIVE = {"queued", "running"}
 MAX_CONTENT = 300_000
 MAX_WIRE_BYTES = 4_000_000
+STORYBOARD_AUTO_CONTEXT_LIMIT = 16_384
+CONTEXT_ALLOCATION_STEP = 2_048
 FIELD_LIMITS = {
     "title": 120, "idea": 12000, "genre": 200, "characters": 12000,
     "style": 4000, "instructions": 12000, "content": MAX_CONTENT,
@@ -512,19 +514,48 @@ def _input_token_estimate(messages: list[dict[str, str]]) -> int:
 
 
 def validate_context(messages: list[dict[str, str]], settings: dict[str, Any]) -> None:
-    if _input_token_estimate(messages) + settings["num_predict"] > settings["num_ctx"]:
-        raise ScriptwritingError("故事與既有劇本加上輸出預算已超過上下文容量估計值；請縮短素材、降低 num_predict 或提高 num_ctx。提高容量會增加本機記憶體用量。")
+    estimated = _input_token_estimate(messages)
+    if estimated + settings["num_predict"] > settings["num_ctx"]:
+        raise ScriptwritingError(
+            f"故事、既有劇本與格式指引估計需要 {estimated:,} Token，另需保留 {settings['num_predict']:,} Token 輸出；"
+            f"超過本次 {settings['num_ctx']:,} Token 容量。原劇本已保留，請提高寫作容量或調整稿件長度後接續；提高容量會增加本機記憶體用量。"
+        )
 
 
-def fit_context_settings(messages: list[dict[str, str]], settings: dict[str, Any]) -> dict[str, Any]:
-    """Treat num_predict as a ceiling while preserving every manuscript field."""
+def fit_context_settings(messages: list[dict[str, str]], settings: dict[str, Any], *,
+                         action: str | None = None, context_limit: int | None = None) -> dict[str, Any]:
+    """Keep manuscripts intact; allow bounded per-job context growth for conversion."""
     effective = copy.deepcopy(settings)
-    available = settings["num_ctx"] - _input_token_estimate(messages)
+    estimated = _input_token_estimate(messages)
+    ceiling = STORYBOARD_AUTO_CONTEXT_LIMIT
+    if context_limit is not None:
+        ceiling = min(ceiling, context_limit)
+        effective["num_ctx"] = min(effective["num_ctx"], context_limit)
+    if action == "storyboard" and effective["num_ctx"] < ceiling:
+        needed = estimated + effective["num_predict"]
+        if needed > effective["num_ctx"]:
+            allocation = math.ceil(needed / CONTEXT_ALLOCATION_STEP) * CONTEXT_ALLOCATION_STEP
+            effective["num_ctx"] = min(ceiling, allocation)
+    available = effective["num_ctx"] - estimated
     if available < min(settings["num_predict"], 1024):
-        validate_context(messages, settings)
+        validate_context(messages, effective)
     effective["num_predict"] = min(settings["num_predict"], available)
     validate_context(messages, effective)
     return effective
+
+
+def _model_context_limit(shown: dict[str, Any]) -> int | None:
+    info = shown.get("model_info")
+    if not isinstance(info, dict):
+        return None
+    architecture = info.get("general.architecture")
+    keys = [f"{architecture}.context_length"] if isinstance(architecture, str) else []
+    keys.extend(key for key in info if isinstance(key, str) and key.endswith(".context_length") and key not in keys)
+    for key in keys:
+        value = info.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
 
 
 class ScriptwritingManager:
@@ -934,12 +965,17 @@ class ScriptwritingManager:
             if missing:
                 raise ScriptwritingError("角色參考圖尚未填寫外觀描述：" + "、".join(missing) + "。請先分析外型並套用摘要，或自行填寫描述；Hermes 不會直接看圖。")
             messages = build_messages(project, action, instructions)
-        settings = fit_context_settings(messages, settings)
+        requested_settings = copy.deepcopy(settings)
+        settings = fit_context_settings(messages, settings, action=action)
         timestamp = utc_now()
         job = {"id": uuid.uuid4().hex, "project_id": project["id"], "project_title": project["title"],
                "action": action, "status": "queued", "content": "", "error": None,
                "created_at": timestamp, "updated_at": timestamp, "model": settings["model"],
-               "output_budget_adjusted": action != "appearance" and settings["num_predict"] < self.settings["num_predict"],
+               "output_budget_adjusted": action != "appearance" and settings["num_predict"] < requested_settings["num_predict"],
+               "context_budget_adjusted": settings["num_ctx"] != requested_settings["num_ctx"],
+               "context_budget": {"estimated_input_tokens": _input_token_estimate(messages),
+                                  "requested_num_ctx": requested_settings["num_ctx"],
+                                  "requested_num_predict": requested_settings["num_predict"]},
                "input": {"project": project, "settings": settings, "instructions": instructions},
                "shortfilm_id": None}
         if reference:
@@ -1000,6 +1036,23 @@ class ScriptwritingManager:
                     shown = await self._check_model(session, settings, models)
                     if job["action"] == "appearance" and "vision" not in shown.get("capabilities", []):
                         raise ScriptwritingError("外觀辨識模型不支援看圖；請選擇具備 vision 能力的本機模型，或自行填寫外觀描述。")
+                    limit = _model_context_limit(shown)
+                    if job.get("context_budget_adjusted"):
+                        job["context_budget"]["model_context_limit"] = limit
+                    bound = limit if limit is not None else job.get("context_budget", {}).get("requested_num_ctx", settings["num_ctx"])
+                    if job.get("context_budget_adjusted") and settings["num_ctx"] > bound:
+                        try:
+                            settings = fit_context_settings(messages, settings,
+                                                            action=job["action"] if limit is not None else None,
+                                                            context_limit=bound)
+                        except ScriptwritingError as error:
+                            reason = (f"所選本機模型的容量上限為 {limit:,} Token。" if limit is not None
+                                      else "本機模型未提供有效容量資訊，無法確認可安全擴充本次容量。")
+                            raise ScriptwritingError(reason + str(error)) from error
+                        job["input"]["settings"] = settings
+                        budget = job["context_budget"]
+                        job["context_budget_adjusted"] = settings["num_ctx"] != budget["requested_num_ctx"]
+                        job["output_budget_adjusted"] = settings["num_predict"] < budget["requested_num_predict"]
                 await self._release_idle_comfy(job)
                 job.update(status="running", started_at=utc_now(), updated_at=utc_now())
                 job.pop("waiting_reason", None)

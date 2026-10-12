@@ -312,6 +312,51 @@ test('job details show the actual reduced output budget only when adjusted with 
   }
 });
 
+test('context capacity adjustment preserves the manuscript and an unchanged 4096-token output budget', () => {
+  const { ui, elements } = fixture();
+  ui.writeProject(project({ content: '完整原稿與原始台詞必須保留。' }));
+  const base = { id: 'context-adjusted-job', project_id: 'project-a', status: 'running', action: 'rewrite', created_at: '2026-10-02T00:00:00Z', input: { settings: { num_ctx: 16384, num_predict: 4096 } } };
+  ui.state.job = base; ui.renderPreview();
+  const original = elements.get('scriptJobDetail').textContent;
+  ui.state.job = { ...base, context_budget_adjusted: true };
+  ui.renderPreview();
+  assert.equal(elements.get('scriptJobDetail').textContent, `${original} · 已依完整稿件調整本次處理容量，原文保留。`);
+  assert.doesNotMatch(elements.get('scriptJobDetail').textContent, /本次輸出上限調整/);
+  assert.equal(ui.state.job.input.settings.num_predict, 4096);
+  assert.equal(elements.get('scriptContent').value, '完整原稿與原始台詞必須保留。');
+  ui.renderPreview();
+  assert.equal(elements.get('scriptJobDetail').textContent, `${original} · 已依完整稿件調整本次處理容量，原文保留。`);
+});
+
+test('job details can show both valid context and output budget adjustments', () => {
+  const { ui, elements } = fixture(); ui.writeProject(project());
+  ui.state.job = { id: 'both-adjusted-job', project_id: 'project-a', status: 'completed', action: 'rewrite', content: '完整處理結果',
+    context_budget_adjusted: true, output_budget_adjusted: true, input: { settings: { num_ctx: 32768, num_predict: 2048 } } };
+  ui.renderPreview();
+  const detail = elements.get('scriptJobDetail').textContent;
+  assert.match(detail, /已依完整稿件調整本次處理容量，原文保留。/);
+  assert.match(detail, /依稿件長度，本次輸出上限調整為 2048 Token。/);
+  assert.equal(detail.match(/已依完整稿件調整本次處理容量/g).length, 1);
+  assert.equal(detail.match(/本次輸出上限調整/g).length, 1);
+});
+
+test('invalid context adjustment flags and capacities do not claim the manuscript capacity was adjusted', () => {
+  const { ui, elements } = fixture(); ui.writeProject(project());
+  const base = { id: 'invalid-context-job', project_id: 'project-a', status: 'running', action: 'rewrite', created_at: '2026-10-02T00:00:00Z', input: { settings: { num_ctx: 16384, num_predict: 4096 } } };
+  ui.state.job = base; ui.renderPreview();
+  const original = elements.get('scriptJobDetail').textContent;
+  for (const flag of [undefined, false, null, 'true', 1, {}]) {
+    ui.state.job = { ...base, context_budget_adjusted: flag };
+    ui.renderPreview();
+    assert.equal(elements.get('scriptJobDetail').textContent, original);
+  }
+  for (const input of [undefined, null, {}, { settings: null }, { settings: {} }, ...[undefined, null, 0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '16384'].map(num_ctx => ({ settings: { num_ctx, num_predict: 4096 } }))]) {
+    ui.state.job = { ...base, context_budget_adjusted: true, input };
+    ui.renderPreview();
+    assert.equal(elements.get('scriptJobDetail').textContent, original);
+  }
+});
+
 test('normalized storyboard previews explain merged cuts while retaining raw output and the manuscript', () => {
   const { ui, elements } = fixture();
   ui.writeProject(project({ duration: 15 }));

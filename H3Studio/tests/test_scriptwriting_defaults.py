@@ -271,10 +271,11 @@ class ContextBudgetSubmissionTests(unittest.IsolatedAsyncioTestCase):
                 run.assert_awaited_once()
                 messages = run.await_args.args[1]
                 effective = job["input"]["settings"]
-                self.assertTrue(job["output_budget_adjusted"])
-                self.assertEqual(effective["num_ctx"], 8192)
-                self.assertGreaterEqual(effective["num_predict"], 1024)
-                self.assertLess(effective["num_predict"], 4096)
+                self.assertFalse(job["output_budget_adjusted"])
+                self.assertTrue(job["context_budget_adjusted"])
+                self.assertGreater(effective["num_ctx"], 8192)
+                self.assertLessEqual(effective["num_ctx"], 16384)
+                self.assertEqual(effective["num_predict"], 4096)
                 self.assertEqual(manager.settings, original_settings)
                 self.assertEqual(job["input"]["project"], project)
                 self.assertEqual(job["input"]["instructions"], project["instructions"])
@@ -283,7 +284,8 @@ class ContextBudgetSubmissionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(body["instructions"], project["instructions"])
                 validate_context(messages, effective)
                 restored = ScriptwritingManager(web.Application(), root).get_job(job["id"])
-                self.assertTrue(restored["output_budget_adjusted"])
+                self.assertFalse(restored["output_budget_adjusted"])
+                self.assertTrue(restored["context_budget_adjusted"])
                 self.assertEqual(restored["input"]["settings"], effective)
                 self.assertEqual(restored["input"]["project"], project)
             await manager.close()
@@ -373,7 +375,8 @@ class DetailedScriptImportTests(unittest.TestCase):
                     if with_images:
                         self.assertIn("<Subject 1>（金猴爺） (S1)", compiled.prompt)
                         self.assertIn("<Subject 2>（神祕女子） (S2)", compiled.prompt)
-                        self.assertIn("<Picture 3>（古代遺跡）", compiled.prompt)
+                        self.assertIn("<Subject 3>（古代遺跡）", compiled.prompt)
+                        self.assertIn('named "古代遺跡", defined by <Picture 3>', compiled.prompt)
                         self.assertEqual(len(payload["references"]), 3)
 
     def test_import_removes_duplicate_first_shot_marker(self):
