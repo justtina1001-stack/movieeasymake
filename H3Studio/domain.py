@@ -460,9 +460,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         seed = 1
     steps = min(40, max(4, _safe_int(payload.get("steps"), 20)))
     reference_mode = mode in {"r2v", "replace", "popup_panel", "mg_animation"}
-    scheduler = _clean_text(payload.get("scheduler")) or ("beta" if reference_mode else "simple")
+    scheduler = _clean_text(payload.get("scheduler")) or "simple"
     if scheduler not in {"simple", "beta", "normal", "sgm_uniform", "karras"}:
-        scheduler = "beta" if reference_mode else "simple"
+        scheduler = "simple"
     ref_image_size = "max" if payload.get("ref_image_size") == "max" else "match"
     quality_mode = _clean_text(payload.get("quality_mode")) or "native"
     if quality_mode not in QUALITY_MODES:

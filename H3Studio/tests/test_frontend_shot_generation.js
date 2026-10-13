@@ -32,7 +32,7 @@ function fixture() {
     shortFilmBatchRunning: false, shortFilmSaveTimer: null, expandedShortFilmJobIds: new Set(),
     shortFilmStatusRefreshing: false, studioWorkspace: 'shortfilm',
     messages: [], calls: [], savedIds: [], listLoads: 0, renders: 0, console,
-    structuredClone, clearTimeout,
+    structuredClone, clearTimeout, confirm: () => true,
     $(selector, card) { return element(card ? `${card.dataset.sfShotId}:${selector}` : selector); },
     $$(selector) { return selector === '[data-sf-shot-id]' ? [context.card] : []; },
     card: { dataset: { sfShotId: 'shot-a' } },
@@ -53,7 +53,7 @@ function fixture() {
     },
   });
   for (const name of ['activeShortFilmProject', 'shortFilmFlatten', 'setButtonBusy', 'saveShortFilmProject',
-    'shortFilmGenerationSignature', 'renderShortFilmShotRequests', 'compileShortFilmShot', 'refreshShortFilmShotStatuses']) {
+    'shortFilmGenerationSignature', 'renderShortFilmShotRequests', 'confirmTranslationFallback', 'compileShortFilmShot', 'refreshShortFilmShotStatuses']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1, name);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), context);
@@ -100,6 +100,18 @@ test('preview prepares content without posting a render', async () => {
   assert.equal(await request, null);
   assert.equal(f.context.calls.includes('/api/render'), false);
   assert.equal(f.context.shortFilmShotRequests.size, 0);
+});
+
+test('declining original-text generation leaves the shot editable and never posts a render', async () => {
+  const f = fixture(); f.context.confirm = () => false;
+  const request = f.run('compileShortFilmShot("shot-a", true)');
+  await f.flush();
+  const prepared = f.result(); prepared.payload.h3_translation = {status:'unavailable'};
+  f.preparation.resolve(prepared);
+  assert.equal(await request, null);
+  assert.equal(f.context.calls.includes('/api/render'), false);
+  assert.equal(f.element('shot-a:[data-sf-generate-shot]').disabled, false);
+  assert.match(f.element('shot-a:[data-sf-shot-feedback]').textContent, /尚未送出/);
 });
 
 test('the submit stage remains locked and explains an English fallback before the job is accepted', async () => {

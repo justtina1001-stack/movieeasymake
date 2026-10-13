@@ -669,7 +669,7 @@ def compile_shot_payload(
         "export_frames": project.get("export_frames") is True,
         "seed": shot["seed"],
         "steps": 20,
-        "scheduler": "beta" if use_reference_mode else "simple",
+        "scheduler": "simple",
         "ref_image_size": "match",
         "motion_profile": "none",
         "motion_intensity": 3,

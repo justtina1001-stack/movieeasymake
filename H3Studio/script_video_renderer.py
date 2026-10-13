@@ -170,7 +170,12 @@ class ScriptVideoRenderer:
         if not isinstance(expected, dict) or raw.keys() != expected.keys():
             return None
         changed = {key for key in raw.keys() | expected.keys() if raw.get(key) != expected.get(key)}
-        if not changed or not changed <= {"prompt", "shortfilm_summary"}:
+        # A saved Native beta recipe predates the default alignment. After the
+        # source/manifest checks below, resume its original request unchanged.
+        scheduler_default_drift = (raw.get("scheduler") == "simple" and expected.get("scheduler") == "beta"
+                                   and raw.get("quality_mode") == expected.get("quality_mode") == "native")
+        allowed = {"prompt", "shortfilm_summary"} | ({"scheduler"} if scheduler_default_drift else set())
+        if not changed or not changed <= allowed:
             return None
         manager = self.app.get("script_video")
         pipelines = getattr(manager, "pipelines", None)

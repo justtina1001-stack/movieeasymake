@@ -25,7 +25,7 @@ function fixture() {
       return url === '/api/compile' ? c.compiled : { id: 'job-test' };
     },
   });
-  for (const name of ['escapeHtml', 'originalGenerationRequest', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'compilePreview', 'renderVideo']) {
+  for (const name of ['escapeHtml', 'originalGenerationRequest', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'showGenerationStage', 'confirmTranslationFallback', 'compilePreview', 'renderVideo']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), c);

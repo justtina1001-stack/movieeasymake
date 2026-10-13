@@ -32,7 +32,7 @@ function fixture() {
   vm.runInContext(source.slice(start, source.indexOf('\n};', start) + 3) + '\nglobalThis.defaultState = defaultState;', context);
   context.state = structuredClone(context.defaultState);
   context.state.mode = 'replace';
-  for (const name of ['renderReplacement', 'addReplacementFiles', 'collectPayload', 'recipeAsset', 'originalGenerationRequest', 'applyJobRecipe', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'renderVideo']) {
+  for (const name of ['renderReplacement', 'addReplacementFiles', 'collectPayload', 'recipeAsset', 'originalGenerationRequest', 'applyJobRecipe', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'showGenerationStage', 'confirmTranslationFallback', 'renderVideo']) {
     const index = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(index, -1);
     vm.runInContext(source.slice(index, source.indexOf('\n}', index) + 2), context);

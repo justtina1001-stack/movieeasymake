@@ -1119,7 +1119,7 @@ function currentSettings() {
 }
 
 function persistForm() {
-  state.form = currentSettings();
+  state.form = { ...currentSettings(), native_scheduler_version: 1 };
   saveState();
 }
 
@@ -1133,7 +1133,8 @@ function restoreForm() {
     duration: form.duration,
     seed: form.seed,
     steps: form.steps,
-    scheduler: form.scheduler,
+    scheduler: form.scheduler === "beta" && !form.native_scheduler_version
+      && (form.quality_mode || "native") === "native" && isReferenceMode() ? "simple" : form.scheduler,
     refImageSize: form.ref_image_size,
     qualityMode: form.quality_mode || "native",
     videoVae: ["auto", "int8", "fp16"].includes(form.video_vae) ? form.video_vae : "auto",
@@ -1334,12 +1335,14 @@ function changeQualityMode() {
     state.nativeSampling = {
       steps: Number($("#steps").value) || 20,
       scheduler: $("#scheduler").value,
+      scheduler_version: 1,
       refImageSize: $("#refImageSize").value,
     };
   } else if (!accelerated) {
     const saved = state.nativeSampling || {};
     $("#steps").value = saved.steps || 20;
-    $("#scheduler").value = saved.scheduler || (isReferenceMode() ? "beta" : "simple");
+    $("#scheduler").value = saved.scheduler === "beta" && !saved.scheduler_version && isReferenceMode()
+      ? "simple" : saved.scheduler || "simple";
     $("#refImageSize").value = saved.refImageSize || "match";
     state.nativeSampling = null;
   }
@@ -1437,8 +1440,6 @@ function setMode(mode) {
   $("#storyboardHint").textContent = ["r2v", "mg_animation"].includes(mode)
     ? "圖片可選柔性構圖參考，或用官方 Guide 精確錨定在本段開始"
     : "分鏡圖片會用官方 Guide 精確錨定在本段開始時間";
-  if (isReferenceMode(mode) && $("#qualityMode").value !== "turbo" && $("#scheduler").value === "simple") $("#scheduler").value = "beta";
-  if (!isReferenceMode(mode) && $("#qualityMode").value !== "turbo" && $("#scheduler").value === "beta") $("#scheduler").value = "simple";
   if (mode === "replace" && !state.replacement.safeDefaultsApplied) {
     $("#megapixels").value = "0.4";
     $("#duration").value = "5";
@@ -1844,7 +1845,10 @@ function showGenerationPreflight(compiled) {
 async function prepareGeneration(payload, reuse = true) {
   const signature = generationPreflightSignature(payload);
   let compiled;
-  if (reuse && generationPreflight?.signature === signature) compiled = generationPreflight.compiled;
+  const cached = generationPreflight?.compiled;
+  const fallbackSeedChanged = cached?.prepared_payload?.h3_translation?.status === "unavailable"
+    && cached.prepared_payload.seed !== payload.seed;
+  if (reuse && generationPreflight?.signature === signature && !fallbackSeedChanged) compiled = cached;
   else {
     compiled = await api("/api/compile", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -1856,23 +1860,49 @@ async function prepareGeneration(payload, reuse = true) {
   return { compiled, payload: { ...(compiled.prepared_payload || payload), seed: payload.seed } };
 }
 
+function showGenerationStage(message) {
+  const note = $("#generationPreparationStatus");
+  if (!note) return;
+  note.textContent = message;
+  note.classList.remove("hidden");
+}
+
+function confirmTranslationFallback(payload) {
+  const translation = payload?.h3_translation;
+  if (translation?.status !== "unavailable") return true;
+  const reason = translation.reason_code === "timeout" ? "英文整理逾時" : "英文整理未完成";
+  return confirm(`${reason}，這次內容仍是原文。\n\n使用原文生成可能影響模型對描述的理解。\n按「確定」使用原文生成；按「取消」返回，再按「預覽編譯提示詞」重新整理。`);
+}
+
 async function compilePreview() {
   const button = $("#compileButton");
+  if (button.disabled || $("#renderButton").getAttribute("aria-busy") === "true") return null;
+  const renderButton = $("#renderButton");
+  const renderWasDisabled = renderButton.disabled;
   setButtonBusy(button, true);
+  renderButton.disabled = true;
+  showGenerationStage("正在整理提示詞與參考素材；這一步還沒進影片佇列，本機模型可能需幾分鐘。");
   try {
     const payload = collectPayload();
-    const { compiled: result } = await prepareGeneration(payload);
+    const { compiled: result } = await prepareGeneration(payload, false);
+    showGenerationStage(result.prepared_payload?.h3_translation?.status === "unavailable"
+      ? "英文整理未完成，已顯示原文與提醒；影片尚未送出。"
+      : "影片內容準備完成，可檢查提示詞後開始生成。");
     toast(`提示詞已編譯，使用 ${result.asset_count} 個素材`);
     return result;
   } catch (error) {
+    showGenerationStage(`內容準備失敗：${error.message}。影片尚未送出。`);
     toast(error.message, true);
     throw error;
   } finally {
     setButtonBusy(button, false);
+    renderButton.disabled = renderWasDisabled;
   }
 }
 
 async function renderVideo() {
+  const button = $("#renderButton");
+  if (button.disabled || $("#compileButton").disabled) return null;
   const unresolvedKeywords = promptKeywords();
   if (unresolvedKeywords.length && !confirm(`提示詞還有 ${unresolvedKeywords.length} 個 {{關鍵字}} 尚未替換：\n\n${unresolvedKeywords.slice(0, 8).join("、")}${unresolvedKeywords.length > 8 ? "…" : ""}\n\n仍要送出生成嗎？`)) return;
   if (state.mode === "replace") {
@@ -1882,27 +1912,44 @@ async function renderVideo() {
     const highRisk = batchDuration > 10 || (Number($("#megapixels").value) >= 0.9 && batchDuration > 5);
     if (highRisk && !confirm("目前的解析度／時長對 16GB VRAM 有較高爆顯存風險。建議先改成 0.4MP、5 秒。仍要送出嗎？")) return;
   }
-  const button = $("#renderButton");
+  const previewButton = $("#compileButton");
   setButtonBusy(button, true);
-  button.querySelector("span").textContent = "送入工作佇列...";
+  previewButton.disabled = true;
+  button.querySelector("span").textContent = "正在準備影片內容…";
+  showGenerationStage("正在整理提示詞與參考素材；這一步還沒進影片佇列，本機模型可能需幾分鐘。");
+  let submittedJob = null;
   try {
     if ($("#videoSeedAuto").getAttribute("aria-pressed") === "true") {
       $("#seed").value = randomVideoSeed($("#seed").value);
       persistForm();
     }
-    const { payload } = await prepareGeneration(collectPayload());
+    const original = collectPayload();
+    const signature = generationPreflightSignature(original);
+    const { payload } = await prepareGeneration(original);
+    if (generationPreflightSignature(collectPayload()) !== signature) throw new Error("準備期間設定已變更，這次未送出。請確認設定後再生成。");
+    if (!confirmTranslationFallback(payload)) {
+      showGenerationStage("影片尚未送出；可按「預覽編譯提示詞」重試英文整理，或調整內容後再次生成。");
+      return null;
+    }
+    button.querySelector("span").textContent = "正在送入工作佇列…";
+    showGenerationStage("內容準備完成，正在提交影片工作…");
     const job = await api("/api/render", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+    submittedJob = job;
+    showGenerationStage(`工作 ${job.id.slice(0, 8)} 已加入佇列，可在作品列表查看進度。`);
     toast(`工作 ${job.id.slice(0, 8)} 已加入佇列`);
     await loadJobs(true);
     $(".jobs-section").scrollIntoView({ behavior: "smooth" });
   } catch (error) {
-    toast(error.message, true);
+    const message = submittedJob ? `工作 ${submittedJob.id.slice(0, 8)} 已送出，但列表更新失敗：${error.message}` : error.message;
+    showGenerationStage(submittedJob ? message : `準備或提交失敗：${message}`);
+    toast(message, true);
   } finally {
     setButtonBusy(button, false);
+    previewButton.disabled = false;
     button.querySelector("span").textContent = "開始生成影片";
   }
 }
@@ -3342,6 +3389,10 @@ async function compileShortFilmShot(shotId, generate = false) {
     }
     if (!generate) {
       toast(`提示詞已依官方格式編譯，使用 ${result.compiled.asset_count} 個素材。`);
+      return null;
+    }
+    if (!confirmTranslationFallback(result.payload)) {
+      update("error", "影片尚未送出；可按「預覽提示詞」重試英文整理，或調整內容後再次生成。");
       return null;
     }
     update("submitting", result.payload?.h3_translation?.status === "unavailable"

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261012-shot-generation-ui">
+  <link rel="stylesheet" href="/static/styles.css?v=20261013-generation-stages">
   <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-help">
 </head>
 <body>
@@ -376,6 +376,7 @@
             </div>
             <button id="compileButton" class="button secondary wide" type="button">預覽編譯提示詞</button>
             <button id="renderButton" class="button primary wide" type="button"><span>開始生成影片</span><i>→</i></button>
+            <p id="generationPreparationStatus" class="render-note hidden" role="status" aria-live="polite"></p>
             <p id="renderNote" class="render-note">工作會依序進入本機 GPU 佇列。</p>
           </section>
 
@@ -899,7 +900,7 @@ non_diegetic_music: ...</pre></div>
     </section>
   </div>
   <script src="/static/lora-help.js?v=20261005-lora-help"></script>
-  <script src="/static/app.js?v=20261012-shot-generation-ui"></script>
+  <script src="/static/app.js?v=20261013-generation-stages"></script>
   <script src="/static/face-repair.js?v=20260917-face-repair"></script>
 </body>
 </html>

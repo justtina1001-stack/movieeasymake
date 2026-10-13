@@ -36,6 +36,44 @@ _SYSTEM = (
 _WARNING = "英文敘述整理未完成，已保留原文；可先啟動本機編劇模型，再重新預覽。"
 _FALLBACK_HANDOFF_TTL = 120
 _FALLBACK_HANDOFF_LIMIT = 128
+_FAILURE_MESSAGES = {
+    "timeout": "本機 CPU 英文整理逾時（連線期限 3 秒、讀取期限 175 秒）；已保留原文。",
+    "model_unavailable": "本機英文整理服務或已下載的模型目前無法使用；已保留原文。",
+    "invalid_response": "本機模型回應未通過格式或受保護內容驗證；已保留原文，未採用部分翻譯。",
+    "local_error": "本機英文整理設定或執行失敗；已保留原文。",
+}
+
+
+class _TranslationFailure(ValueError):
+    """A trusted phase classification; never retain model or HTTP error text."""
+
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code
+        super().__init__(_FAILURE_MESSAGES[reason_code])
+
+
+def _http_failure_reason(status: int) -> str:
+    return "model_unavailable" if status in {404, 410, 429, 502, 503, 504} else "local_error"
+
+
+def _failure_diagnostics(error: Exception, started_at: float) -> dict:
+    if isinstance(error, _TranslationFailure):
+        reason = error.reason_code
+    elif isinstance(error, TimeoutError):
+        reason = "timeout"
+    elif isinstance(error, aiohttp.InvalidURL):
+        reason = "local_error"
+    elif isinstance(error, (aiohttp.ContentTypeError, aiohttp.ClientPayloadError, ValueError, TypeError, KeyError)):
+        reason = "invalid_response"
+    elif isinstance(error, aiohttp.ClientConnectionError):
+        reason = "model_unavailable"
+    elif isinstance(error, aiohttp.ClientResponseError):
+        reason = _http_failure_reason(error.status)
+    else:
+        reason = "local_error"
+    # Exception strings can contain credentials, URLs, prompt text or model output.
+    return {"reason_code": reason, "error_message": _FAILURE_MESSAGES[reason],
+            "elapsed_seconds": round(max(0.0, time.monotonic() - started_at), 3)}
 
 
 def payload_digest(payload: dict) -> str:
@@ -181,29 +219,34 @@ class H3PromptTranslator:
 
     async def _request(self, values: dict[str, str], settings: dict) -> dict:
         """Use local CPU inference so preparation never evicts a running H3 job."""
-        parsed = urlsplit(str(settings.get("base_url", "")))
+        try:
+            parsed = urlsplit(str(settings.get("base_url", "")))
+        except ValueError:
+            raise _TranslationFailure("local_error") from None
         if (parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
                 or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
-            raise ValueError("英文整理只能使用已設定的本機模型。")
+            raise _TranslationFailure("local_error")
         model = settings.get("model")
         if not isinstance(model, str) or not model or ":cloud" in model.lower():
-            raise ValueError("英文整理需要已下載的本機模型。")
+            raise _TranslationFailure("model_unavailable")
         base_url = str(settings["base_url"]).rstrip("/")
         timeout = aiohttp.ClientTimeout(total=180, sock_connect=3, sock_read=175)
         async with aiohttp.ClientSession(trust_env=False, timeout=timeout) as session:
             # A local Ollama origin can expose cloud models; reject those as well.
             async with session.get(base_url + "/api/tags", allow_redirects=False) as response:
                 if response.status != 200:
-                    raise ValueError("本機模型服務尚未就緒。")
+                    raise _TranslationFailure("model_unavailable")
                 inventory = await response.json()
             models = inventory.get("models") if isinstance(inventory, dict) else None
+            if not isinstance(models, list):
+                raise _TranslationFailure("invalid_response")
             selected = next((item for item in models or [] if isinstance(item, dict)
                              and item.get("name") in {model, model + ":latest"}), None)
             if selected is None or any(selected.get(key) for key in ("remote_host", "remote_model")):
-                raise ValueError("找不到已下載的本機編劇模型。")
+                raise _TranslationFailure("model_unavailable")
             details = selected.get("details") or {}
             if isinstance(details, dict) and any(details.get(key) for key in ("remote_host", "remote_model")):
-                raise ValueError("英文整理不使用雲端模型。")
+                raise _TranslationFailure("model_unavailable")
             protected_tokens = {key: re.findall(r"H3KEEP[A-F0-9]{12}X+\d{4}X", value)
                                 for key, value in values.items()}
             properties = {}
@@ -228,7 +271,7 @@ class H3PromptTranslator:
             try:
                 async with session.post(base_url + "/api/chat", json=wire, allow_redirects=False) as response:
                     if response.status != 200:
-                        raise ValueError("本機模型無法整理英文敘述。")
+                        raise _TranslationFailure(_http_failure_reason(response.status))
                     if response.content_length and response.content_length > 1_000_000:
                         raise ValueError("英文整理回應過長。")
                     chunks = bytearray()
@@ -237,9 +280,12 @@ class H3PromptTranslator:
                         if len(chunks) > 1_000_000:
                             raise ValueError("英文整理回應過長。")
                     data = json.loads(chunks)
+                if not isinstance(data, dict):
+                    raise _TranslationFailure("invalid_response")
                 if data.get("done_reason") == "length" or data.get("done") is not True:
                     raise ValueError("英文整理尚未完成。")
-                content = (data.get("message") or {}).get("content")
+                message = data.get("message")
+                content = message.get("content") if isinstance(message, dict) else None
                 result = json.loads(content)
                 if not isinstance(result, dict) or result.keys() != values.keys():
                     raise ValueError("英文整理遺失了生成欄位。")
@@ -292,18 +338,21 @@ class H3PromptTranslator:
             original["prompt"] = source_prompt
         settings = copy.deepcopy(settings)
         cache_prefix = (settings.get("base_url"), settings.get("model"), "h3-translation-v1")
+        started_at = time.monotonic()
         try:
             async with self._lock:
                 missing = {str(index): masked for index, (_, _, _, masked, _) in enumerate(pending)
                            if (*cache_prefix, masked) not in self._cache}
                 if sum(len(value) for value in missing.values()) > 18000:
-                    raise ValueError("敘述過長，請分成較短的生成片段。")
+                    raise _TranslationFailure("local_error")
                 writer_lock = getattr(manager, "queue_lock", None)
                 if missing and isinstance(writer_lock, asyncio.Lock):
                     async with writer_lock:
                         translated = await self._request(missing, settings)
                 else:
                     translated = await self._request(missing, settings) if missing else {}
+                if not isinstance(translated, dict):
+                    raise _TranslationFailure("invalid_response")
                 staged = []
                 for index, (container, key, path, masked, protected) in enumerate(pending):
                     cache_key = (*cache_prefix, masked)
@@ -319,9 +368,10 @@ class H3PromptTranslator:
                     self._cache.popitem(last=False)
             payload["h3_translation"] = {"status": "translated", "model": settings["model"],
                                          "source_texts": original, "source_payload_digest": payload_digest(raw)}
-        except (ValueError, TypeError, KeyError, aiohttp.ClientError, TimeoutError, OSError):
+        except (ValueError, TypeError, KeyError, aiohttp.ClientError, TimeoutError, OSError) as error:
             warnings.append(_WARNING)
-            payload["h3_translation"] = {"status": "unavailable", "source_texts": original}
+            payload["h3_translation"] = {"status": "unavailable", "source_texts": original,
+                                         **_failure_diagnostics(error, started_at)}
         payload["h3_preparation_warnings"] = list(dict.fromkeys(warnings))
         if payload.get("h3_translation", {}).get("status") == "unavailable":
             self._remember_fallback_handoff(payload, settings)
