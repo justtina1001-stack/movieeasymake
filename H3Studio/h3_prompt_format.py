@@ -10,6 +10,10 @@ from dialogue import _quoted_spans
 _OPAQUE = re.compile(r"<d>.*?</d>|<(?:Subject|Picture|Video|Audio)\s+\d+>", re.S)
 _SHOT = re.compile(r"\[Shot\s+(\d+)(?:\s*,\s*([\d.]+)s\s*[-–]\s*([\d.]+)s)?\]", re.I)
 _TIME = re.compile(r"\s*At\s+(\d+):(\d{2})\.(\d{3})\s*,", re.I)
+_MARKDOWN_SHOT = re.compile(
+    r"^[ \t]*#{1,6}[ \t]+(?:\*\*)?鏡頭[ \t]+(?P<index>\d+)[ \t]*[：:]"
+    r"(?P<title>[^\r\n]*?)[（(][ \t]*(?P<start>\d+(?:\.\d+)?)[ \t]*[-–—～~][ \t]*"
+    r"(?P<end>\d+(?:\.\d+)?)[ \t]*秒[ \t]*[）)](?:\*\*)?[ \t]*\r?$", re.M)
 _CORE = re.compile(r"^(subject_definitions|summary|retention_analysis|integrated_multimodal_description|detailed_description|overall_soundscape|non_diegetic_music):[ \t]*\n?", re.M)
 
 
@@ -62,6 +66,17 @@ def normalize_shots(text: str, duration: float, *, add_opening: bool = True) -> 
     opaque_spans = [(m.start(), m.end()) for m in _OPAQUE.finditer(text)] + list(_quoted_spans(text))
     for start, end in sorted(opaque_spans, reverse=True):
         masked = masked[:start] + " " * (end - start) + masked[end:]
+    # Only explicit standalone storyboard headings with both numeric endpoints
+    # qualify. Keep quoted/dialogue content opaque and let the existing shot
+    # validator handle ordering and duration after this syntax conversion.
+    headings = list(_MARKDOWN_SHOT.finditer(masked))
+    if headings:
+        for heading in reversed(headings):
+            title = text[heading.start("title"):heading.end("title")].strip()
+            replacement = (f"[Shot {heading.group('index')}, {heading.group('start')}s-"
+                           f"{heading.group('end')}s] " + title)
+            text = text[:heading.start()] + replacement + text[heading.end():]
+        return normalize_shots(text, duration, add_opening=add_opening)
     matches = list(_SHOT.finditer(masked))
     if not matches:
         return (("[Shot 1] " + text) if add_opening else text), 1

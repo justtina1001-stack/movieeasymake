@@ -718,7 +718,14 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                         "Explicit story directions for twins, duplication, shadows, or reflections take precedence."
                     )
                 if picture_tags:
-                    assignments.append(f"{', '.join(picture_tags)} supply only {subject_tag}'s defined appearance and fixed visual attributes.")
+                    if item_type == "motion":
+                        assignments.append(
+                            f"{', '.join(picture_tags)} supply {subject_tag}'s action and pose reference at the described moments; "
+                            "transfer only the specified pose, movement direction, and body mechanics to the acting subject, "
+                            "without copying the reference person's identity, clothing, or background. Allow the described motion to develop continuously rather than freezing the reference pose."
+                        )
+                    else:
+                        assignments.append(f"{', '.join(picture_tags)} supply only {subject_tag}'s defined appearance and fixed visual attributes.")
                 for tag in video_tags:
                     if mode == "replace":
                         assignments.append(
@@ -832,11 +839,15 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
                 if item["type"] == "object" and shortfilm_reference_continuity:
                     preservation = ("keep its explicitly stated quantity, left/right pairing, appearance, positions, and state consistent across cuts until an explicit action changes them; a different view does not create an additional object or set.")
                 elif item["type"] in {"character", "creature"}:
-                    preservation = "keep identity, face, body proportions, clothing, colors, and distinguishing features consistent."
+                    preservation = ("keep the same character identity and distinguishing features; preserve face, body proportions, clothing, and colors except for changes explicitly described in the action. "
+                                    "An explicitly described transformation, proportion change, or state change takes precedence over the corresponding fixed appearance attribute, without creating a different individual.")
                     if shortfilm_reference_continuity:
                         preservation += " Retain the same physical individual across views and cuts; reference images and turnaround-sheet views supply appearance only, not extra people, bodies, panels, or labels. Explicit story directions for twins, duplication, shadows, or reflections take precedence."
                 elif item["type"] == "object":
                     preservation = "preserve appearance, dimensions, material, positions, orientation, and state unless the described action changes them."
+                elif item["type"] == "motion":
+                    preservation = ("preserve only the referenced action and pose at the described moments, while allowing continuous movement before and after them; "
+                                    "do not transfer the reference person's identity, appearance, clothing, or background to the acting subject.")
                 else:
                     preservation = "preserve the defined visual role, features, and reference characteristics where the action uses them."
                 retention.append(f"{subject_tag}: fully_preserved whenever {alias} appears; " + preservation)

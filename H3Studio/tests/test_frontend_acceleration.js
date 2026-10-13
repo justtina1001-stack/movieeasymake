@@ -28,9 +28,9 @@ function fixture() {
     vm.runInContext(source.match(new RegExp(`^const ${name} = .+;$`, "m"))[0], context);
   }
   for (const name of [
-    "currentSettings", "restoreForm", "isReferenceMode", "qualityModeCompatible", "turboProfile", "syncQualityMode",
+    "currentSettings", "restoreForm", "dimensions", "isReferenceMode", "qualityModeCompatible", "referenceTurboResolutionWarning", "turboProfile", "syncQualityMode",
     "capabilityNote", "accelerationAvailabilityNote", "memoryOptimizationHint", "shortFilmAliasMentioned",
-    "shortFilmShotAssetSelection", "shortFilmShotUsesReferenceMode", "syncShortFilmAcceleration",
+    "shortFilmShotAssetSelection", "shortFilmShotUsesReferenceMode", "shortFilmFlatten", "shortFilmShotReferenceUsage", "shortFilmWarnings", "syncShortFilmAcceleration",
   ]) {
     const start = source.indexOf(`function ${name}(`);
     assert.notEqual(start, -1, `${name} exists`);
@@ -44,6 +44,8 @@ test("both workspaces expose all quality choices and independent accessible memo
   for (const id of ["qualityMode", "sfQuality"]) {
     const select = html.match(new RegExp(`<select id="${id}"[^>]*>([\\s\\S]*?)</select>`))[1];
     for (const value of qualityModes) assert.ok(select.includes(`value="${value}"`), `${id}: ${value}`);
+    assert.match(select, /value="turbo">Turbo 快速預覽/);
+    assert.doesNotMatch(select, /Turbo 穩定版/);
   }
   for (const id of ["memoryOptimization", "sfMemoryOptimization"]) {
     assert.match(html, new RegExp(`id="${id}" type="checkbox" checked aria-describedby="${id}Hint"`));
@@ -130,7 +132,7 @@ test("shortfilm memory persistence and incompatibility notices match project set
   assert.equal(context.project.memory_optimization, false);
   assert.equal(element("#sfMemoryOptimization").disabled, true);
   assert.equal(element("#sfMemoryOptimization").checked, false);
-  assert.match(element("#sfQualityHint").textContent, /不相容的鏡頭會改用 Turbo 穩定版/);
+  assert.match(element("#sfQualityHint").textContent, /不相容的鏡頭會改用 Turbo 快速預覽/);
   assert.match(element("#sfMemoryOptimizationHint").textContent, /不可併用/);
   context.project.quality_mode = "native";
   run("syncShortFilmAcceleration()");
@@ -147,4 +149,100 @@ test("shortfilm mode classification accounts for aliases, storyboard and continu
   assert.equal(run("shortFilmShotUsesReferenceMode({assets: [], scenes: []}, {continue_previous: true})"), true);
   assert.equal(run("shortFilmShotUsesReferenceMode({assets: [{id: 'actor', alias: '小明', image_asset_ids: ['img']}], scenes: []}, {action: '小明走進來'})"), true);
   assert.equal(run("shortFilmShotUsesReferenceMode({assets: [{id: 'actor', alias: '小明', image_asset_ids: []}], scenes: []}, {action: '小明走進來'})"), false);
+});
+
+test("Ref4 warns above the author's example area and retains the chosen format and seed", () => {
+  const { context, element, run } = fixture();
+  context.state.mode = "r2v";
+  element("#qualityMode").value = "turbo";
+  element("#seed").value = "12345";
+  for (const [megapixels, aspect, width, height, highArea] of [
+    ["0.4", "16:9", 864, 480, false],
+    ["0.7", "16:9", 1152, 640, true],
+    ["0.9", "16:9", 1280, 736, true],
+    ["0.98", "16:9", 1344, 768, true],
+    ["0.98", "9:16", 768, 1344, true],
+  ]) {
+    element("#megapixels").value = megapixels;
+    element("#aspectRatio").value = aspect;
+    assert.deepEqual(Array.from(run("dimensions()")), [width, height]);
+    run(`syncQualityMode(${width}, ${height})`);
+    const hint = element("#qualityModeHint").textContent;
+    assert.match(hint, /544p（約 0\.5MP）訓練/);
+    assert.match(hint, /Euler、simple、Shift 12\/3/);
+    assert.equal(hint.includes("高於作者 960 × 544 範例"), highArea);
+    if (highArea) assert.ok(hint.includes(`${width} × ${height}`));
+    assert.equal(element("#qualityMode").value, "turbo");
+    assert.equal(element("#megapixels").value, megapixels);
+    assert.equal(element("#aspectRatio").value, aspect);
+    assert.equal(element("#seed").value, "12345");
+  }
+  assert.equal(run("referenceTurboResolutionWarning(960, 544)"), "");
+  assert.equal(run("referenceTurboResolutionWarning(544, 960)"), "");
+});
+
+test("Ref4 resolution notice does not appear for Native, Ref8 or FL recipes", () => {
+  const { context, element, run } = fixture();
+  for (const [mode, quality] of [["r2v", "native"], ["r2v", "turbo_ref_quality"], ["t2v", "turbo"], ["t2v", "turbo_fast"]]) {
+    context.state.mode = mode;
+    element("#qualityMode").value = quality;
+    run("syncQualityMode(1344, 768)");
+    assert.doesNotMatch(element("#qualityModeHint").textContent, /960 × 544|Ref2VA v0\.1|544p（約/);
+    assert.equal(element("#qualityMode").value, quality);
+  }
+});
+
+test("Native hints identify res_multistep without overwriting advanced choices", () => {
+  const { context, element, run } = fixture();
+  element("#steps").value = "28";
+  element("#scheduler").value = "beta";
+  run("syncQualityMode(1344, 768)");
+  assert.match(element("#qualityModeHint").textContent, /res_multistep/);
+  assert.equal(element("#steps").value, "28");
+  assert.equal(element("#scheduler").value, "beta");
+  context.project = { quality_mode: "native" };
+  run("syncShortFilmAcceleration()");
+  assert.match(element("#sfQualityHint").textContent, /res_multistep、simple、20 步/);
+});
+
+test("shortfilm resolution notices follow each shot's effective Ref4 recipe", () => {
+  const { context, run } = fixture();
+  context.project = {
+    quality_mode: "turbo", megapixels: 0.7, aspect_ratio: "9:16", target_duration: 10,
+    assets: [{ id: "actor", alias: "小龍", image_asset_ids: ["image"] }],
+    scenes: [{ title: "測試", shots: [
+      { id: "ref", title: "參考鏡", action: "小龍走進畫面", duration: 5, seed: 123 },
+      { id: "text", title: "文生鏡", action: "雨滴落下", duration: 5, seed: 456 },
+    ] }],
+  };
+  const before = JSON.stringify(context.project);
+  let warnings = Array.from(run("shortFilmWarnings(project)"));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /參考鏡.*640 × 1152.*高於作者/);
+  assert.equal(JSON.stringify(context.project), before);
+  context.project.quality_mode = "turbo_fast";
+  warnings = Array.from(run("shortFilmWarnings(project)"));
+  assert.ok(warnings.some(text => /參考鏡.*高於作者/.test(text)));
+  assert.ok(warnings.every(text => !text.includes("文生鏡")));
+  for (const quality of ["native", "turbo_ref_quality"]) {
+    context.project.quality_mode = quality;
+    assert.ok(Array.from(run("shortFilmWarnings(project)")).every(text => !text.includes("960 × 544")));
+  }
+  context.project.quality_mode = "turbo";
+  context.project.megapixels = 0.4;
+  assert.equal(run("shortFilmWarnings(project).length"), 0);
+});
+
+test("shortfilm uses actual dimensions for recipe descriptions without changing project settings", () => {
+  const { context, element, run } = fixture();
+  context.project = { quality_mode: "turbo", megapixels: 0.98, aspect_ratio: "16:9", scenes: [], assets: [] };
+  const before = JSON.stringify(context.project);
+  run("syncShortFilmAcceleration()");
+  assert.match(element("#sfQualityHint").textContent, /1344 × 768/);
+  assert.match(element("#sfQualityHint").textContent, /Ref2VA v0\.1 4 步快速預覽/);
+  assert.equal(JSON.stringify(context.project), before);
+  context.project.aspect_ratio = "9:16";
+  run("syncShortFilmAcceleration()");
+  assert.doesNotMatch(element("#sfQualityHint").textContent, /針對 1344 × 768 訓練/);
+  assert.deepEqual(Array.from(run("dimensions(0.7, '1:1')")), [832, 832]);
 });

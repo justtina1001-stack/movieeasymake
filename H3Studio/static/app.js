@@ -1158,14 +1158,14 @@ function restoreForm() {
   $("#memoryOptimization").checked = state.form ? form.memory_optimization === true : true;
 }
 
-function dimensions() {
+function dimensions(megapixels = $("#megapixels").value, aspectRatio = $("#aspectRatio").value) {
   const presets = { "0.4": [864, 480], "0.7": [1152, 640], "0.9": [1280, 736], "0.98": [1344, 768] };
-  const preset = presets[$("#megapixels").value];
-  if (preset && $("#aspectRatio").value === "16:9") return preset;
-  if (preset && $("#aspectRatio").value === "9:16") return [preset[1], preset[0]];
-  const [left, right] = $("#aspectRatio").value.split(":").map(Number);
+  const preset = presets[megapixels];
+  if (preset && aspectRatio === "16:9") return preset;
+  if (preset && aspectRatio === "9:16") return [preset[1], preset[0]];
+  const [left, right] = aspectRatio.split(":").map(Number);
   const ratio = left / right;
-  const pixels = Number($("#megapixels").value) * 1_000_000;
+  const pixels = Number(megapixels) * 1_000_000;
   const rawWidth = Math.sqrt(pixels * ratio);
   const rawHeight = pixels / rawWidth;
   return [Math.max(32, Math.round(rawWidth / 32) * 32), Math.max(32, Math.round(rawHeight / 32) * 32)];
@@ -1197,6 +1197,12 @@ function qualityModeCompatible(qualityMode, referenceMode) {
   return !(referenceMode ? flOnlyQualityModes : refOnlyQualityModes).has(qualityMode);
 }
 
+function referenceTurboResolutionWarning(width, height) {
+  return width * height > 960 * 544
+    ? `目前 ${width} × ${height} 的像素量高於作者 960 × 544 範例；建議先以 0.4MP、5 秒確認動態品質。`
+    : "";
+}
+
 function turboProfile(width, height, qualityMode = $("#qualityMode").value, referenceMode = isReferenceMode()) {
   if (qualityMode === "turbo_ref_quality") return {
     key: "ref2v_768_quality_v10",
@@ -1219,8 +1225,8 @@ function turboProfile(width, height, qualityMode = $("#qualityMode").value, refe
   if (referenceMode) return {
     key: "ref2v_544",
     steps: 4,
-    title: "Ref2VA Turbo · 4 steps",
-    hint: "多模態參考加速；鎖定 Euler、simple、Shift 12/3 與 match。建議先用 0.4～0.7MP 預覽角色一致性。",
+    title: "Ref2VA Turbo v0.1 · 4 步快速預覽",
+    hint: "使用 544p（約 0.5MP）訓練的 4 步預覽模型；細密動態可能出現重影或雜點。鎖定 Euler、simple、Shift 12/3 與 match。" + referenceTurboResolutionWarning(width, height),
   };
   if (qualityMode === "turbo_fast" || qualityMode === "sparse_experimental") return {
     key: "fl2v_768_fast_v11",
@@ -1273,7 +1279,7 @@ function syncQualityMode(width, height) {
     $("#qualityModeHint").textContent = (compatible ? "" : "此生成方式與所選品質不相容，請重新選擇生成品質；不會自動換用其他 LoRA。 ") + profile.hint + accelerationAvailabilityNote(qualityMode, profile);
   } else {
     $("#qualityModeTitle").textContent = "原生品質模式";
-    $("#qualityModeHint").textContent = "保留目前採樣設定，適合正式成品；不載入 Turbo LoRA。";
+    $("#qualityModeHint").textContent = "使用 res_multistep，保留目前步數與 Scheduler；不載入 Turbo LoRA。";
   }
   $("#memoryOptimizationHint").textContent = memoryOptimizationHint($("#memoryOptimization").checked, qualityMode);
 }
@@ -3054,6 +3060,7 @@ function updateShortFilmShotAssetState(shotCard, project, shot) {
 function shortFilmWarnings(project) {
   const warnings = [];
   const shots = shortFilmFlatten(project);
+  const [width, height] = dimensions(project.megapixels ?? 0.4, project.aspect_ratio || "16:9");
   const total = shots.reduce((sum, item) => sum + Number(item.shot.retime_duration || item.shot.duration || 0), 0);
   if (!shots.length) warnings.push("尚未建立任何分鏡鏡頭。");
   else if (Math.abs(total - Number(project.target_duration || 0)) > 1) warnings.push(`分鏡合計（成品節奏）${total.toFixed(1)} 秒，與目標 ${Number(project.target_duration || 0).toFixed(1)} 秒不一致。`);
@@ -3067,7 +3074,11 @@ function shortFilmWarnings(project) {
     const usage = shortFilmShotReferenceUsage(project, shot);
     if (usage.assetCount > 9) warnings.push(`${label} 引用 ${usage.assetCount} 項素材，超過每鏡頭 9 項上限。`);
     const referenceMode = shortFilmShotUsesReferenceMode(project, shot);
-    if (!qualityModeCompatible(project.quality_mode, referenceMode)) warnings.push(`${label} 使用${referenceMode ? "素材參考（Ref2VA）" : "文生／首尾（FL2VA）"}模型，與全片所選品質不相容；本鏡頭會改用 Turbo 穩定版。若不希望自動適配，請改選全片共用的原生品質。`);
+    const compatible = qualityModeCompatible(project.quality_mode, referenceMode);
+    if (!compatible) warnings.push(`${label} 使用${referenceMode ? "素材參考（Ref2VA）" : "文生／首尾（FL2VA）"}模型，與全片所選品質不相容；本鏡頭會改用 Turbo 快速預覽。若不希望自動適配，請改選全片共用的原生品質。`);
+    const effectiveQuality = compatible ? project.quality_mode : "turbo";
+    const resolutionWarning = referenceMode && effectiveQuality === "turbo" ? referenceTurboResolutionWarning(width, height) : "";
+    if (resolutionWarning) warnings.push(`${label} 使用 Ref2VA v0.1 4 步快速預覽。${resolutionWarning}`);
     if (usage.imageCount > 9) warnings.push(`${label} 使用 ${usage.imageCount} 張參考圖片，超過每鏡頭 9 張上限。`);
     if (usage.audioCount > 3) warnings.push(`${label} 使用 ${usage.audioCount} 段參考聲音，超過每鏡頭 3 段上限。`);
   });
@@ -3092,15 +3103,15 @@ function syncShortFilmAcceleration() {
   }
   $("#sfMemoryOptimizationHint").textContent = "每個鏡頭共用。" + memoryOptimizationHint(memoryInput.checked, qualityMode);
   if (qualityMode === "native") {
-    $("#sfQualityHint").textContent = "所有鏡頭使用原生品質，不載入 Turbo LoRA；省顯存可獨立勾選。";
+    $("#sfQualityHint").textContent = "所有鏡頭使用原生品質：res_multistep、simple、20 步，不載入 Turbo LoRA；省顯存可獨立勾選。";
     return;
   }
   const referenceMode = qualityMode === "turbo_ref_quality";
-  const [width, height] = project.megapixels === 0.98 && project.aspect_ratio === "16:9" ? [1344, 768] : [864, 480];
+  const [width, height] = dimensions(project.megapixels ?? 0.4, project.aspect_ratio || "16:9");
   const profile = turboProfile(width, height, qualityMode, referenceMode);
   const adaptationNote = qualityMode === "turbo"
-    ? " 全片會依各鏡頭有無參考素材自動選用 FL2VA／Ref2VA Turbo；下方狀態為非參考鏡頭的模型，參考鏡頭於送出時另行檢查。"
-    : " 本選項為全片設定；模型類型不相容的鏡頭會改用 Turbo 穩定版，右側規則檢查會逐鏡頭提醒。缺少節點或模型則會報錯，不會自動換用其他方案。";
+    ? " 全片會依各鏡頭有無參考素材自動選用 FL2VA／Ref2VA Turbo；參考鏡頭使用 544p（約 0.5MP）訓練的 Ref2VA v0.1 4 步快速預覽，細密動態可能出現重影或雜點。右側規則檢查會逐鏡頭提醒解析度；下方模型狀態為非參考鏡頭。"
+    : " 本選項為全片設定；模型類型不相容的鏡頭會改用 Turbo 快速預覽，右側規則檢查會逐鏡頭提醒。缺少節點或模型則會報錯，不會自動換用其他方案。";
   $("#sfQualityHint").textContent = profile.hint + adaptationNote + accelerationAvailabilityNote(qualityMode, profile);
 }
 
