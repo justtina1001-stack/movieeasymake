@@ -106,7 +106,8 @@ class NativeSchedulerTests(unittest.TestCase):
                 self.assertEqual(node(graph, "BasicScheduler")["inputs"]["steps"], steps)
                 self.assertEqual(node(graph, "KSamplerSelect")["inputs"]["sampler_name"], "euler")
                 self.assertEqual((compiled.shift_video, compiled.shift_audio), (12.0, 3.0))
-                self.assertEqual(node(graph, "LoraLoaderModelOnly")["inputs"]["strength_model"], 0.75)
+                self.assertEqual(node(graph, "LoraLoaderModelOnly")["inputs"]["strength_model"],
+                                 1.0 if mode == "r2v" else 0.75)
 
     def test_new_shortfilm_text_and_reference_requests_use_simple(self):
         for referenced, mode in ((False, "t2v"), (True, "r2v")):

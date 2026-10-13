@@ -1208,7 +1208,7 @@ function turboProfile(width, height, qualityMode = $("#qualityMode").value, refe
     key: "ref2v_768_quality_v10",
     steps: 8,
     title: "Ref2VA Turbo v1.0 · 8 steps 品質比較",
-    hint: "僅限多模態／角色替換等 Ref2VA 鏡頭。用於比較參考品質，並非比現有 4 步更快；鎖定 Euler、simple、Shift 12/3 與 match。",
+    hint: "僅限多模態／角色替換等 Ref2VA 鏡頭。用於比較參考品質，並非比現有 4 步更快；鎖定 Euler、simple、Shift 12/3、match 與 LoRA 強度 1.0。",
   };
   if (qualityMode === "turbo_audio") return {
     key: "fl2v_768_audio_v12",
@@ -1226,7 +1226,7 @@ function turboProfile(width, height, qualityMode = $("#qualityMode").value, refe
     key: "ref2v_544",
     steps: 4,
     title: "Ref2VA Turbo v0.1 · 4 步快速預覽",
-    hint: "使用 544p（約 0.5MP）訓練的 4 步預覽模型；細密動態可能出現重影或雜點。鎖定 Euler、simple、Shift 12/3 與 match。" + referenceTurboResolutionWarning(width, height),
+    hint: "使用 544p（約 0.5MP）訓練的 4 步預覽模型；細密動態可能出現重影或雜點。鎖定 Euler、simple、Shift 12/3、match 與 LoRA 強度 1.0。" + referenceTurboResolutionWarning(width, height),
   };
   if (qualityMode === "turbo_fast" || qualityMode === "sparse_experimental") return {
     key: "fl2v_768_fast_v11",

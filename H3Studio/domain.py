@@ -489,6 +489,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             steps = 4
             ref_image_size = "match"
             turbo_profile = TURBO_PROFILE_REF_544
+            # Ref2VA Turbo adapters already include alpha/rank scaling.
+            # https://github.com/ModelTC/Minimax-H3-Turbo/blob/main/example_workflows/video_minimax_h3_ref2v_lightx2v_turbo.json
+            turbo_lora_strength = 1.0
             shift_video = 12.0
         elif quality_mode == "turbo" and (width, height) == (1344, 768):
             steps = 4
@@ -515,6 +518,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             steps = 8
             ref_image_size = "match"
             turbo_profile = TURBO_PROFILE_REF_768_QUALITY_V10
+            turbo_lora_strength = 1.0
             shift_video = 12.0
         else:
             steps = 8

@@ -74,6 +74,8 @@ class CompileRequestTests(unittest.TestCase):
         self.assertEqual(compiled.ref_image_size, "match")
         self.assertIn("ref2v", compiled.turbo_lora)
         workflow = build_workflow(compiled, {IMAGE_A: "h3/a.png"}, "turbo-ref")
+        lora = next(value for value in workflow.values() if value["class_type"] == "LoraLoaderModelOnly")
+        self.assertEqual(lora["inputs"]["strength_model"], 1.0)
         self.assertTrue(any(value["class_type"] == "MiniMaxH3SigmaShift" for value in workflow.values()))
 
     def test_native_quality_does_not_add_turbo_nodes(self):

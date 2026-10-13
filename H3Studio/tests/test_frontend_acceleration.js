@@ -122,6 +122,7 @@ test("quality versions show correct step counts and family restrictions", () => 
   assert.equal(element("#steps").value, 8);
   assert.equal(element("#refImageSize").value, "match");
   assert.match(element("#qualityModeHint").textContent, /並非比現有 4 步更快/);
+  assert.match(element("#qualityModeHint").textContent, /LoRA 強度 1\.0/);
 });
 
 test("shortfilm memory persistence and incompatibility notices match project settings", () => {
@@ -170,6 +171,7 @@ test("Ref4 warns above the author's example area and retains the chosen format a
     const hint = element("#qualityModeHint").textContent;
     assert.match(hint, /544p（約 0\.5MP）訓練/);
     assert.match(hint, /Euler、simple、Shift 12\/3/);
+    assert.match(hint, /LoRA 強度 1\.0/);
     assert.equal(hint.includes("高於作者 960 × 544 範例"), highArea);
     if (highArea) assert.ok(hint.includes(`${width} × ${height}`));
     assert.equal(element("#qualityMode").value, "turbo");
