@@ -7,7 +7,7 @@ const vm = require("node:vm");
 const {
   clone, duration, totalDuration, signature, locateTime, validateProject,
   splitAt, reorder, ProjectSession, speedOf, audioGain, audioClips, freeAudioTrack,
-  splitAudioAt, detachAudio, audioPreviewCandidates, VideoDeck, AudioPreview, requireCapabilities, requireTextStyleSupport, requireAnimationSupport,
+  splitAudioAt, detachAudio, audioPreviewCandidates, VideoDeck, AudioPreview, requireCapabilities, requireTextStyleSupport, requireAnimationSupport, requireTransitionEffectSupport, requireTextFontSupport, requireTextIdleSupport, requireColorSupport,
   resolveDraft, validateCanvasDimensions, syncOutputSize,
 } = require("../static/editor.js");
 
@@ -62,10 +62,10 @@ test("output sizes add exactly one selected current option and remove it when sw
 test("production render preserves portrait, square and ultrawide imported canvas sizes without selecting 720p", () => {
   const {select,makeOption}=outputSizeFixture(), elements=new Map([["outputSize",select]]);
   let value=project();
-  const element=id=> { if(!elements.has(id)) elements.set(id,{classList:{toggle() {}},value:"",textContent:""}); return elements.get(id); };
+  const element=id=> { if(!elements.has(id)) elements.set(id,{classList:{toggle() {}},style:{},value:"",textContent:""}); return elements.get(id); };
   const context=vm.createContext({ $:element,project:()=>value,document:{activeElement:null},totalDuration,
     syncOutputSize:(target,width,height)=>syncOutputSize(target,width,height,makeOption),
-    renderProjectList() {},renderTimeline() {},renderInspector() {},renderStatus() {},renderExport() {},fitCanvas() {},renderCacheStatus() {},renderOverlayPreview() {} });
+    renderMedia() {},renderProjectList() {},renderTimeline() {},renderInspector() {},renderStatus() {},renderExport() {},fitCanvas() {},renderCacheStatus() {},renderOverlayPreview() {} });
   const renderStart=browserSource.search(/  function render\(\) \{\r?\n    if \(!project\(\)\) return;/);
   assert.notEqual(renderStart,-1); const renderEnd=browserSource.indexOf("\n  function updatePlayhead",renderStart);
   vm.runInContext(browserSource.slice(renderStart,renderEnd),context);
@@ -428,7 +428,7 @@ test("browser save completion cannot re-render an old project after a session sw
   previous.change(p => { p.name = "舊專案儲存中"; });
   const state = { session: previous, media: new Map([["shared", { duration: 12 }]]), projects: [project(), nextProject] };
   let renderCount = 0;
-  const context = vm.createContext({ state, validateProject, requireTextStyleSupport, requireAnimationSupport, json: (method, snapshot) => snapshot,
+  const context = vm.createContext({ state, validateProject, requireTextStyleSupport, requireAnimationSupport, requireTransitionEffectSupport, requireTextFontSupport, requireTextIdleSupport, requireColorSupport, json: (method, snapshot) => snapshot,
     api: (_path, snapshot) => pending.promise.then(() => ({ ...snapshot, updated_at: "r2" })),
     render: () => { renderCount++; }, renderStatus() {},
   });

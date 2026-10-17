@@ -1,6 +1,8 @@
 import asyncio
+import ast
 import io
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,12 +16,122 @@ import app as studio
 from domain import RequestError
 from qwen_image import compile_image_request, build_image_workflow, ImageJobManager, is_image_lora, image_capabilities
 from queue_presentation import build_queue_view
-from qwen_image_models import MODEL_FILES
+from qwen_image_models import MODEL_FILES, TURBO_MODEL_FILE, TURBO_REVISION
 
 IMAGE_ID = "a" * 32
 
 
+def variant_schemas(standard=True, turbo=True):
+    unets = ([MODEL_FILES[0][1]] if standard else []) + ([TURBO_MODEL_FILE[1]] if turbo else [])
+    return {
+        "TextEncodeQwenImage21": {"input": {}, "output": ["CONDITIONING", "CONDITIONING", "LATENT"]},
+        "UNETLoader": {"input": {"required": {"unet_name": [unets]}}, "output": ["MODEL"]},
+        "CLIPLoader": {"input": {"required": {"clip_name": [[MODEL_FILES[1][1]]]}}, "output": ["CLIP"]},
+        "VAELoader": {"input": {"required": {"vae_name": [[MODEL_FILES[2][1]]]}}, "output": ["VAE"]},
+        "ManualSigmas": {"input": {"required": {"sigmas": ["STRING"]}}, "output": ["SIGMAS"]},
+        "KSamplerSelect": {"input": {"required": {"sampler_name": [["euler"]]}}, "output": ["SAMPLER"]},
+        "SamplerCustom": {"input": {"required": {name: [kind] for name, kind in {
+            "model": "MODEL", "add_noise": "BOOLEAN", "noise_seed": "INT", "cfg": "FLOAT",
+            "positive": "CONDITIONING", "negative": "CONDITIONING", "sampler": "SAMPLER",
+            "sigmas": "SIGMAS", "latent_image": "LATENT"}.items()}}, "output": ["LATENT", "LATENT"]},
+        "LoraLoaderModelOnly": {"input": {"required": {"lora_name": [[]]}}},
+    }
+
+
 class ImageCapabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def engine(self, schemas):
+        async def info(request):
+            name = request.match_info["name"]
+            if name not in schemas:
+                raise web.HTTPNotFound()
+            return web.json_response({name: schemas[name]})
+        engine = web.Application()
+        engine.router.add_get("/object_info/{name}", info)
+        server = TestServer(engine)
+        await server.start_server()
+        self.addAsyncCleanup(server.close)
+        return SimpleNamespace(base_url=str(server.make_url("/")).rstrip("/"), mode="remote", auth_headers=lambda: {})
+
+    async def test_turbo_only_engine_is_ready_without_changing_legacy_model_inventory(self):
+        result = await image_capabilities(await self.engine(variant_schemas(standard=False)))
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["model_variant_supported"])
+        self.assertEqual([item["filename"] for item in result["models"]], [model[1] for model in MODEL_FILES])
+        self.assertFalse(result["models"][0]["installed"])
+        self.assertFalse(result["variants"][0]["ready"])
+        self.assertTrue(result["variants"][1]["ready"])
+        self.assertEqual(result["variants"][1]["steps"], 8)
+        self.assertIsNone(result["error"])
+
+    async def test_turbo_checks_sigma_sampler_and_edit_latent_schema_contracts(self):
+        schemas = variant_schemas()
+        comfy = await self.engine(schemas)
+        self.assertTrue((await image_capabilities(comfy))["variants"][1]["ready"])
+        for name, replacement in (
+            ("ManualSigmas", {"input": {"required": {"sigmas": ["STRING"]}}, "output": ["FLOAT"]}),
+            ("ManualSigmas", {"input": {"required": {"sigmas": ["STRING"]}}, "output": None}),
+            ("SamplerCustom", {"input": {"required": {}}, "output": ["LATENT"]}),
+            ("KSamplerSelect", {"input": {"required": {"sampler_name": [["heun"]]}}, "output": ["SAMPLER"]}),
+            ("TextEncodeQwenImage21", {"input": {}, "output": ["CONDITIONING", "CONDITIONING", "IMAGE"]}),
+        ):
+            with self.subTest(node=name):
+                original = schemas[name]
+                schemas[name] = replacement
+                result = await image_capabilities(comfy)
+                self.assertTrue(result["variants"][0]["ready"])
+                self.assertFalse(result["variants"][1]["ready"])
+                self.assertIn("節點", result["variants"][1]["error"])
+                schemas[name] = original
+        del schemas["ManualSigmas"]
+        result = await image_capabilities(comfy)
+        self.assertTrue(result["ready"])
+        self.assertFalse(result["variants"][1]["ready"])
+
+    async def test_native_v3_combo_sampler_and_model_choices_are_supported(self):
+        schemas = variant_schemas()
+        for name, field in (("UNETLoader", "unet_name"), ("CLIPLoader", "clip_name"),
+                            ("VAELoader", "vae_name"), ("KSamplerSelect", "sampler_name")):
+            options = schemas[name]["input"]["required"][field][0]
+            schemas[name]["input"]["required"][field] = ["COMBO", {"options": options, "multiselect": False}]
+        comfy = await self.engine(schemas)
+        result = await image_capabilities(comfy)
+        self.assertTrue(result["variants"][0]["ready"])
+        self.assertTrue(result["variants"][1]["ready"])
+        self.assertTrue(all(model["installed"] for model in result["models"]))
+        schemas["KSamplerSelect"]["input"]["required"]["sampler_name"] = ["COMBO", {"options": ["heun"], "multiselect": False}]
+        result = await image_capabilities(comfy)
+        self.assertTrue(result["variants"][0]["ready"])
+        self.assertFalse(result["variants"][1]["ready"])
+
+    async def test_malformed_v3_sampler_combo_does_not_enable_turbo(self):
+        schemas = variant_schemas()
+        comfy = await self.engine(schemas)
+        for spec in (["COMBO"], ["COMBO", None], ["COMBO", {"options": "euler"}],
+                     ["COMBO", {"options": None}], ["COMBO", {"options": ["euler", {}]}],
+                     ["COMBO", {"options": ["euler"], "multiselect": True}]):
+            with self.subTest(spec=spec):
+                schemas["KSamplerSelect"]["input"]["required"]["sampler_name"] = spec
+                result = await image_capabilities(comfy)
+                self.assertTrue(result["variants"][0]["ready"])
+                self.assertFalse(result["variants"][1]["ready"])
+                self.assertIn("節點", result["variants"][1]["error"])
+
+    async def test_partial_local_turbo_file_does_not_enable_turbo(self):
+        comfy = await self.engine(variant_schemas())
+        comfy.mode, comfy.comfy_dir = "local", Path("test-model-host")
+        sizes = {model[1]: model[2] for model in MODEL_FILES}
+        sizes[TURBO_MODEL_FILE[1]] = TURBO_MODEL_FILE[2] - 1
+        original_stat, original_is_file = Path.stat, Path.is_file
+        def file_stat(path, *args, **kwargs):
+            return SimpleNamespace(st_size=sizes[path.name]) if path.name in sizes else original_stat(path, *args, **kwargs)
+        def is_file(path):
+            return True if path.name in sizes else original_is_file(path)
+        with patch.object(Path, "stat", file_stat), patch.object(Path, "is_file", is_file):
+            result = await image_capabilities(comfy)
+        self.assertTrue(result["variants"][0]["ready"])
+        self.assertFalse(result["variants"][1]["ready"])
+        self.assertIn("尚未齊全", result["variants"][1]["error"])
+
     async def test_remote_engine_lists_only_dedicated_adapters_and_optional_loader_failure_is_nonfatal(self):
         missing_loader = False
         async def info(request):
@@ -51,6 +163,100 @@ class ImageCapabilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ImageCompileTests(unittest.TestCase):
+    def test_standard_default_and_legacy_workflow_keep_existing_sampling(self):
+        compiled = compile_image_request({"prompt": "原有圖片", "steps": 25})
+        self.assertEqual(compiled["model_variant"], "standard")
+        self.assertEqual(compiled["steps"], 25)
+        compiled.pop("model_variant")
+        graph = build_image_workflow(compiled, {}, "legacy")
+        self.assertEqual(graph["1"]["inputs"]["unet_name"], MODEL_FILES[0][1])
+        self.assertEqual(graph["6"]["class_type"], "KSampler")
+        self.assertEqual(graph["6"]["inputs"]["scheduler"], "simple")
+
+    def test_turbo_normalizes_older_step_setting_and_uses_final_sigmas(self):
+        compiled = compile_image_request({"prompt": "官方加速", "model_variant": "turbo", "steps": 25,
+                                          "seed_auto": False, "seed": 42})
+        self.assertEqual(compiled["steps"], 8)
+        self.assertEqual(TURBO_REVISION, "72a49122613a4f9afbcc443426d6c765c0c383cf")
+        graph = build_image_workflow(compiled, {}, "turbo")
+        self.assertEqual(graph["1"]["inputs"]["unet_name"], TURBO_MODEL_FILE[1])
+        self.assertEqual(graph["2"]["inputs"]["clip_name"], MODEL_FILES[1][1])
+        self.assertEqual(graph["3"]["inputs"]["vae_name"], MODEL_FILES[2][1])
+        self.assertEqual(graph["6"]["class_type"], "SamplerCustom")
+        self.assertEqual(graph["6"]["inputs"]["latent_image"], ["5", 0])
+        self.assertEqual(graph["6"]["inputs"]["noise_seed"], 42)
+        self.assertTrue(graph["6"]["inputs"]["add_noise"])
+        self.assertEqual(graph["6"]["inputs"]["cfg"], 1)
+        sigmas_id = graph["6"]["inputs"]["sigmas"][0]
+        sigmas = [float(value.strip()) for value in graph[sigmas_id]["inputs"]["sigmas"].split(",")]
+        self.assertEqual(sigmas, [1, .978453, .95418, .926626, .89508, .845148, .704534, .414568, 0])
+        self.assertEqual(len(sigmas) - 1, compiled["steps"])
+        self.assertTrue(all(left > right for left, right in zip(sigmas, sigmas[1:])))
+        sampler_id = graph["6"]["inputs"]["sampler"][0]
+        self.assertEqual(graph[sampler_id]["inputs"]["sampler_name"], "euler")
+        self.assertNotIn("scheduler", graph["6"]["inputs"])
+        self.assertEqual(graph["7"]["inputs"]["samples"], ["6", 0])
+        self.assertEqual(graph["8"]["class_type"], "SaveImage")
+
+    def test_turbo_edit_reuses_encoder_latent_without_reference_node_collisions(self):
+        refs = [f"{index:032x}" for index in range(1, 11)]
+        compiled = compile_image_request({"prompt": "保持透明", "mode": "edit", "model_variant": "turbo",
+                                          "transparent": True, "image_asset_ids": refs})
+        graph = build_image_workflow(compiled, {asset: f"reference-{index}.png" for index, asset in enumerate(refs)}, "edit")
+        self.assertEqual(graph["6"]["inputs"]["latent_image"], ["4", 2])
+        self.assertEqual(graph["40"]["class_type"], "ManualSigmas")
+        self.assertEqual(graph["41"]["class_type"], "KSamplerSelect")
+        self.assertIn("alpha channel", graph["4"]["inputs"]["prompt"])
+        self.assertEqual(graph["4"]["inputs"]["images.image_10"], ["31", 0])
+        self.assertEqual(graph["31"]["class_type"], "JoinImageWithAlpha")
+
+    def test_native_cpu_empty_latent_correction_matches_qwen_grid_and_keeps_edit_grid(self):
+        # Evaluate only the installed core's small latent-shape helpers, without
+        # importing its server/model management or executing a sampling graph.
+        core = Path(__file__).resolve().parents[2] / "ComfyUI" / "comfy"
+        if not all((core / name).is_file() for name in ("sample.py", "utils.py", "latent_formats.py")):
+            self.skipTest("Installed ComfyUI source is needed for the native CPU contract check")
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("CPU PyTorch is needed for the native latent contract check")
+        namespace = {"torch": torch, "math": math}
+        def core_definition(filename, name):
+            tree = ast.parse((core / filename).read_text(encoding="utf-8"))
+            definition = next(node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == name)
+            module = ast.Module(body=[definition], type_ignores=[])
+            exec(compile(module, str(core / filename), "exec"), namespace)
+            return namespace[name]
+        repeat = core_definition("utils.py", "repeat_to_batch_size")
+        resize = core_definition("utils.py", "common_upscale")
+        namespace["comfy"] = SimpleNamespace(utils=SimpleNamespace(repeat_to_batch_size=repeat, common_upscale=resize))
+        fix_latent = core_definition("sample.py", "fix_empty_latent_channels")
+        core_definition("latent_formats.py", "LatentFormat")
+        qwen_format = core_definition("latent_formats.py", "QwenImage21")
+        with patch.object(torch.cuda, "_lazy_init", side_effect=AssertionError("CPU contract check must not use CUDA")):
+            with torch.device("cpu"):
+                latent_format = qwen_format()
+            model = SimpleNamespace(get_model_object=lambda _: latent_format)
+            generated = fix_latent(model, torch.zeros((1, 4, 96, 168), device="cpu"), downscale_ratio_spacial=8)
+            self.assertEqual(tuple(generated.shape), (1, 64, 48, 84))
+            self.assertEqual(str(generated.device), "cpu")
+            reference = torch.zeros((1, 64, 48, 84), device="cpu")
+            self.assertIs(fix_latent(model, reference), reference)
+
+    def test_unknown_variant_and_active_turbo_lora_are_rejected_explicitly(self):
+        for variant in (None, True, "fast", [], {}):
+            with self.subTest(variant=variant), self.assertRaises(RequestError):
+                compile_image_request({"prompt": "x", "model_variant": variant})
+        payload = {"prompt": "x", "model_variant": "turbo", "lora_name": "qwen_image_2_1/mfd.safetensors"}
+        with self.assertRaisesRegex(RequestError, "Turbo.*LoRA"):
+            compile_image_request(payload)
+        compiled = compile_image_request({**payload, "lora_strength": 0})
+        graph = build_image_workflow(compiled, {}, "disabled-lora")
+        self.assertNotIn("9", graph)
+        compiled["lora_strength"] = 1
+        with self.assertRaisesRegex(RequestError, "Turbo.*LoRA"):
+            build_image_workflow(compiled, {}, "reloaded-lora")
+
     def test_lora_routes_only_model_and_zero_strength_bypasses(self):
         payload = {"prompt":"保持人物", "lora_name":"qwen_image_2_1/style.safetensors", "lora_strength":0.65}
         compiled = compile_image_request(payload)
@@ -163,6 +369,69 @@ class ImageAPITests(unittest.IsolatedAsyncioTestCase):
             interrupt.assert_not_called()
         self.manager.gpu_lock.release()
         self.assertEqual(self.manager.jobs[job["id"]]["status"],"cancelled")
+
+    async def test_turbo_job_saves_actual_variant_and_steps_before_shared_queue_runs(self):
+        await self.manager.gpu_lock.acquire()
+        try:
+            response = await self.client.post("/api/images/jobs", json={"prompt": "官方加速", "model_variant": "turbo", "steps": 25})
+            self.assertEqual(response.status, 202)
+            job = await response.json()
+            saved = json.loads((self.manager.job_dir / f"{job['id']}.json").read_text(encoding="utf-8"))
+            self.assertEqual((saved["model_variant"], saved["steps"]), ("turbo", 8))
+            self.assertEqual(saved["status"], "queued")
+            await self.client.post(f"/api/images/jobs/{job['id']}/cancel")
+        finally:
+            self.manager.gpu_lock.release()
+
+    async def test_reloaded_legacy_job_defaults_to_standard_without_rewriting_saved_file(self):
+        job_id = "c" * 32
+        legacy = {"id": job_id, "mode": "generate", "status": "completed", "steps": 25}
+        path = self.manager.job_dir / f"{job_id}.json"
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        reloaded = ImageJobManager(self.manager.comfy, self.root, self.manager.gpu_lock, self.app["assets"])
+        self.assertEqual(reloaded.jobs[job_id]["model_variant"], "standard")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), legacy)
+
+    async def test_selected_turbo_missing_fails_even_when_standard_is_ready(self):
+        status = {"ready": True, "variants": [
+            {"id": "standard", "ready": True}, {"id": "turbo", "ready": False, "error": "Turbo missing"}]}
+        with patch("qwen_image.image_capabilities", new=AsyncMock(return_value=status)), \
+             patch.object(self.manager.comfy, "ensure_running", new=AsyncMock()), \
+             patch.object(self.manager.comfy, "upload_asset", new=AsyncMock()) as upload, \
+             patch.object(self.manager.comfy, "run_prompt", new=AsyncMock()) as run:
+            job = self.manager.create({"prompt": "x", "model_variant": "turbo"})
+            await self.manager.tasks[job["id"]]
+        self.assertEqual((job["status"], job["error"]), ("failed", "Turbo missing"))
+        upload.assert_not_called()
+        run.assert_not_called()
+
+    async def test_legacy_ready_flag_cannot_authorize_turbo_submission(self):
+        with patch("qwen_image.image_capabilities", new=AsyncMock(return_value={"ready": True})), \
+             patch.object(self.manager.comfy, "ensure_running", new=AsyncMock()), \
+             patch.object(self.manager.comfy, "run_prompt", new=AsyncMock()) as run:
+            job = self.manager.create({"prompt": "x", "model_variant": "turbo"})
+            await self.manager.tasks[job["id"]]
+        self.assertEqual(job["status"], "failed")
+        run.assert_not_called()
+
+    async def test_selected_standard_missing_fails_even_when_turbo_is_ready(self):
+        status = {"ready": True, "variants": [
+            {"id": "standard", "ready": False, "error": "Standard missing"}, {"id": "turbo", "ready": True}]}
+        with patch("qwen_image.image_capabilities", new=AsyncMock(return_value=status)), \
+             patch.object(self.manager.comfy, "ensure_running", new=AsyncMock()), \
+             patch.object(self.manager.comfy, "run_prompt", new=AsyncMock()) as run:
+            job = self.manager.create({"prompt": "x"})
+            await self.manager.tasks[job["id"]]
+        self.assertEqual((job["status"], job["error"]), ("failed", "Standard missing"))
+        run.assert_not_called()
+
+    async def test_turbo_lora_request_returns_clear_error_without_creating_job(self):
+        response = await self.client.post("/api/images/jobs", json={"prompt": "x", "model_variant": "turbo",
+                                           "lora_name": "qwen_image_2_1/mfd.safetensors", "lora_strength": 1})
+        self.assertEqual(response.status, 400)
+        self.assertIn("LoRA", (await response.json())["error"])
+        self.assertFalse(self.manager.jobs)
+        self.assertFalse(self.manager.tasks)
 
     async def test_real_png_completion_and_reuse_preserves_alpha(self):
         content = io.BytesIO()
@@ -301,6 +570,7 @@ class ImageAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_upscale_copies_source_survives_parent_delete_and_completes_without_qwen(self):
         self.completed_image()
+        self.manager.jobs[IMAGE_ID]["model_variant"] = "turbo"
         await self.manager.gpu_lock.acquire()
         capabilities={"ready":True,"models":[{"id":"general","installed":True}]}
         result=io.BytesIO(); Image.new('RGBA',(64,64),(50,100,200,100)).save(result,format='PNG')
@@ -318,6 +588,7 @@ class ImageAPITests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status,202)
             job=await response.json()
             self.assertEqual(job['mode'],'upscale')
+            self.assertEqual(job['source_model_variant'],'turbo')
             self.assertEqual(job['status'],'queued')
             reference=self.app['assets'].path_for(job['image_asset_ids'][0])
             with Image.open(reference) as image:self.assertEqual(image.getpixel((0,0))[3],100)
@@ -328,6 +599,20 @@ class ImageAPITests(unittest.IsolatedAsyncioTestCase):
         finished=self.manager.jobs[job['id']]
         self.assertEqual(finished['status'],'completed')
         self.assertEqual((finished['width'],finished['height']),(64,64))
+
+    async def test_upscale_model_provenance_survives_a_chain_and_legacy_source_defaults(self):
+        self.completed_image()
+        source = self.manager.jobs[IMAGE_ID]
+        source.update(mode="upscale", source_model_variant="turbo")
+        status = {"ready": True, "models": [{"id": "general", "installed": True}]}
+        with patch("qwen_image.upscale_capabilities", new=AsyncMock(return_value=status)), \
+             patch.object(self.manager, "_create_job", side_effect=lambda compiled: compiled):
+            compiled = await self.manager.create_upscale(IMAGE_ID, {"scale": 2})
+            self.assertEqual(compiled["source_model_variant"], "turbo")
+            self.assertNotIn("model_variant", compiled)
+            source.pop("source_model_variant")
+            compiled = await self.manager.create_upscale(IMAGE_ID, {"scale": 2})
+            self.assertEqual(compiled["source_model_variant"], "standard")
 
     async def test_upscale_validation_and_missing_engine_model_create_no_job(self):
         self.completed_image()

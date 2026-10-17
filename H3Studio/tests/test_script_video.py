@@ -289,7 +289,7 @@ class ScriptVideoAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["generation_clip_count"], 1)
         self.assertEqual(len(self.renderer.render_calls), 1)
         archive = json.loads((self.manager.history_directory / f"{child['id']}.json").read_text(encoding="utf-8"))
-        self.assertEqual(archive, recovered)
+        self.assertEqual(archive, scripts.stored_record(recovered))
 
     async def test_recovery_rejects_incomplete_nonstop_and_unrelated_valid_drafts(self):
         _, _, child = await self.failed_short_storyboard()
@@ -309,7 +309,7 @@ class ScriptVideoAPITests(unittest.IsolatedAsyncioTestCase):
                 record = {**copy.deepcopy(child), **changes}
                 self.manager.jobs[child["id"]] = record
                 self.assertFalse(await self.manager.recover_storyboard(child["id"]))
-                self.assertEqual(self.manager.get_job(child["id"]), record)
+                self.assertEqual(scripts.stored_record(self.manager.get_job(child["id"])), record)
         self.assertFalse(await self.manager.recover_storyboard("0" * 32))
         self.assertEqual(self.renderer.render_calls, [])
 

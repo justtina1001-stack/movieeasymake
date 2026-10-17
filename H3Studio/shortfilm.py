@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from copy import deepcopy
@@ -46,6 +47,12 @@ class ShortFilmError(ValueError):
     pass
 
 
+class ShortFilmConflictError(ShortFilmError):
+    def __init__(self, current_revision: int):
+        self.current_revision = current_revision
+        super().__init__("此短片已在其他視窗或工作流程更新。您的草稿已保留，請重新載入並確認差異後再儲存。")
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -77,6 +84,7 @@ def new_project(title: Any = "未命名短片") -> dict[str, Any]:
     now = utc_now()
     return {
         "id": uuid.uuid4().hex,
+        "revision": 0,
         "title": _text(title, limit=80) or "未命名短片",
         "format": "narrative",
         "aspect_ratio": "16:9",
@@ -146,17 +154,67 @@ def new_shot(index: int = 1) -> dict[str, Any]:
     }
 
 
-def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, Any]:
+def _validate_project_text(raw: dict[str, Any], existing: dict[str, Any] | None = None) -> None:
+    """Reject new overlong text; let unchanged historical text survive unrelated edits."""
+    def check(item: dict[str, Any], prior: dict[str, Any], specs: dict[str, tuple[int, str]], prefix: str = "") -> None:
+        for key, (limit, label) in specs.items():
+            value = str(item.get(key) or "").strip()
+            if len(value) > limit and value != str(prior.get(key) or "").strip():
+                raise ShortFilmError(f"{prefix}{label}目前 {len(value)} 字，超過 {limit} 字上限。請縮短後再儲存；原文不會被截斷。")
+
+    prior = existing or {}
+    check(raw, prior, {"title": (80, "專案名稱"), "style": (1000, "統一風格"), "synopsis": (5000, "故事大綱")})
+    prior_assets = {item.get("id"): item for item in prior.get("assets", []) if isinstance(item, dict)}
+    for item in raw.get("assets") or []:
+        if isinstance(item, dict):
+            check(item, prior_assets.get(item.get("id"), {}), {"alias": (60, "素材代號"), "description": (1200, "素材描述")})
+    prior_scenes = {item.get("id"): item for item in prior.get("scenes", []) if isinstance(item, dict)}
+    for index, scene in enumerate(raw.get("scenes") or []):
+        if not isinstance(scene, dict):
+            continue
+        old_scene = prior_scenes.get(scene.get("id"), {})
+        check(scene, old_scene, {"title": (80, "名稱"), "location": (200, "地點"), "time_of_day": (120, "時間"), "description": (1800, "描述")}, f"場次 {index + 1}：")
+        prior_shots = {item.get("id"): item for item in old_scene.get("shots", []) if isinstance(item, dict)}
+        for shot_index, shot in enumerate(scene.get("shots") or []):
+            if isinstance(shot, dict):
+                check(shot, prior_shots.get(shot.get("id"), {}), {
+                    "title": (80, "名稱"), "camera_detail": (800, "運鏡補充"), "action": (5000, "畫面與動作"),
+                    "ending": (1200, "結束狀態"), "speaker_alias": (60, "說話角色"), "dialogue_language": (40, "台詞語言"),
+                    "dialogue": (1800, "台詞"), "sound": (1200, "環境聲"), "music": (1200, "配樂"),
+                }, f"場次 {index + 1} 鏡頭 {shot_index + 1}：")
+    draft = raw.get("segment_draft")
+    if isinstance(draft, dict):
+        old_draft = prior.get("segment_draft") or {}
+        old_prompts = old_draft.get("prompts") or []
+        for index, prompt in enumerate(draft.get("prompts") or []):
+            check({"prompt": prompt}, {"prompt": old_prompts[index] if index < len(old_prompts) else ""}, {"prompt": (5000, f"第 {index + 1} 段分鏡詞")})
+
+
+def normalize_project(
+    raw: Any, *, existing_id: str | None = None,
+    existing: dict[str, Any] | None = None, allow_legacy_text: bool = False,
+) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ShortFilmError("短片專案格式錯誤。")
+    if not allow_legacy_text:
+        _validate_project_text(raw, existing)
+    # Limits are validated above. Loading legacy data must never shorten its words.
+    def text(value: Any, *, limit: int = 4000) -> str:
+        return str(value or "").strip()
+
     base = new_project(raw.get("title"))
     base["id"] = existing_id or _id(raw.get("id"))
+    base["title"] = text(raw.get("title")) or "未命名短片"
+    revision = raw.get("revision", 0)
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise ShortFilmError("短片專案版本格式錯誤。")
+    base["revision"] = revision
     base["format"] = raw.get("format") if raw.get("format") in FORMATS else "narrative"
     base["aspect_ratio"] = raw.get("aspect_ratio") if raw.get("aspect_ratio") in ASPECT_RATIOS else "16:9"
     base["megapixels"] = _bounded_number(raw.get("megapixels"), 0.4, 0.2, 1.0)
-    quality_mode = _text(raw.get("quality_mode"), limit=40) or "native"
+    quality_mode = text(raw.get("quality_mode"), limit=40) or "native"
     base["quality_mode"] = quality_mode if quality_mode in QUALITY_MODES else "native"
-    video_vae = _text(raw.get("video_vae"), limit=10) or "auto"
+    video_vae = text(raw.get("video_vae"), limit=10) or "auto"
     base["video_vae"] = video_vae if video_vae in {"auto", "int8", "fp16"} else "auto"
     base["memory_optimization"] = raw.get("memory_optimization") is True
     try:
@@ -165,9 +223,9 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
         raise ShortFilmError(str(error)) from error
     base["export_frames"] = raw.get("export_frames") is True
     base["target_duration"] = _bounded_number(raw.get("target_duration"), 30, 5, 3600)
-    base["style"] = _text(raw.get("style"), limit=1000)
-    base["synopsis"] = _text(raw.get("synopsis"), limit=5000)
-    base["created_at"] = _text(raw.get("created_at"), limit=80) or base["created_at"]
+    base["style"] = text(raw.get("style"), limit=1000)
+    base["synopsis"] = text(raw.get("synopsis"), limit=5000)
+    base["created_at"] = text(raw.get("created_at"), limit=80) or base["created_at"]
     base["updated_at"] = utc_now()
 
     assets: list[dict[str, Any]] = []
@@ -175,7 +233,7 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
     for item in list(raw.get("assets") or [])[:64]:
         if not isinstance(item, dict):
             continue
-        alias = _text(item.get("alias"), limit=60) or "未命名素材"
+        alias = text(item.get("alias"), limit=60) or "未命名素材"
         key = alias.casefold()
         if key in aliases:
             raise ShortFilmError(f"素材名稱代號「{alias}」重複。")
@@ -188,7 +246,7 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
             "id": _id(item.get("id")),
             "alias": alias,
             "type": item.get("type") if item.get("type") in ASSET_TYPES else "character",
-            "description": _text(item.get("description"), limit=1200),
+            "description": text(item.get("description"), limit=1200),
             "image_asset_ids": image_ids,
             "audio_asset_id": _asset_id(item.get("audio_asset_id")),
             "voice_mode": "reuse" if item.get("voice_mode") == "reuse" else "timbre",
@@ -200,7 +258,7 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
         base["segment_draft"] = {
             "duration": draft.get("duration") if draft.get("duration") in (5, 10, 15) else 5,
             "target_duration": _bounded_number(draft.get("target_duration"), 60, 5, 3600),
-            "prompts": [_text(value, limit=5000) for value in (draft.get("prompts") or [])[:500]],
+            "prompts": [text(value, limit=5000) for value in (draft.get("prompts") or [])[:500]],
             "asset_ids": list(dict.fromkeys(value for value in (draft.get("asset_ids") or []) if value in valid_asset_ids)),
         }
 
@@ -211,10 +269,10 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
             continue
         scene = {
             "id": _id(scene_raw.get("id")),
-            "title": _text(scene_raw.get("title"), limit=80) or f"場次 {len(scenes) + 1}",
-            "location": _text(scene_raw.get("location"), limit=200),
-            "time_of_day": _text(scene_raw.get("time_of_day"), limit=120),
-            "description": _text(scene_raw.get("description"), limit=1800),
+            "title": text(scene_raw.get("title"), limit=80) or f"場次 {len(scenes) + 1}",
+            "location": text(scene_raw.get("location"), limit=200),
+            "time_of_day": text(scene_raw.get("time_of_day"), limit=120),
+            "description": text(scene_raw.get("description"), limit=1800),
             "shots": [],
         }
         for shot_raw in list(scene_raw.get("shots") or []):
@@ -224,7 +282,7 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
             shot = new_shot(shot_count + 1)
             shot.update({
                 "id": _id(shot_raw.get("id")),
-                "title": _text(shot_raw.get("title"), limit=80) or shot["title"],
+                "title": text(shot_raw.get("title"), limit=80) or shot["title"],
                 "duration": _bounded_number(shot_raw.get("duration"), 5, 5, 15),
                 "retime_duration": (
                     _bounded_number(shot_raw.get("retime_duration"), 5, 0.5, 60)
@@ -235,14 +293,14 @@ def normalize_project(raw: Any, *, existing_id: str | None = None) -> dict[str, 
                 ),
                 "shot_size": shot_raw.get("shot_size") if shot_raw.get("shot_size") in SHOT_SIZES else "medium",
                 "camera": shot_raw.get("camera") if shot_raw.get("camera") in CAMERAS else "static",
-                "camera_detail": _text(shot_raw.get("camera_detail"), limit=800),
-                "action": _text(shot_raw.get("action"), limit=5000),
-                "ending": _text(shot_raw.get("ending"), limit=1200) or shot["ending"],
-                "speaker_alias": _text(shot_raw.get("speaker_alias"), limit=60),
-                "dialogue_language": _text(shot_raw.get("dialogue_language"), limit=40) or "Chinese",
-                "dialogue": _text(shot_raw.get("dialogue"), limit=1800),
-                "sound": _text(shot_raw.get("sound"), limit=1200) or shot["sound"],
-                "music": _text(shot_raw.get("music"), limit=1200) or "N/A",
+                "camera_detail": text(shot_raw.get("camera_detail"), limit=800),
+                "action": text(shot_raw.get("action"), limit=5000),
+                "ending": text(shot_raw.get("ending"), limit=1200) or shot["ending"],
+                "speaker_alias": text(shot_raw.get("speaker_alias"), limit=60),
+                "dialogue_language": text(shot_raw.get("dialogue_language"), limit=40) or "Chinese",
+                "dialogue": text(shot_raw.get("dialogue"), limit=1800),
+                "sound": text(shot_raw.get("sound"), limit=1200) or shot["sound"],
+                "music": text(shot_raw.get("music"), limit=1200) or "N/A",
                 "asset_ids": list(dict.fromkeys(selected_ids)),
                 "storyboard_asset_id": _asset_id(shot_raw.get("storyboard_asset_id")),
                 "continue_previous": bool(shot_raw.get("continue_previous")),
@@ -411,7 +469,7 @@ def append_continuous_scene(project: dict[str, Any], plan: Any) -> dict[str, Any
         raise ShortFilmError("請輸入 1～500 段分鏡詞。")
     if any(not isinstance(prompt, str) or not prompt.strip() or len(prompt.strip()) > 5000 for prompt in prompts):
         raise ShortFilmError("每段都需填寫分鏡詞，且不得超過 5000 字。")
-    result = normalize_project(project, existing_id=project.get("id"))
+    result = normalize_project(project, existing_id=project.get("id"), allow_legacy_text=True)
     existing_shots = flatten_shots(result)
     if len(result["scenes"]) >= 100 or len(existing_shots) + len(prompts) > 500:
         raise ShortFilmError("此專案加入後將超過 100 場次或 500 鏡頭上限。")
@@ -515,7 +573,7 @@ def compile_shot_payload(
     *,
     continuation_asset_id: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
-    project = normalize_project(project, existing_id=project.get("id"))
+    project = normalize_project(project, existing_id=project.get("id"), allow_legacy_text=True)
     scene = next((item for item in project["scenes"] if item["id"] == scene_id), None)
     if not scene:
         raise ShortFilmError("找不到指定場次。")
@@ -699,60 +757,140 @@ def compile_shot_payload(
 
 class ShortFilmStore:
     def __init__(self, directory: Path):
-        self.directory = directory
+        self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.index_path = self.directory / "projects.json"
+        self.backup_path = self.directory / "projects.json.bak"
         self.projects: dict[str, dict[str, Any]] = {}
+        self.load_error: str | None = None
+        self.recovery_warning: str | None = None
+        self.corrupt_path: Path | None = None
         self._load()
 
+    def _read_index(self, path: Path) -> dict[str, dict[str, Any]]:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list):
+            raise ShortFilmError("短片索引應為專案清單。")
+        projects: dict[str, dict[str, Any]] = {}
+        for item in raw:
+            if not isinstance(item, dict) or not SAFE_ID.fullmatch(str(item.get("id", ""))):
+                raise ShortFilmError("短片索引含無效專案，已停止覆寫以保留原始資料。")
+            for collection in ("assets", "scenes"):
+                entries = item.get(collection, [])
+                if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+                    raise ShortFilmError("短片索引含損壞的素材或場次，已停止覆寫以保留原始資料。")
+            for scene in item.get("scenes", []):
+                shots = scene.get("shots", [])
+                if not isinstance(shots, list) or any(not isinstance(shot, dict) for shot in shots):
+                    raise ShortFilmError("短片索引含損壞的鏡頭，已停止覆寫以保留原始資料。")
+            project = normalize_project(item, allow_legacy_text=True)
+            if project["id"] in projects:
+                raise ShortFilmError("短片索引含重複專案，已停止覆寫以保留原始資料。")
+            # Reads must not pretend every historical project was just edited.
+            project["updated_at"] = str(item.get("updated_at") or project["created_at"])
+            projects[project["id"]] = project
+        return projects
+
     def _load(self) -> None:
-        if not self.index_path.exists():
+        if not self.index_path.exists() and not self.backup_path.exists():
             return
         try:
-            raw = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            self.projects = self._read_index(self.index_path)
             return
-        for item in raw if isinstance(raw, list) else []:
-            try:
-                project = normalize_project(item)
-            except ShortFilmError:
-                continue
-            self.projects[project["id"]] = project
+        except (OSError, ValueError, TypeError, AttributeError) as primary_error:
+            self.load_error = f"短片專案索引無法讀取：{primary_error}。原始資料已保留，為避免覆寫，儲存已停止。"
+        try:
+            recovered = self._read_index(self.backup_path)
+            if self.index_path.exists():
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+                self.corrupt_path = self.directory / f"projects.corrupt-{stamp}-{uuid.uuid4().hex[:8]}.json"
+                self.corrupt_path.write_bytes(self.index_path.read_bytes())
+            self.projects = recovered
+            self.recovery_warning = "短片索引損壞或遺失，已從最近有效備份載入。損壞原檔已保留，請確認最近修改。"
+            self.load_error = None
+        except (OSError, ValueError, TypeError, AttributeError):
+            # Keep the original diagnosis; a missing backup must never turn corruption into an empty store.
+            return
 
-    def _persist(self) -> None:
-        temp_path = self.index_path.with_suffix(".tmp")
-        ordered = sorted(self.projects.values(), key=lambda item: item.get("updated_at", ""), reverse=True)
-        temp_path.write_text(json.dumps(ordered, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp_path.replace(self.index_path)
+    def storage_status(self) -> dict[str, Any]:
+        return {
+            "available": self.load_error is None,
+            "recovered": self.recovery_warning is not None,
+            "message": self.load_error or self.recovery_warning,
+            "corrupt_file": self.corrupt_path.name if self.corrupt_path else None,
+        }
+
+    def _ensure_available(self) -> None:
+        if self.load_error:
+            raise ShortFilmError(self.load_error)
+
+    def _persist(self, projects: dict[str, dict[str, Any]]) -> None:
+        self._ensure_available()
+        temp_path = self.directory / f"projects-{uuid.uuid4().hex}.tmp"
+        backup_temp = self.directory / f"projects-backup-{uuid.uuid4().hex}.tmp"
+        ordered = sorted(projects.values(), key=lambda item: item.get("updated_at", ""), reverse=True)
+        content = json.dumps(ordered, ensure_ascii=False, indent=2)
+        # Preserve the last confirmed complete state before the next atomic replacement.
+        previous = json.dumps(list(self.projects.values()), ensure_ascii=False, indent=2) if self.projects else content
+        try:
+            with temp_path.open("w", encoding="utf-8") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            with backup_temp.open("w", encoding="utf-8") as stream:
+                stream.write(previous)
+                stream.flush()
+                os.fsync(stream.fileno())
+            backup_temp.replace(self.backup_path)
+            temp_path.replace(self.index_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+            backup_temp.unlink(missing_ok=True)
 
     def list(self) -> list[dict[str, Any]]:
+        self._ensure_available()
         return sorted((deepcopy(item) for item in self.projects.values()), key=lambda item: item["updated_at"], reverse=True)
 
     def get(self, project_id: str) -> dict[str, Any]:
+        self._ensure_available()
         if project_id not in self.projects:
             raise ShortFilmError("找不到短片專案。")
         return deepcopy(self.projects[project_id])
 
     def create(self, raw: Any) -> dict[str, Any]:
+        self._ensure_available()
         project = normalize_project(raw if isinstance(raw, dict) else {})
         while project["id"] in self.projects:
             project["id"] = uuid.uuid4().hex
-        self.projects[project["id"]] = project
-        self._persist()
+        project["revision"] = 1
+        candidate = {**self.projects, project["id"]: project}
+        self._persist(candidate)
+        self.projects = candidate
         return deepcopy(project)
 
     def update(self, project_id: str, raw: Any) -> dict[str, Any]:
+        self._ensure_available()
         if project_id not in self.projects:
             raise ShortFilmError("找不到短片專案。")
-        project = normalize_project(raw, existing_id=project_id)
-        project["created_at"] = self.projects[project_id].get("created_at", project["created_at"])
-        self.projects[project_id] = project
-        self._persist()
+        current = self.projects[project_id]
+        if not isinstance(raw, dict):
+            raise ShortFilmError("短片專案格式錯誤。")
+        if raw.get("revision", 0) != current["revision"] or isinstance(raw.get("revision"), bool):
+            raise ShortFilmConflictError(current["revision"])
+        project = normalize_project(raw, existing_id=project_id, existing=current)
+        project["created_at"] = current.get("created_at", project["created_at"])
+        project["revision"] = current["revision"] + 1
+        candidate = {**self.projects, project_id: project}
+        self._persist(candidate)
+        self.projects = candidate
         return deepcopy(project)
 
     def delete(self, project_id: str) -> dict[str, Any]:
+        self._ensure_available()
         if project_id not in self.projects:
             raise ShortFilmError("找不到短片專案。")
-        removed = self.projects.pop(project_id)
-        self._persist()
+        removed = self.projects[project_id]
+        candidate = {key: item for key, item in self.projects.items() if key != project_id}
+        self._persist(candidate)
+        self.projects = candidate
         return {"deleted": True, "id": removed["id"]}

@@ -294,6 +294,189 @@ class ProjectFileTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_rejected_atomically(self.repack(data, lambda value: value.update(version=7)))
         await self.assert_clean()
 
+    async def test_v9_font_and_idle_roundtrip_preserves_real_export_and_rejects_downgrade(self):
+        from test_editor_overlays import text_layer
+        catalog = overlays.font_information()
+        selected = next(item for item in catalog["items"] if item["id"] != "default")
+        title = text_layer(id="title", start=0, end=2, text="Title", font_size=.14,
+            font_family=selected["id"], fill_mode="linear_gradient", gradient_start="#FFEE00",
+            gradient_end="#00EEFF", stroke_width=.06, animation_in={"type": "fade", "duration": .2},
+            animation_out={"type": "slide_down", "duration": .2},
+            animation_idle={"preset": "float", "speed": 1.5, "amount": 1.25})
+        self.project = self.store.update_project(self.project["id"], {**self.project,
+            "clips": [{"id": "v1", "media_id": self.video_id, "in": 0, "out": 2,
+                       "speed": 1, "volume": 0}], "audio_clips": [], "overlays": [title]})
+        expected = self.project["overlays"]
+        original = self.root / "original-font-idle.mp4"
+        info = await asyncio.to_thread(render_project, self.project,
+            {self.video_id: self.store.media_path(self.video_id)}, original, threading.Event(), lambda _: None)
+        data = await self.archive()
+        manifest, _ = self.unpack(data)
+        self.assertEqual(manifest["version"], 9)
+        self.assertEqual(manifest["project"]["overlays"], expected)
+        response = await self.upload(data)
+        self.assertEqual(response.status, 201, await response.text() if response.status != 201 else "")
+        restored = (await response.json())["project"]
+        self.assertEqual(restored["overlays"], expected)
+        new_id = restored["clips"][0]["media_id"]
+        output = self.root / "restored-font-idle.mp4"
+        actual_info = await asyncio.to_thread(render_project, restored,
+            {new_id: self.restored.media_path(new_id)}, output, threading.Event(), lambda _: None)
+        self.assertEqual(actual_info, info)
+        self.assertEqual(actual_info["frame_count"], 48)
+        decoded = []
+        for path in (original, output):
+            with av.open(str(path)) as video:
+                decoded.append([frame.to_ndarray(format="rgb24").tobytes() for frame in video.decode(video=0)])
+        self.assertEqual(decoded[0], decoded[1])
+        for version in (7, 8):
+            await self.assert_rejected_atomically(self.repack(data, lambda value: value.update(version=version)))
+        await self.assert_clean()
+
+    async def test_new_transition_effects_require_v10_for_main_and_overlay_archives(self):
+        video = {"kind": "video", "media_id": self.video_id, "in": 0, "out": .75,
+                 "speed": 1, "volume": 0, "track_id": "effects", "x": .5, "y": .5,
+                 "width": .5, "rotation": 0, "opacity": .7}
+        for kind in ("white_flash", "blur_dissolve", "wave_distort", "rgb_glitch"):
+            for collection in ("clips", "overlays"):
+                with self.subTest(kind=kind, collection=collection):
+                    setting = {"type": kind, "duration": .5, "next_id": "right"}
+                    main = [{"id": "left", "media_id": self.video_id, "in": 0, "out": .75,
+                             "speed": 1, "volume": 0},
+                            {"id": "right", "media_id": self.video_id, "in": 1, "out": 1.75,
+                             "speed": 1, "volume": 0}]
+                    layers = []
+                    if collection == "clips":
+                        main[0]["transition_out"] = setting
+                    else:
+                        layers = [{**video, "id": "left", "start": 0, "end": .75,
+                                   "transition_out": setting},
+                                  {**video, "id": "right", "start": .75, "end": 1.5,
+                                   "in": 1, "out": 1.75}]
+                        main = [{**main[0], "id": "background"}]
+                    self.project = self.store.update_project(self.project["id"], {**self.project,
+                        "clips": main, "audio_clips": [], "overlays": layers})
+                    manifest, _ = self.unpack(await self.archive())
+                    self.assertEqual(manifest["version"], 10)
+                    self.assertEqual(manifest["project"][collection][0]["transition_out"], setting)
+
+    async def test_v10_effect_roundtrip_preserves_bindings_remaps_media_and_real_main_overlay_export(self):
+        main_setting = {"type": "white_flash", "duration": .5, "next_id": "right"}
+        layer_setting = {"type": "rgb_glitch", "duration": .5, "next_id": "layer-right"}
+        main = [{"id": "left", "media_id": self.video_id, "in": 0, "out": .75,
+                 "speed": 1, "volume": .25, "transition_out": main_setting},
+                {"id": "right", "media_id": self.video_id, "in": 1, "out": 1.75,
+                 "speed": 1, "volume": 0}]
+        video = {"kind": "video", "media_id": self.video_id, "in": 0, "out": .75,
+                 "speed": 1, "volume": 0, "track_id": "effects", "x": .7, "y": .5,
+                 "width": .4, "rotation": 0, "opacity": .7}
+        layers = [{**video, "id": "layer-left", "start": 0, "end": .75,
+                   "transition_out": layer_setting},
+                  {**video, "id": "layer-right", "start": .75, "end": 1.5,
+                   "in": 1, "out": 1.75}]
+        self.project = self.store.update_project(self.project["id"], {**self.project,
+            "clips": main, "audio_clips": [], "overlays": layers})
+        original = self.root / "original-transition-effects.mp4"
+        info = await asyncio.to_thread(render_project, self.project,
+            {self.video_id: self.store.media_path(self.video_id)}, original,
+            threading.Event(), lambda _: None)
+        data = await self.archive()
+        manifest, _ = self.unpack(data)
+        self.assertEqual(manifest["version"], 10)
+        response = await self.upload(data)
+        self.assertEqual(response.status, 201, await response.text() if response.status != 201 else "")
+        restored = (await response.json())["project"]
+        self.assertEqual(restored["clips"][0]["transition_out"], main_setting)
+        self.assertEqual(restored["overlays"][0]["transition_out"], layer_setting)
+        self.assertEqual(restored["clips"][0]["transition_out"]["next_id"], restored["clips"][1]["id"])
+        self.assertEqual(restored["overlays"][0]["transition_out"]["next_id"], restored["overlays"][1]["id"])
+        for collection in ("clips", "overlays"):
+            for previous, following in zip(self.project[collection], restored[collection]):
+                self.assertEqual({key: value for key, value in previous.items() if key != "media_id"},
+                                 {key: value for key, value in following.items() if key != "media_id"})
+        new_id = restored["clips"][0]["media_id"]
+        self.assertNotEqual(new_id, self.video_id)
+        self.assertEqual({item["media_id"] for item in restored["clips"] + restored["overlays"]}, {new_id})
+        self.store.media_path(self.video_id).unlink()
+        output = self.root / "restored-transition-effects.mp4"
+        actual_info = await asyncio.to_thread(render_project, restored,
+            {new_id: self.restored.media_path(new_id)}, output, threading.Event(), lambda _: None)
+        self.assertEqual(actual_info, info)
+        self.assertEqual(actual_info["frame_count"], 36)
+        decoded = []
+        for path in (original, output):
+            with av.open(str(path)) as source:
+                decoded.append([frame.to_ndarray(format="rgb24") for frame in source.decode(video=0)])
+        self.assertEqual([frame.tobytes() for frame in decoded[0]], [frame.tobytes() for frame in decoded[1]])
+        # The flash must be present in the real export, outside the upper layer.
+        self.assertGreater(int(decoded[1][18][180, 60].min()), 200)
+        await self.assert_rejected_atomically(self.repack(data, lambda value: value.update(version=9)),
+                                             error_contains="轉場特效需要第 10 版")
+        await self.assert_clean()
+
+    async def test_reference_transition_archives_require_v11_on_both_tracks_and_roundtrip_real_export(self):
+        for kind in ("radial_zoom", "horizontal_blur"):
+            for collection in ("clips", "overlays"):
+                with self.subTest(kind=kind, collection=collection):
+                    setting = {"type": kind, "duration": .5, "next_id": "right"}
+                    main = [{"id": "left", "media_id": self.video_id, "in": 0, "out": .75,
+                             "speed": 1, "volume": 0},
+                            {"id": "right", "media_id": self.video_id, "in": 1, "out": 1.75,
+                             "speed": 1, "volume": 0}]
+                    video = {"kind": "video", "media_id": self.video_id, "in": 0, "out": .75,
+                             "speed": 1, "volume": 0, "track_id": "references", "x": .5, "y": .5,
+                             "width": .5, "rotation": 0, "opacity": .5}
+                    layers = []
+                    if collection == "clips":
+                        main[0]["transition_out"] = setting
+                    else:
+                        layers = [{**video, "id": "left", "start": 0, "end": .75, "transition_out": setting},
+                                  {**video, "id": "right", "start": .75, "end": 1.5, "in": 1, "out": 1.75}]
+                        main = [{**main[0], "id": "background"}]
+                    self.project = self.store.update_project(self.project["id"], {**self.project,
+                        "clips": main, "audio_clips": [], "overlays": layers})
+                    data = await self.archive()
+                    manifest, _ = self.unpack(data)
+                    self.assertEqual(manifest["version"], 11)
+                    self.assertEqual(manifest["project"][collection][0]["transition_out"], setting)
+                    await self.assert_rejected_atomically(self.repack(data, lambda value: value.update(version=10)),
+                                                         error_contains="需要第 11 版")
+                    response = await self.upload(data)
+                    self.assertEqual(response.status, 201, await response.text() if response.status != 201 else "")
+                    restored = (await response.json())["project"]
+                    self.assertEqual(restored[collection][0]["transition_out"], setting)
+                    self.assertNotEqual(restored[collection][0]["media_id"], self.video_id)
+                    original_path = self.root / f"reference-{kind}-{collection}.mp4"
+                    restored_path = self.root / f"reference-restored-{kind}-{collection}.mp4"
+                    info = await asyncio.to_thread(render_project, {**self.project, "width": 96, "height": 96},
+                        {self.video_id: self.store.media_path(self.video_id)}, original_path, threading.Event(), lambda _: None)
+                    restored_paths = {item["media_id"]: self.restored.media_path(item["media_id"])
+                                      for item in restored["clips"] + restored["overlays"]}
+                    restored_info = await asyncio.to_thread(render_project, {**restored, "width": 96, "height": 96},
+                        restored_paths, restored_path, threading.Event(), lambda _: None)
+                    self.assertEqual(info, restored_info)
+                    self.assertEqual(info["frame_count"], 36)
+                    decoded = []
+                    for path in (original_path, restored_path):
+                        with av.open(str(path)) as source:
+                            decoded.append([frame.to_ndarray(format="rgb24").tobytes() for frame in source.decode(video=0)])
+                    self.assertEqual(decoded[0], decoded[1])
+        await self.assert_clean()
+
+    async def test_explicit_default_font_and_inactive_idle_keep_legacy_archive_format(self):
+        from test_editor_overlays import text_layer
+        self.project = self.store.update_project(self.project["id"], {**self.project,
+            "overlays": [text_layer(font_family="default",
+                animation_idle={"preset": "none", "speed": 1, "amount": 1})]})
+        expected = self.project["overlays"][0]
+        self.assertNotIn("font_family", expected)
+        self.assertNotIn("animation_idle", expected)
+        data = await self.archive()
+        self.assertEqual(self.unpack(data)[0]["version"], 2)
+        response = await self.upload(data)
+        self.assertEqual(response.status, 201, await response.text() if response.status != 201 else "")
+        self.assertEqual((await response.json())["project"]["overlays"], [expected])
+
     async def test_explicit_default_text_styles_keep_v2_archives_and_legacy_versions_readable(self):
         from test_editor_overlays import text_layer
         defaults = {"stroke_width": 0, "stroke_color": "#000000", "fill_mode": "solid",
@@ -334,12 +517,15 @@ class ProjectFileTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(.005)
         self.assertEqual(list((store.root / "project_files").iterdir()), [])
 
-    async def assert_rejected_atomically(self, data, status=400):
+    async def assert_rejected_atomically(self, data, status=400, error_contains=None):
         before_media, before_projects = copy.deepcopy(self.restored.media), copy.deepcopy(self.restored.projects)
         before_files = {str(path.relative_to(self.restored.root)) for path in self.restored.root.rglob("*") if path.is_file()}
         response = await self.upload(data)
         self.assertEqual(response.status, status, await response.text())
-        self.assertIn("error", await response.json())
+        error = await response.json()
+        self.assertIn("error", error)
+        if error_contains is not None:
+            self.assertIn(error_contains, error["error"])
         self.assertEqual(self.restored.media, before_media)
         self.assertEqual(self.restored.projects, before_projects)
         after_files = {str(path.relative_to(self.restored.root)) for path in self.restored.root.rglob("*") if path.is_file()}

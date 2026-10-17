@@ -22,7 +22,7 @@ class StudioEntrypointTests(unittest.TestCase):
         ):
             studio.main()
         select.assert_called_once_with(8787, auto_port=True,
-                                       required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails", "clip_animations", "clip_transitions"))
+                                       required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails", "clip_animations", "clip_transitions", "text_fonts", "text_idle_animations", "transition_effects", "reference_transitions", "color_adjustments"))
         create.assert_not_called()
         version.assert_called_once_with(8789, "/api/studio/version", 1.5,
                                         max_bytes=4097, accept="application/json")
@@ -37,7 +37,7 @@ class StudioEntrypointTests(unittest.TestCase):
         ):
             studio.main()
         select.assert_called_once_with(8789, auto_port=False,
-                                       required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails", "clip_animations", "clip_transitions"))
+                                       required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails", "clip_animations", "clip_transitions", "text_fonts", "text_idle_animations", "transition_effects", "reference_transitions", "color_adjustments"))
         browser.assert_not_called()
 
     def test_old_or_unreadable_version_never_opens_browser_or_creates_second_studio(self):

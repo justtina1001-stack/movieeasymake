@@ -9,7 +9,7 @@ const animationMath = require("../static/editor_animations.js");
 const {
   clone, clamp, speedOf, speedAtSource, timelineAt, duration, mainDuration, totalDuration, locateTime, validateProject, overlays,
   signature, canonicalSavedSignature, resolveDraft, editableContent,
-  canonicalOverlay, overlayRasterKey, transformOverlay, shiftOverlayTime,
+  canonicalOverlay, canonicalTextFont, overlayRasterKey, transformOverlay, shiftOverlayTime,
   splitAt, splitOverlayAt, trimTimelineClip, detachAudio, promoteClip,
   ProjectSession, OverlayTransaction, VideoDeck,
 } = require("../static/editor.js");
@@ -448,7 +448,7 @@ test("the shipped text/image preview adds entry movement to position keyframes a
   for (const layer of [image, text]) nodes.set(layer.id, { node: { style: {}, classList: { toggle() {} } }, img: {}, placeholder: {}, key: layer.kind === "text" ? overlayRasterKey(layer, value.width, value.height) : "/picture.png" });
   let transitionSyncs = 0;
   const state = { playhead: 1.25, playing: false, selected: null, rasterNodes: nodes, textOverlaysReady: true, textStyleReady: true, media: new Map([["picture", { url: "/picture.png" }]]) };
-  const context = vm.createContext({ state, project: () => value, overlays, animationMath, positionAt: require("../static/editor_motion.js").positionAt, fadeEnvelope, overlayRasterKey, canonicalTextStyle: () => ({}),
+  const context = vm.createContext({ state, project: () => value, overlays, animationMath, positionAt: require("../static/editor_motion.js").positionAt, fadeEnvelope, overlayRasterKey, canonicalTextFont, canonicalTextStyle: () => ({}),
     pruneRasterCache() {}, videoLayers: { release() {} }, syncTransitionPreview() { transitionSyncs++; }, clearTimeout() {}, setTimeout() { throw new Error("Placement/animation changes must reuse the existing text raster"); } });
   loadBrowserFunction(context, "renderOverlayPreview"); context.renderOverlayPreview();
   close(parseFloat(nodes.get("image").node.style.left), (0.2375 + 0.84375) * 100); close(parseFloat(nodes.get("image").node.style.top), 50);

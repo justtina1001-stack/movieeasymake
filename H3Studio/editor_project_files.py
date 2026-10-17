@@ -29,11 +29,11 @@ MAX_UNPACKED_TOTAL = 8 * 1024**3
 MAX_MEDIA_BYTES = 2 * 1024**3
 MAX_MEDIA = 150
 MAX_ENTRIES = 152
-MAX_MANIFEST_BYTES = 1024**2
+MAX_MANIFEST_BYTES = 32 * 1024**2
 MAX_DIRECTORY_BYTES = 256 * 1024
 MAX_COMPRESSION_RATIO = 200
 CHUNK_BYTES = 1024**2
-PROJECT_FIELDS = {"name", "clips", "audio_clips", "overlays", "width", "height", "fps"}
+PROJECT_FIELDS = {"name", "clips", "audio_clips", "overlays", "color_adjustments", "width", "height", "fps", "canvas_duration", "background"}
 MEDIA_FIELDS = {"kind", "duration", "width", "height", "fps", "has_audio", "mime"}
 FORMAT = "h3-studio-project"
 
@@ -72,7 +72,7 @@ def _write_json(path, value):
 
 def _editable(project):
     return {key: copy.deepcopy(project[key]) for key in PROJECT_FIELDS
-            if key in project and (key != "overlays" or project[key])}
+            if key in project and (key not in ("overlays", "color_adjustments") or project[key])}
 
 
 def _source_clips(project):
@@ -83,8 +83,27 @@ def _source_clips(project):
 def _archive_version(project):
     # Older readers silently discard unknown clip fields. Require a new format
     # for visual fades, even when there are no extra layers to trigger v2.
+    background = project.get("background", "#000000")
+    if project.get("canvas_duration") or isinstance(background, str) and background.lower() != "#000000" or len(project.get("overlays", [])) > 50:
+        return 13
+    if project.get("color_adjustments"):
+        return 12
     layers = project.get("overlays", [])
     visuals = project.get("clips", []) + layers
+    if any(isinstance(item.get("transition_out"), dict) and
+           item["transition_out"].get("type") in ("radial_zoom", "horizontal_blur") and
+           item["transition_out"].get("duration", 0) != 0 for item in visuals):
+        return 11
+    if any(isinstance(item.get("transition_out"), dict) and
+           item["transition_out"].get("type") in ("white_flash", "blur_dissolve", "wave_distort", "rgb_glitch") and
+           item["transition_out"].get("duration", 0) != 0 for item in visuals):
+        return 10
+    if any(layer.get("kind") == "text" and
+           (layer.get("font_family", "default") != "default" or
+            isinstance(layer.get("animation_idle"), dict) and
+            layer["animation_idle"].get("preset", "none") != "none" and
+            layer["animation_idle"].get("amount", 1) != 0) for layer in layers):
+        return 9
     if any(any(isinstance(item.get(field), dict) and item[field].get("type", "none") != "none"
                for field in ("animation_in", "animation_out", "transition_out")) for item in visuals):
         return 8
@@ -232,7 +251,7 @@ def _prepare_import(store, archive_path, staging, cancel):
             _read_entry(archive, entries["project.json"], manifest_path, MAX_MANIFEST_BYTES, total, cancel)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object,
                                   parse_constant=lambda _: (_ for _ in ()).throw(EditorError("專案資訊含無效數值。")))
-            if not isinstance(manifest, dict) or set(manifest) != {"format", "version", "project", "media"} or manifest.get("format") != FORMAT or type(manifest.get("version")) is not int or manifest["version"] not in (1, 2, 3, 4, 5, 6, 7, 8):
+            if not isinstance(manifest, dict) or set(manifest) != {"format", "version", "project", "media"} or manifest.get("format") != FORMAT or type(manifest.get("version")) is not int or manifest["version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13):
                 raise EditorError("不支援這個專案格式或版本。")
             project, records = manifest["project"], manifest["media"]
             if not isinstance(project, dict) or set(project) - PROJECT_FIELDS or not {"name", "clips", "width", "height", "fps"} <= set(project):
@@ -243,12 +262,18 @@ def _prepare_import(store, archive_path, staging, cancel):
                 raise EditorError("專案最多包含 150 個素材。", 413)
             if not isinstance(project.get("clips"), list) or not isinstance(project.get("audio_clips", []), list) or not isinstance(project.get("overlays", []), list):
                 raise EditorError("專案時間軸格式錯誤。")
+            if not isinstance(project.get("color_adjustments", []), list):
+                raise EditorError("專案調色片段格式錯誤。")
             if any(not isinstance(layer, dict) for layer in project.get("overlays", [])):
                 raise EditorError("專案圖層格式錯誤。")
             if any(not isinstance(clip, dict) for clip in project["clips"] + project.get("audio_clips", [])):
                 raise EditorError("專案片段格式錯誤。")
             if _archive_version(project) > manifest["version"]:
-                raise EditorError("入場／退場動畫與影片轉場需要第 8 版備份；文字描邊與漸層需要第 7 版，共用圖層軌道需要第 6 版，曲線變速需要第 5 版，位置動畫需要第 4 版，影片疊層與淡入淡出需要第 3 版。")
+                if _archive_version(project) == 13:
+                    raise EditorError("背景片長、背景顏色與大量字幕需要第 13 版專案備份格式。")
+                if project.get("color_adjustments"):
+                    raise EditorError("時間軸調色需要第 12 版專案備份格式。")
+                raise EditorError("放射與橫向模糊轉場需要第 11 版專案備份格式；轉場特效需要第 10 版；文字字型與待機特效需要第 9 版備份；入場／退場動畫與影片轉場需要第 8 版，文字描邊與漸層需要第 7 版，共用圖層軌道需要第 6 版，曲線變速需要第 5 版，位置動畫需要第 4 版，影片疊層與淡入淡出需要第 3 版。")
             clips = _source_clips(project)
             if any(not isinstance(clip, dict) for clip in clips):
                 raise EditorError("專案片段格式錯誤。")

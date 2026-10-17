@@ -6,7 +6,8 @@
   <title>腳本編寫 · MiniMax H3 Studio</title>
   <link rel="stylesheet" href="/static/styles.css?v=20261002-scripts">
   <link rel="stylesheet" href="/static/scripts.css?v=20261012-video-format">
-  <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-help">
+  <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-recommendations">
+  <link rel="stylesheet" href="/static/workspace_ui.css?v=20261017-ux">
 </head>
 <body class="script-body">
   <header class="topbar script-topbar">
@@ -51,10 +52,11 @@
           <label>劇本名稱<input id="scriptTitle" maxlength="120" placeholder="例如：雨停之前"></label>
           <div class="script-fields"><label>類型<select id="scriptGenre"><option value="劇情">劇情</option><option value="廣告">廣告</option><option value="喜劇">喜劇</option><option value="奇幻">奇幻</option><option value="懸疑">懸疑</option><option value="科幻">科幻</option><option value="動畫">動畫</option><option value="紀錄片">紀錄片</option><option value="其他">其他</option></select></label><label>目標片長（秒）<input id="scriptDuration" type="number" min="5" max="7200" value="15" required></label></div>
           <label>故事想法 <span class="script-required">或直接貼上既有劇本</span><textarea id="scriptIdea" rows="5" maxlength="12000" placeholder="主角想得到什麼？誰或什麼阻止了他？故事在哪裡發生？&#10;例如：一名深夜咖啡店店員，遇到每天在同一時間出現、卻從不點咖啡的客人。"></textarea></label>
-          <section class="script-writing-skill" aria-labelledby="scriptWritingSkillTitle"><label id="scriptWritingSkillTitle" for="scriptWritingSkill">創作 Skill</label><select id="scriptWritingSkill"><option value="">不套用／保留原設定</option><option value="cinematic-story" disabled>電影敘事 · 正在讀取</option></select><p id="scriptSkillStatus" class="script-hint" role="status" aria-live="polite">正在讀取創作方法；可選擇不套用，保留原設定。</p><p id="scriptSkillSummary" class="script-skill-summary"></p><p id="scriptSkillSuitable" class="script-hint"></p><div class="script-skill-recommendation"><p id="scriptSkillRecommendation" class="script-hint"></p><button id="applyScriptSkillRecommendation" class="button ghost small" type="button" disabled>使用推薦 Skill</button></div><details id="scriptSkillDetails" class="script-skill-details hidden"><summary>查看拍攝寫作方法與來源</summary><ol id="scriptSkillGuide"></ol><h4>參考來源與授權</h4><ul id="scriptSkillSources"></ul></details></section>
+          <section class="script-writing-skill" aria-labelledby="scriptWritingSkillTitle"><label id="scriptWritingSkillTitle" for="scriptWritingSkill">創作 Skill</label><select id="scriptWritingSkill"><option value="">不套用／保留原設定</option><option value="cinematic-story" disabled>電影敘事 · 正在讀取</option></select><p id="scriptSkillStatus" class="script-hint" role="status" aria-live="polite">正在讀取創作方法；可選擇不套用，保留原設定。</p><p id="scriptSkillSummary" class="script-skill-summary"></p><p id="scriptSkillSuitable" class="script-hint"></p><div class="script-skill-recommendation"><p id="scriptSkillRecommendation" class="script-hint"></p><button id="applyScriptSkillRecommendation" class="button ghost small" type="button" disabled>使用推薦 Skill</button></div><details id="scriptSkillDetails" class="script-skill-details hidden"><summary>查看拍攝寫作方法與來源</summary><ol id="scriptSkillGuide"></ol><h4>參考來源與授權</h4><p id="scriptSkillPopularityNote" class="script-hint">Stars 為倉庫關注度，並非成片品質評分；以下數字屬來源倉庫，不是此創作方法的評分。</p><p id="scriptSkillVersion" class="script-hint"></p><ul id="scriptSkillSources"></ul></details></section>
           <label>角色、關係與參考圖<textarea id="scriptCharacters" rows="3" maxlength="12000" placeholder="&lt;角色名稱&gt;＝圖一；&lt;角色名稱&gt;＝圖二；&lt;場景&gt;＝圖三&#10;補充角色個性、動機與關係；未提供圖片時，可只描述角色。"></textarea></label>
           <section class="script-references" aria-labelledby="scriptReferencesTitle"><div class="script-references-heading"><h3 id="scriptReferencesTitle">角色外觀對照</h3><span id="scriptReferenceCount">0 / 16</span></div><p class="script-hint">每個名稱對應一張圖片。分析後先確認外觀描述，也可手寫或修正；編劇會依名稱使用這份外觀設定。</p><div id="scriptCharacterReferences" class="script-reference-list"></div><button id="addScriptReference" class="button ghost small" type="button">＋ 新增角色／場景</button></section>
           <section class="script-loras" aria-labelledby="scriptLoraTitle"><div class="script-references-heading"><h3 id="scriptLoraTitle">影片 LoRA（選用）</h3><span id="scriptLoraCount">0 / 4</span></div><p class="script-hint">自動影片採 Ref2VA 多模態；最多選用 4 個 LoRA，預設不啟用。LoRA 強化特定動作或風格，不能保證角色外型或數量。</p><div id="scriptLoraRows" class="script-lora-list"></div><div class="script-reference-actions"><button id="addScriptLora" class="button ghost small" type="button">＋ 新增 LoRA</button><button id="refreshScriptLoras" class="button ghost small" type="button">重新掃描</button></div><p id="scriptLoraCatalogStatus" class="script-hint" role="status" aria-live="polite">正在讀取引擎 LoRA…</p><p id="scriptLoraCompatibility" class="script-hint error" role="status" aria-live="polite"></p><p class="script-hint">已啟用且必需的觸發詞會在生成影片時自動加入；其他創作要求仍可自行填寫。內建 Turbo 加速由影片品質模式管理，不加入自訂選擇。</p></section>
+          <details id="scriptLoraRecommendations" class="lora-catalog hidden"><summary id="scriptLoraRecommendationSummary">查看 LoRA 用途、安裝狀態與來源</summary><p class="script-hint">未安裝或不適用的推薦項目仍可查看來源；安裝到運算引擎後重新掃描。新選擇使用初始強度，可自由調整。</p><div id="scriptLoraRecommendationList" class="lora-catalog-list"></div></details>
           <label>敘事與視覺風格<input id="scriptStyle" maxlength="4000" placeholder="精緻 3D CG 遊戲動畫風格，色彩明亮；依場景保留少量神祕冒險氛圍。"></label>
           <label>創作要求<textarea id="scriptInstructions" rows="5" maxlength="12000" placeholder="總長嚴格 15 秒；只寫 0–2、2–4、4–6.5、6.5–9、9–12、12–15 秒六段，15 秒結束。&#10;每段交代焦段（mm）／景別／機位、角色方向與距離；動作按準備→變化→反應→結束姿態寫出 2–4 個可見變化。&#10;具體描述眼神、表情、手部與重心；運鏡方向／速度／結束構圖，並列 VFX、音效與逐字對白。&#10;只補細節，不新增時間段或重複收尾；全片零 BGM。"></textarea></label>
           <p class="script-hint">寫細一點：先分配時間，再要求每段的可見動作、空間關係與鏡頭變化。例如「眼神移向門口→右手停住→重心後移」，比「他很驚訝」更容易表演；細節需在該段秒數內完成，最後時間碼等於目標片長。</p>
@@ -64,7 +66,7 @@
           <label class="script-auto-video-option"><input id="scriptAutoVideo" type="checkbox"><span><strong>自動生成影片</strong><small>編寫完整劇本或潤飾完成後，自動接續分鏡、影片與組片。一般手動編寫預設關閉。</small></span></label>
           <div class="script-video-format-fields">
             <label>畫面比例<select id="scriptVideoAspectRatio"><option value="16:9">16:9 橫式</option><option value="9:16">9:16 直式</option><option value="1:1">1:1 正方形</option><option value="4:3">4:3 橫式</option><option value="3:4">3:4 直式</option><option value="21:9">21:9 寬螢幕</option></select></label>
-            <label>生成精細度<select id="scriptVideoMegapixels"><option value="0.4">0.4 MP · 標準</option><option value="0.7">0.7 MP · 較細緻</option><option value="0.9">0.9 MP · 高精細</option><option value="0.98">0.98 MP · 最高精細</option></select></label>
+            <label>生成精細度<select id="scriptVideoMegapixels"><option value="0.4">快速預覽 · 0.4 MP</option><option value="0.7">標準 · 0.7 MP</option><option value="0.9">高精細 · 0.9 MP</option><option value="0.98">最高精細 · 0.98 MP</option></select></label>
             <label>成片解析度<select id="scriptVideoResolution"><option value="native">跟隨生成尺寸</option><option value="720p">720p</option><option value="1080p">1080p</option></select></label>
           </div>
           <p id="scriptVideoFormatSummary" class="script-video-format-summary" role="status" aria-live="polite">生成 864 × 480 → 成片 864 × 480 · MP4 · 24 fps</p>
@@ -95,6 +97,9 @@
         <section class="script-preview script-panel" aria-labelledby="scriptPreviewTitle">
           <div class="script-preview-heading"><div class="script-section-title"><span class="eyebrow">03 / AI PREVIEW</span><h2 id="scriptPreviewTitle">生成預覽</h2></div><span id="scriptJobBadge" class="script-job-badge">等待靈感</span></div>
           <p id="scriptJobDetail" class="script-hint" role="status" aria-live="polite">選擇左側寫作功能，結果會逐步出現在這裡。</p>
+          <p id="scriptPreviewContext" class="script-hint hidden" role="status" aria-live="polite"></p>
+          <div id="scriptPreviewViews" class="script-preview-actions hidden" role="group" aria-label="預覽格式"><button id="scriptPreviewReadable" class="button primary small" type="button" aria-pressed="true">表演腳本</button><button id="scriptPreviewRaw" class="button secondary small" type="button" aria-pressed="false">原始資料</button></div>
+          <p id="scriptPreviewFormatNote" class="script-hint hidden" role="status" aria-live="polite"></p>
           <pre id="scriptPreviewContent" class="script-preview-content" tabindex="0" aria-label="AI 生成內容">每一個故事，都從一個想法開始。</pre>
           <div class="script-preview-actions"><button id="applyScriptResult" class="button primary" type="button" disabled>套用到編輯稿</button><button id="importScriptStoryboard" class="button primary hidden" type="button" disabled>建立短片分鏡 →</button><button id="cancelScriptJob" class="button danger small hidden" type="button">取消生成</button><button id="copyScriptResult" class="button ghost small" type="button" disabled>複製結果</button><button id="openScriptJobProject" class="button secondary small hidden" type="button">開啟原劇本</button><button id="openScriptJobPipeline" class="button secondary small hidden" type="button">查看影片流程</button></div>
           <a id="openImportedShortfilm" class="button secondary hidden" href="/">開啟已建立的短片 →</a>
@@ -106,7 +111,8 @@
     </div>
     <footer class="script-page-footer">MiniMax H3 Studio <span>從文字開始，把故事帶到畫面。</span></footer>
   </main>
-  <script src="/static/lora-help.js?v=20261005-lora-help" defer></script>
+  <script src="/static/lora-help.js?v=20261005-lora-recommendations" defer></script>
   <script src="/static/scripts.js?v=20261012-video-format" defer></script>
+  <script src="/static/workspace_ui.js?v=20261017-ux"></script>
 </body>
 </html>

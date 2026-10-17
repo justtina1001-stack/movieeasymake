@@ -3,12 +3,17 @@
   const $ = id => document.getElementById(id);
   const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const draftKey = 'h3-qwen-image-21-draft-v1';
-  const fields = ['imageMode','imageName','imagePrompt','imageWidth','imageHeight','imageSteps','imageSeed','imageSeedAuto','imageTransparent','referenceResolution','imageLora','imageLoraStrength'];
+  const fields = ['imageMode','imageModel','imageName','imagePrompt','imageWidth','imageHeight','imageSteps','imageSeed','imageSeedAuto','imageTransparent','referenceResolution','imageLora','imageLoraStrength'];
   let refs = [], ready = false, uploading = false, submitting = false, page = 1, totalPages = 1, jobs = [], queue = null, polling = false;
   const deletedIds = new Set();
   let pendingDelete = null;
   let pendingUpscale = null, upscaleModels = [], upscaleReady = false;
   let selectedLora = '', loraSupported = false, availableLoras = [], lastJobsMarkup = '';
+  let selectedVariant = 'standard', standardSteps = '25', modelVariantSupported = false, modelVariants = [], engineError = '';
+  const modelLabels = {standard:'原版 · 精細生成',turbo:'官方 Turbo · 快速 8 步'};
+  const variantOf = value => value === 'turbo' ? 'turbo' : 'standard';
+  const sourceVariant = job => variantOf(job?.mode === 'upscale' ? job.source_model_variant : job?.model_variant);
+  const jobModelLabel = job => job.mode === 'upscale' ? 'Real-ESRGAN · 增強放大' : modelLabels[sourceVariant(job)];
   let loraCatalog = H3LoraHelp.catalog({}, {model:'qwen'});
   const templates = {
     color:'以圖 1 為主圖，將【指定物件】的顏色改為【目標顏色】，保留原本人物五官、造型、姿勢、構圖與其他物件。',
@@ -24,6 +29,34 @@
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     return data;
   }
+  function selectedModelReady() {
+    return ready && (modelVariantSupported ? modelVariants.some(item => item.id === selectedVariant && item.ready === true) : selectedVariant === 'standard');
+  }
+  function updateModelControls() {
+    const turbo = selectedVariant === 'turbo', profile = modelVariants.find(item => item.id === selectedVariant);
+    $('imageModel').value = selectedVariant;
+    $('imageModel').disabled = submitting;
+    $('imageSteps').disabled = turbo || submitting;
+    if (turbo) $('imageSteps').value = '8';
+    $('imageStepsHint').textContent = turbo ? '官方 Turbo 固定使用 8 步；切回原版會恢復你的原採樣步數。' : '原版預設 25 步供比較；官方完整品質範例使用 40 步。增加步數會延長生成時間。';
+    $('imageModelStatus').textContent = turbo && !modelVariantSupported ? 'Turbo 需要新版 Studio；請重新啟動 Studio，再按「重新檢查」。回原版可使用既有圖片功能。' :
+      selectedModelReady() ? `${modelLabels[selectedVariant]}已就緒${turbo ? ' · 固定 8 步，Turbo 已含加速' : ' · 可調整採樣步數及使用 LoRA'}` :
+      `${modelLabels[selectedVariant]}尚未就緒。${profile?.error || engineError || '請確認已安裝此模型，再按「重新檢查」。'}`;
+  }
+  function selectModelVariant(value, steps) {
+    if (selectedVariant === 'standard') standardSteps = $('imageSteps').value || standardSteps;
+    selectedVariant = variantOf(value);
+    if (selectedVariant === 'standard' && steps !== undefined) standardSteps = String(steps || 25);
+    $('imageSteps').value = selectedVariant === 'turbo' ? '8' : standardSteps;
+    renderLoras();
+  }
+  function applySourceModel(job) {
+    const variant = sourceVariant(job);
+    if (variant === 'standard') {
+      selectedLora = job.lora_name || ''; $('imageLoraStrength').value = job.lora_strength ?? 1;
+    }
+    selectModelVariant(variant, variant === 'standard' ? job.steps || 25 : undefined);
+  }
   function update() {
     const edit = $('imageMode').value === 'edit';
     $('promptLabel').textContent = edit ? '③ 要修改與保留的內容' : '圖片描述';
@@ -31,15 +64,18 @@
     $('editingSize').classList.toggle('hidden', !edit);
     $('generationSize').classList.toggle('hidden', edit);
     $('imageSeed').disabled = $('imageSeedAuto').checked;
-    $('imageLoraStrength').disabled = !selectedLora || !loraSupported;
+    updateModelControls();
+    $('imageLora').disabled = selectedVariant === 'turbo' || submitting;
+    $('imageLoraStrength').disabled = selectedVariant === 'turbo' || !selectedLora || !loraSupported || submitting;
     $('referenceFiles').disabled = uploading || submitting;
-    $('generateImage').disabled = !ready || uploading || submitting || (edit && refs.length === 0) ||
-      (Boolean(selectedLora) && (!loraSupported || !availableLoras.includes(selectedLora)));
+    $('generateImage').disabled = !selectedModelReady() || uploading || submitting || (edit && refs.length === 0) ||
+      (selectedVariant === 'standard' && Boolean(selectedLora) && (!loraSupported || !availableLoras.includes(selectedLora)));
   }
   function saveDraft() {
     const data = {refs};
     for (const id of fields) data[id] = $(id).type === 'checkbox' ? $(id).checked : $(id).value;
     data.imageLora = selectedLora;
+    data.standardImageSteps = standardSteps;
     try { localStorage.setItem(draftKey, JSON.stringify(data)); } catch {}
   }
   function renderRefs() {
@@ -50,9 +86,17 @@
     const draft = JSON.parse(localStorage.getItem(draftKey) || '{}');
     for (const id of fields) if (draft[id] !== undefined) { if ($(id).type === 'checkbox') $(id).checked = draft[id] === true; else $(id).value = draft[id]; }
     selectedLora = typeof draft.imageLora === 'string' ? draft.imageLora : '';
+    selectedVariant = variantOf(draft.imageModel);
+    standardSteps = String(draft.standardImageSteps ?? (selectedVariant === 'standard' ? draft.imageSteps || 25 : 25));
+    $('imageSteps').value = selectedVariant === 'turbo' ? '8' : standardSteps;
     refs = Array.isArray(draft.refs) ? draft.refs.filter(r => /^[a-f0-9]{32}$/.test(r.id)).slice(0,10) : [];
   } catch {}
-  for (const id of fields) $(id).addEventListener('input', () => { if(id === 'imageLora') { selectedLora = $('imageLora').value; renderLoras(); } update(); saveDraft(); });
+  for (const id of fields) $(id).addEventListener('input', () => {
+    if (id === 'imageModel') selectModelVariant($('imageModel').value);
+    if (id === 'imageSteps' && selectedVariant === 'standard') standardSteps = $('imageSteps').value;
+    if (id === 'imageLora' && selectedVariant === 'standard') { selectedLora = $('imageLora').value; renderLoras(); }
+    update(); saveDraft();
+  });
   $('referenceList').addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button || uploading || submitting) return;
@@ -94,21 +138,26 @@
     $('imageLora').innerHTML = '<option value="">不使用 LoRA</option>' + availableLoras.map(n=>`<option value="${escape(n)}">${escape(H3LoraHelp.label(H3LoraHelp.item(loraCatalog,n,{model:'qwen'})))}</option>`).join('') +
       (selectedLora && !availableLoras.includes(selectedLora) ? `<option value="${escape(selectedLora)}">未提供：${escape(selectedLora)}</option>` : '');
     $('imageLora').value=selectedLora;
-    $('loraStatus').textContent = !loraSupported ? '此後端尚未提供 LoRA 支援；請更新並重啟 Studio／檢查引擎。' :
+    const turbo = selectedVariant === 'turbo';
+    $('loraStatus').textContent = turbo ? 'Turbo 已含加速，回原版可使用 LoRA；原版的 LoRA 選擇與強度已保留。' : !loraSupported ? '此後端尚未提供 LoRA 支援；請更新並重啟 Studio／檢查引擎。' :
       selectedLora && !availableLoras.includes(selectedLora) ? '原本選擇的 LoRA 不在目前引擎，請重新選擇後生成。' :
       availableLoras.length ? `目前引擎提供 ${availableLoras.length} 個專用資料夾中的 LoRA；請確認作者標示的基礎模型與觸發詞。` : '目前引擎尚未安裝 Qwen-Image-2.1 專用 LoRA，可直接使用基礎模型。';
     $('imageLoraHelp').innerHTML = selectedLora ? H3LoraHelp.html(H3LoraHelp.item(loraCatalog,selectedLora,{model:'qwen'})) : '';
     $('imageLoraCatalog').innerHTML = loraCatalog.items.length ? `<details class="lora-catalog"><summary>查看全部 ${loraCatalog.items.length} 個圖片 LoRA 的用途</summary><div class="lora-catalog-list">${loraCatalog.items.map(item=>H3LoraHelp.html(item)).join('')}</div></details>` : '';
+    $('imageLoraHelp').classList.toggle('hidden', turbo); $('imageLoraCatalog').classList.toggle('hidden', turbo);
     update();
   }
   async function checkStatus() {
     $('refreshStatus').disabled = true;
     try {
-      const result = await api('/api/images/status'); ready = result.ready === true;
+      const result = await api('/api/images/status'); ready = result.ready === true; engineError = result.error || '';
+      modelVariantSupported = result.model_variant_supported === true;
+      modelVariants = Array.isArray(result.variants) ? result.variants.filter(item => item && ['standard','turbo'].includes(item.id)) : [];
       loraSupported = result.lora_supported === true; loraCatalog = H3LoraHelp.catalog(result,{model:'qwen'}); availableLoras = loraCatalog.names; renderLoras();
-      $('engineStatus').textContent = ready ? 'Qwen-Image-2.1 已就緒' : '圖片引擎尚未就緒';
-      $('engineDetail').textContent = result.error || `${result.mode === 'remote' ? '共用遠端' : '本機'}引擎 · 官方 INT8 模型 · 圖片與影片依佇列順序處理`;
-    } catch (error) { ready = false; $('engineStatus').textContent = '暫時無法檢查引擎'; $('engineDetail').textContent = error.message; }
+      $('engineStatus').textContent = ready ? 'Qwen-Image-2.1 圖片模型已就緒' : '圖片引擎尚未就緒';
+      const available = modelVariants.filter(item => item.ready === true).map(item => modelLabels[item.id]);
+      $('engineDetail').textContent = result.error || `${result.mode === 'remote' ? '共用遠端' : '本機'}引擎 · ${modelVariantSupported ? available.join('／') || '模型尚未就緒' : '原版官方 INT8 模型'} · 圖片與影片依佇列順序處理`;
+    } catch (error) { ready = false; engineError = error.message; $('engineStatus').textContent = '暫時無法檢查引擎'; $('engineDetail').textContent = error.message; }
     finally { $('refreshStatus').disabled = false; update(); }
   }
   function jobStatus(job) {
@@ -126,8 +175,8 @@
   function renderJobs() {
     const markup = jobs.length ? jobs.map(job => {
       const active = ['queued','preparing','running'].includes(job.status), done = job.status === 'completed';
-      const title = escape(job.name), id = escape(job.id);
-      return `<article class="image-card" data-job-id="${id}">${done ? `<a class="image-preview-link" href="/api/images/jobs/${id}/image" target="_blank" rel="noopener" aria-label="查看 ${title} 的大圖" title="點擊查看大圖"><img class="image-preview" loading="lazy" src="/api/images/jobs/${id}/image" alt="${title}"></a>` : ''}<div class="image-card-body"><h3 title="${title}">${title}</h3><p>${escape(jobStatus(job))}</p>${active && queue?.jobs?.[job.id]?.phase === 'engine_running' ? `<progress max="100" value="${Math.min(100,Math.max(0,Number(job.progress)||0))}" aria-label="處理進度"></progress>` : ''}${job.error ? `<p class="image-error">${escape(job.error)}</p>` : ''}${active ? `<button type="button" class="button ghost small" data-cancel="${id}">取消</button>` : ''}${done ? `<p class="image-size">${job.width} × ${job.height}</p>` : ''}<details><summary>詳細資料與操作</summary><p>${job.mode === 'upscale' ? `${job.scale} 倍增強放大` : `${job.steps} 步 · Seed ${job.seed}`}${done && job.rgba ? ' · RGBA' : ''}</p><p>${escape(job.original_prompt || job.prompt)}</p><p>${job.lora_name ? `LoRA：${escape(job.lora_name)} · 強度 ${escape(job.lora_strength)}` : '未使用 LoRA'}</p><div class="image-card-actions">${done ? `<a class="button ghost small" href="/api/images/jobs/${id}/image?download=1">下載 PNG</a><button type="button" class="button ghost small" data-continue="${id}">以此圖繼續編輯</button><button type="button" class="button ghost small" data-upscale="${id}">增強放大</button><button type="button" class="button ghost small" data-reference="${id}">新增為輔助參考</button>${['edit','upscale'].includes(job.mode) && job.image_asset_ids?.length ? `<button type="button" class="button ghost small" data-compare="${id}">原圖／結果比較</button>` : ''}` : ''}${job.mode !== 'upscale' ? `<button type="button" class="button ghost small" data-reuse="${id}">套用設定</button>` : ''}${['completed','failed','cancelled','interrupted'].includes(job.status) ? `<button type="button" class="button danger small" data-delete="${id}">刪除圖片</button>` : ''}</div></details></div></article>`;
+      const title = escape(job.name), id = escape(job.id), model = escape(jobModelLabel(job));
+      return `<article class="image-card" data-job-id="${id}">${done ? `<a class="image-preview-link" href="/api/images/jobs/${id}/image" target="_blank" rel="noopener" aria-label="查看 ${title} 的大圖" title="點擊查看大圖"><img class="image-preview" loading="lazy" src="/api/images/jobs/${id}/image" alt="${title}"></a>` : ''}<div class="image-card-body"><h3 title="${title}">${title}</h3><p>${escape(jobStatus(job))}</p><p class="image-hint">${model}</p>${active && queue?.jobs?.[job.id]?.phase === 'engine_running' ? `<progress max="100" value="${Math.min(100,Math.max(0,Number(job.progress)||0))}" aria-label="處理進度"></progress>` : ''}${job.error ? `<p class="image-error">${escape(job.error)}</p>` : ''}${active ? `<button type="button" class="button ghost small" data-cancel="${id}">取消</button>` : ''}${done ? `<p class="image-size">${job.width} × ${job.height}</p>` : ''}<details><summary>詳細資料與操作</summary><p>模型：${model}</p><p>${job.mode === 'upscale' ? `${job.scale} 倍增強放大` : `${job.steps} 步 · Seed ${job.seed}`}${done && job.rgba ? ' · RGBA' : ''}</p><p>${escape(job.original_prompt || job.prompt)}</p><p>${job.lora_name ? `LoRA：${escape(job.lora_name)} · 強度 ${escape(job.lora_strength)}` : '未使用 LoRA'}</p><div class="image-card-actions">${done ? `<a class="button ghost small" href="/api/images/jobs/${id}/image?download=1">下載 PNG</a><button type="button" class="button ghost small" data-continue="${id}">以此圖繼續編輯</button><button type="button" class="button ghost small" data-upscale="${id}">增強放大</button><button type="button" class="button ghost small" data-reference="${id}">新增為輔助參考</button>${['edit','upscale'].includes(job.mode) && job.image_asset_ids?.length ? `<button type="button" class="button ghost small" data-compare="${id}">原圖／結果比較</button>` : ''}` : ''}${job.mode !== 'upscale' ? `<button type="button" class="button ghost small" data-reuse="${id}">套用設定</button>` : ''}${['completed','failed','cancelled','interrupted'].includes(job.status) ? `<button type="button" class="button danger small" data-delete="${id}">刪除圖片</button>` : ''}</div></details></div></article>`;
     }).join('') : '<p class="image-empty">第一張圖片，從左側描述開始。<br>生成結果會保留在這裡，也能作為下一張的參考圖。</p>';
     if (markup !== lastJobsMarkup) {
       const expanded = new Set([...$('imageJobs').querySelectorAll('article[data-job-id]')].filter(e=>e.querySelector('details')?.open).map(e=>e.dataset.jobId));
@@ -137,29 +186,38 @@
     $('pageLabel').textContent = `第 ${page} / ${totalPages} 頁`;
     $('previousPage').disabled = page <= 1; $('nextPage').disabled = page >= totalPages;
   }
+  let pendingFocusedJob = typeof location === 'undefined' ? '' : new URLSearchParams(location.search).get('job') || '';
   async function refresh() {
     if (polling) return;
     polling = true;
-    const results = await Promise.allSettled([api(`/api/images/jobs?page=${page}`),api('/api/queue')]);
+    const results = await Promise.allSettled([api(`/api/images/jobs?page=${page}${pendingFocusedJob ? `&focus=${encodeURIComponent(pendingFocusedJob)}` : ""}`),api('/api/queue')]);
     if (results[0].status === 'fulfilled') { const data = results[0].value; jobs = data.items.filter(job=>!deletedIds.has(job.id)); page = data.page; totalPages = data.total_pages; }
     else $('imageQueue').textContent = results[0].reason.message;
     queue = results[1].status === 'fulfilled' ? results[1].value : null;
     if (results[0].status === 'fulfilled') $('imageQueue').textContent = queue?.available ? `共享引擎：執行 ${queue.running_count} 筆 · 排隊 ${queue.pending_count} 筆 · 本機待送出 ${queue.local_waiting_count} 筆` : '暫時無法取得共享引擎佇列，工作仍可能進行中。';
     renderJobs(); polling = false;
+    if (pendingFocusedJob && results[0].status === 'fulfilled') {
+      const id = pendingFocusedJob; pendingFocusedJob = '';
+      const card = [...$('imageJobs').querySelectorAll('[data-job-id]')].find(node => node.dataset.jobId === id);
+      if (card) { const details = card.querySelector('details'); if (details) details.open = true; card.scrollIntoView({block:'center',behavior:'smooth'}); }
+    }
   }
   $('imageForm').addEventListener('submit', async event => {
     event.preventDefault();
-    if (!ready || submitting || uploading || $('generateImage').disabled) return;
-    const payload = {name:$('imageName').value, mode:$('imageMode').value, prompt:$('imagePrompt').value,
-      width:Number($('imageWidth').value),height:Number($('imageHeight').value),steps:Number($('imageSteps').value),
+    if (submitting || uploading) return;
+    if (!selectedModelReady()) { $('formMessage').textContent = $('imageModelStatus').textContent; return; }
+    if ($('generateImage').disabled) return;
+    const turbo = selectedVariant === 'turbo';
+    const payload = {name:$('imageName').value, mode:$('imageMode').value, ...(modelVariantSupported ? {model_variant:selectedVariant} : {}), prompt:$('imagePrompt').value,
+      width:Number($('imageWidth').value),height:Number($('imageHeight').value),steps:turbo ? 8 : Number($('imageSteps').value),
       seed:Number($('imageSeed').value),seed_auto:$('imageSeedAuto').checked,transparent:$('imageTransparent').checked,
-      lora_name:selectedLora,lora_strength:Number($('imageLoraStrength').value),
+      lora_name:turbo ? '' : selectedLora,lora_strength:turbo ? 0 : Number($('imageLoraStrength').value),
       reference_resolution:Number($('referenceResolution').value),image_asset_ids:$('imageMode').value === 'edit' ? refs.map(r=>r.id) : []};
     submitting = true; update();
     try {
       const job = await api('/api/images/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       $('imageSeed').value = job.seed; saveDraft(); page = 1;
-      $('formMessage').textContent = `圖片工作已加入佇列 · Seed ${job.seed}`;
+      $('formMessage').textContent = `${modelLabels[selectedVariant]}圖片工作已加入佇列 · Seed ${job.seed}`;
       await refresh();
     } catch(error) { $('formMessage').textContent = error.message; }
     finally { submitting = false; update(); }
@@ -205,19 +263,19 @@
       }
       if (button.dataset.continue) {
         uploading=true; update();
+        // Polling can replace the visible jobs while the reference is imported.
+        const currentSource=jobs.find(j=>j.id === button.dataset.continue), source=currentSource ? {...currentSource} : null;
         const asset=await api(`/api/images/jobs/${button.dataset.continue}/reference`,{method:'POST'});
         refs=[asset]; $('imageMode').value='edit';
         $('imagePrompt').value=''; $('imageSeedAuto').checked=true;
-        const source=jobs.find(j=>j.id === button.dataset.continue);
         if(source) {
-          selectedLora=source.lora_name || ''; $('imageLoraStrength').value=source.lora_strength ?? 1; renderLoras();
-          $('imageSteps').value=source.steps || 25; $('editTemplate').value='';
+          applySourceModel(source); $('editTemplate').value='';
           $('imageName').value=source.name.slice(0,74)+' · 編輯';
           $('imageTransparent').checked=source.transparent === true;
           $('referenceResolution').value=source.reference_resolution || 1024;
         }
         renderRefs(); $('imagePrompt').focus();
-        $('formMessage').textContent='已將此結果設為唯一主圖，請描述下一步要修改的內容。';
+        $('formMessage').textContent=`已將此結果設為唯一主圖，使用${modelLabels[selectedVariant]}；請描述下一步要修改的內容。`;
       }
       if (button.dataset.reference) {
         uploading=true; update();
@@ -227,13 +285,13 @@
       }
       if (button.dataset.reuse) {
         const job = jobs.find(j=>j.id === button.dataset.reuse);
-        if (!job) return;
+        if (!job || job.mode === 'upscale') return;
         $('imageMode').value = job.mode; $('imageName').value = job.name; $('imagePrompt').value = job.original_prompt || job.prompt;
-        $('imageWidth').value = job.width; $('imageHeight').value = job.height; $('imageSteps').value = job.steps;
+        $('imageWidth').value = job.width; $('imageHeight').value = job.height;
         $('imageSeed').value = job.seed; $('imageSeedAuto').checked = false; $('imageTransparent').checked = job.transparent;
-        selectedLora=job.lora_name || ''; $('imageLoraStrength').value=job.lora_strength ?? 1; renderLoras();
-        $('referenceResolution').value = job.reference_resolution; refs = job.image_asset_ids.map(id=>({id})); renderRefs();
-        $('imagePrompt').focus(); $('formMessage').textContent = '已套用原設定及固定 Seed；按生成才會建立新工作。';
+        applySourceModel(job);
+        $('referenceResolution').value = job.reference_resolution || 1024; refs = (job.image_asset_ids || []).map(id=>({id})); renderRefs();
+        $('imagePrompt').focus(); $('formMessage').textContent = `已套用${modelLabels[selectedVariant]}原設定及固定 Seed；按生成才會建立新工作。`;
       }
     } catch(error) { $('formMessage').textContent = error.message; }
     finally { uploading=false; update(); button.disabled = false; }

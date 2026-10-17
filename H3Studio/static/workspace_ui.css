@@ -1,0 +1,73 @@
+.workspace-header { height: auto; min-height: 72px; flex-wrap: wrap; gap: 10px 18px; padding-top: 12px; padding-bottom: 10px; }
+.studio-global-nav { display: flex; gap: 5px; flex-wrap: wrap; flex: 1 0 100%; align-items: center; }
+.studio-global-nav a { color: #aeb8c7; text-decoration: none; padding: 7px 15px; border-radius: 7px; font-size: 13px; line-height: 1.25; white-space: nowrap; }
+.studio-global-nav a:hover { background: #252b36; color: #f4f6f8; }
+.studio-global-nav a[aria-current=page] { color: #ffbd7a; background: #35251e; }
+.studio-global-nav a:focus-visible, .studio-settings-menu > summary:focus-visible { outline: 2px solid #ffab47; outline-offset: 3px; }
+.studio-home .workspace-header .engine-status > a, .studio-home .workspace-header #openMusicStudio, .studio-home .workspace-header #openVoiceStudio { display: none; }
+.studio-home .brand small { display: none; }
+.studio-settings-menu { position: relative; }
+.studio-settings-menu > summary { list-style: none; cursor: pointer; padding: 9px 12px; border: 1px solid #343b47; border-radius: 8px; font-size: 12px; color: #d1d8e2; }
+.studio-settings-menu > summary::after { content: ' ▾'; }
+.studio-settings-actions { position: absolute; right: 0; top: calc(100% + 8px); min-width: 180px; display: grid; gap: 6px; padding: 10px; background: #171c25; border: 1px solid #3a424f; border-radius: 10px; box-shadow: 0 12px 30px #0008; z-index: 50; }
+.studio-settings-actions .button { text-align: left; font-size: 13px; }
+.studio-settings-menu:not([open]) > .studio-settings-actions { display: none; }
+.studio-home .shared-queue { margin-top: 18px; padding: 16px 20px; }
+.studio-home .shared-queue-heading .eyebrow { display: none; }
+.studio-home .shared-queue-heading h2 { font-size: 15px; }
+.studio-home .shared-queue.queue-idle .shared-queue-stats, .studio-home .shared-queue.queue-idle .queue-details { display: none; }
+.studio-home .shared-queue.queue-idle .queue-status-message { margin: 6px 0 0; }
+.studio-home .shared-queue-stats { margin-top: 12px; }
+.studio-home .queue-stat { padding: 8px 12px; }
+.studio-home .queue-stat strong { font-size: 23px; }
+.studio-home .workspace-switch { margin-top: 14px; padding: 5px; }
+.studio-home .workspace-switch button { min-height: 54px; padding: 10px 16px; }
+.studio-home .hero { min-height: 0; padding: 22px 0 20px; gap: 22px; }
+.studio-home .hero h1 { font-size: 26px; line-height: 1.4; letter-spacing: 0; }
+.studio-home .hero h1 br { display: none; }
+.studio-home .hero .eyebrow { display: none; }
+.studio-home .hero-copy { margin: 6px 0 0; font-size: 13px; }
+.studio-home .hero-meter { min-width: 230px; padding: 4px 12px; box-shadow: none; }
+.studio-home .hero-meter div { padding: 5px 0; }
+.studio-home .hero-meter div:not(:first-child) { display: none; }
+.studio-home .mode-grid { grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; }
+.studio-home .mode-card { min-height: 86px; padding: 12px; gap: 10px; border-radius: 12px; }
+.studio-home .mode-icon { width: 34px; height: 34px; border-radius: 9px; }
+.studio-home .mode-card strong { font-size: 14px; }
+.studio-home .mode-card small { font-size: 11px; line-height: 1.5; }
+.studio-home .editor-column { gap: 16px; }
+.studio-home .sticky-stack { top: 126px; }
+.studio-home .settings-optional { margin-top: 14px; }
+.studio-home .settings-optional > summary { cursor: pointer; color: #d3dbe6; font-size: 13px; padding: 10px 0; }
+.studio-home .settings-optional[open] > summary { margin-bottom: 10px; }
+.studio-save-status { display: block; font-size: 12px; line-height: 1.6; margin-top: 8px; color: #a8b7c8; }
+.studio-save-status[data-state=saved] { color: #85d5bc; }
+.studio-save-status[data-state=error], .studio-save-status[data-state=conflict] { color: #ffb0a2; }
+.studio-field-count { display: block; margin-top: 5px; font-size: 12px; }
+.field-limit-warning { color: #ffb0a2; }
+.shortfilm-recovery { margin: 12px 0; padding: 14px; background: #30251b; border: 1px solid #775a34; border-radius: 10px; color: #f5d3a3; }
+.shortfilm-recovery .button { margin: 8px 8px 0 0; }
+.queue-work-link { color: #ffd098; font-size: 12px; text-decoration: underline; white-space: nowrap; }
+.music-job-title small, .music-job-status, .music-job-status b, .music-job-actions .button, .music-job-error, .music-pagination span { font-size: 12px; line-height: 1.6; }
+.audio-draft-tools, .audio-draft-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 12px; }
+.audio-draft-tools [role=status], .audio-draft-toolbar [role=status] { color: #a8b7c8; font-size: 12px; }
+.editor-body .workspace-header { padding-top: 8px; padding-bottom: 8px; }
+.editor-body .studio-global-nav { flex-basis: auto; flex-grow: 0; gap: 2px; }
+.editor-body .studio-global-nav a { padding: 5px 8px; font-size: 12px; }
+@media(max-width:1100px) {
+  .studio-home .hero-meter { display: none; }
+  .studio-home .mode-grid { grid-template-columns: repeat(4,minmax(0,1fr)); }
+  .studio-home .mode-card { flex-direction: column; align-items: flex-start; }
+  .studio-home .mode-icon { display: none; }
+}
+@media(max-width:680px) {
+  .workspace-header { padding-left: 16px; padding-right: 16px; }
+  .studio-global-nav { gap: 2px; }
+  .studio-global-nav a { padding: 8px 10px; font-size: 12px; }
+  .studio-home .workspace-header .engine-status { flex-wrap: wrap; justify-content: flex-start; }
+  .studio-home .hero h1 { font-size: 23px; }
+  .studio-home .mode-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .studio-home .mode-card { min-height: 78px; }
+  .studio-home .shared-queue { padding: 12px; }
+  .studio-home .sticky-stack { position: static; }
+}

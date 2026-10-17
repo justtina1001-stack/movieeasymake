@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const ShortFilmPersistence = require('../static/shortfilm_persistence.js');
 const source = fs.readFileSync(path.join(__dirname, '../static/app.js'), 'utf8');
 
 function deferred() {
@@ -24,15 +25,18 @@ function fixture() {
     }
     return elements.get(key);
   }
-  const projects = ['a', 'b'].map(id => ({ id, title: id, assets: [], scenes: [{ id: `scene-${id}`, title: `scene ${id}`,
+  const projects = ['a', 'b'].map(id => ({ id, revision: 1, created_at: 'created', updated_at: 'initial', title: id, assets: [], scenes: [{ id: `scene-${id}`, title: `scene ${id}`,
     shots: [{ id: `shot-${id}`, title: `shot ${id}`, action: 'walk', seed: 1, status: 'draft', job_id: null }] }] }));
   const preparation = deferred();
+  const storage = new Map(), serverRevisions = new Map(projects.map(project => [project.id, project.revision]));
   const context = vm.createContext({
     shortFilmProjects: structuredClone(projects), activeShortFilmId: 'a', shortFilmShotRequests: new Map(),
     shortFilmBatchRunning: false, shortFilmSaveTimer: null, expandedShortFilmJobIds: new Set(),
+    shortFilmSaveCoordinator: null, shortFilmRecoveries: new Map(), ShortFilmPersistence, serverRevisions,
+    localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
     shortFilmStatusRefreshing: false, studioWorkspace: 'shortfilm',
-    messages: [], calls: [], savedIds: [], listLoads: 0, renders: 0, console,
-    structuredClone, clearTimeout, confirm: () => true,
+    messages: [], calls: [], savedIds: [], savedProjects: [], listLoads: 0, renders: 0, console,
+    structuredClone, clearTimeout, setTimeout, confirm: () => true,
     $(selector, card) { return element(card ? `${card.dataset.sfShotId}:${selector}` : selector); },
     $$(selector) { return selector === '[data-sf-shot-id]' ? [context.card] : []; },
     card: { dataset: { sfShotId: 'shot-a' } },
@@ -40,19 +44,23 @@ function fixture() {
     renderShortFilmSummary() {},
     renderShortFilmScenes() { context.renders++; context.renderShortFilmShotRequests(); },
     async loadJobs() {}, async loadShortFilmJobs() { context.listLoads++; },
-    async api(url, options) {
+    async api(url, options = {}) {
       context.calls.push(url);
       if (options.method === 'PUT') {
         context.savedIds.push(url.split('/').pop());
         if (context.failSaveAfterSubmit && context.savedIds.length > 1) throw new Error('save disconnected');
-        return JSON.parse(options.body);
+        const payload = JSON.parse(options.body), currentRevision = serverRevisions.get(payload.id);
+        context.savedProjects.push(structuredClone(payload));
+        if (payload.revision !== currentRevision) throw Object.assign(new Error('version conflict'), { status: 409, current_revision: currentRevision });
+        serverRevisions.set(payload.id, currentRevision + 1);
+        return { ...payload, revision: currentRevision + 1 };
       }
       if (url.endsWith('/compile')) return preparation.promise;
       if (url === '/api/render') return { id: 'job-new', status: 'queued' };
       throw new Error(`unexpected ${url}`);
     },
   });
-  for (const name of ['activeShortFilmProject', 'shortFilmFlatten', 'setButtonBusy', 'saveShortFilmProject',
+  for (const name of ['activeShortFilmProject', 'shortFilmFlatten', 'setButtonBusy', 'saveShortFilmProject', 'getShortFilmSaveCoordinator', 'renderShortFilmSaveStatus',
     'shortFilmGenerationSignature', 'renderShortFilmShotRequests', 'confirmTranslationFallback', 'compileShortFilmShot', 'refreshShortFilmShotStatuses']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1, name);
@@ -212,6 +220,23 @@ test('runtime status updates do not cancel preparation or overwrite the latest p
   f.preparation.resolve(result);
   assert.equal((await request).id, 'job-new');
   assert.equal(f.context.shortFilmProjects[0].updated_at, 'newer timestamp');
+});
+
+test('a continuation prepared by the server advances revision before saving the accepted job link', async () => {
+  const f = fixture();
+  const request = f.run('compileShortFilmShot("shot-a", true)');
+  await f.flush();
+  const prepared = f.result();
+  prepared.project.revision += 1;
+  prepared.project.scenes[0].shots[0].continuation_asset_id = 'prepared-tail';
+  prepared.project.scenes[0].shots[0].continuation_job_id = 'previous-job';
+  f.context.serverRevisions.set('a', prepared.project.revision);
+  f.preparation.resolve(prepared);
+  assert.equal((await request).id, 'job-new');
+  assert.deepEqual(f.context.savedProjects.map(value => value.revision), [1, 3]);
+  assert.equal(f.context.shortFilmProjects[0].revision, 4);
+  assert.equal(f.context.shortFilmProjects[0].scenes[0].shots[0].continuation_asset_id, 'prepared-tail');
+  assert.equal(f.context.shortFilmSaveCoordinator.status('a').state, 'saved');
 });
 
 test('view job action stays in the shortfilm workspace whose list contains the job', () => {

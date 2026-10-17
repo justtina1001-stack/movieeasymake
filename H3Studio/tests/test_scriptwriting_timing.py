@@ -18,6 +18,17 @@ class ScriptTimelineTests(unittest.TestCase):
             "3. **5.5–15.0s｜登上列車**\n阿青提起行李，登車後向窗外揮手。"
         )
         validate_script_timeline(content, 15)
+        validate_script_timeline(content, 15, require_timeline=True)
+
+    def test_generated_timed_layout_requires_at_least_one_timecode_header(self):
+        for content in ("一句話梗概：阿青搭列車回家。", "第 1 場 外景 車站 日\n阿青：走吧。",
+                        '{"title":"回家的路","scenes":[]}', "{'title': '回家的路', 'scenes': []}",
+                        '{"opaque":true}\n0.0–15.0s｜結構資料內的偽裝標題',
+                        '```python\n0.0–15.0s｜程式碼內的偽裝標題\n```'):
+            with self.subTest(content=content):
+                validate_script_timeline(content, 15)
+                with self.assertRaisesRegex(ScriptwritingError, "時間碼"):
+                    validate_script_timeline(content, 15, require_timeline=True)
 
     def test_simplified_timecode_headers_are_recognised(self):
         content = "**时间码：0.0s-5.0s**\n阿青到達月台。\n**时间码：5.0s-15.0s**\n阿青登車。"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from custom_loras import normalize_loras, active_loras, required_lora_triggers
+from custom_loras import normalize_loras, active_loras, required_lora_trigger_specs, validate_lora_requirements
 from dialogue import format_dialogue, visual_direction_text
 from h3_prompt_format import base_prompt as format_base_prompt, combine_storyboards, cut_time, language_warning, number_speakers, rewrite_aliases, unpack_prompt
 from typing import Any
@@ -188,14 +188,26 @@ def _clean_text(value: Any) -> str:
 def _with_lora_triggers(prompt: str, loras: list[dict[str, Any]], family: str) -> str:
     # Required cues belong to the visual direction, never to speech or sign text.
     visual = visual_direction_text(prompt)
-    missing = [cue for cue in required_lora_triggers(loras, family)
-               if not re.search(r"(?<!\w)" + re.escape(cue) + r"(?!\w)", visual, re.IGNORECASE)]
+    specs = required_lora_trigger_specs(loras, family)
+    marker = re.match(r"\[Shot 1\]\s*", prompt)
+    body = prompt[marker.end():] if marker else prompt
+    prefix_cues = [item["cue"] for item in specs if item["placement"] == "prefix"]
+    leading = set()
+    remaining = body
+    if prefix_cues:
+        pattern = re.compile(r"^\s*(" + "|".join(re.escape(cue) for cue in prefix_cues)
+                             + r")(?:\s*[,;]\s*|\s+|$)", re.IGNORECASE)
+        while match := pattern.match(remaining):
+            leading.add(match.group(1).casefold())
+            remaining = remaining[match.end():]
+    missing = [cue for cue in prefix_cues if cue.casefold() not in leading]
+    missing += [item["cue"] for item in specs if item["placement"] != "prefix"
+                and not re.search(r"(?<!\w)" + re.escape(item["cue"]) + r"(?!\w)", visual, re.IGNORECASE)]
     if not missing:
         return prompt
     prefix = ", ".join(missing) + ", "
-    marker = re.match(r"\[Shot 1\]\s*", prompt)
     if marker:
-        return "[Shot 1] " + prefix + prompt[marker.end():]
+        return "[Shot 1] " + prefix + body
     return prefix + prompt
 
 
@@ -563,6 +575,16 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         raise RequestError("自動串接需要保留上一段影片來源。")
 
     references = payload.get("references") or []
+    try:
+        validate_lora_requirements(custom_loras, "ref2va" if reference_mode else "fl2va",
+                                   has_source_video=reference_mode and any(
+                                       _clean_text(item.get("video_asset_id")) or any(item.get("video_asset_ids") or [])
+                                       for item in references),
+                                   has_replacement_image=reference_mode and any(
+                                       (_clean_text(item.get("type")) or "character") in {"character", "creature"}
+                                       and any(item.get("image_asset_ids") or []) for item in references))
+    except ValueError as error:
+        raise RequestError(str(error)) from error
     if mode == "popup_panel":
         backgrounds = [item for item in references if _clean_text(item.get("alias")) == "背景圖"]
         panels = [item for item in references if _clean_text(item.get("alias")) == "面板"]

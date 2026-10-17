@@ -1,0 +1,147 @@
+{
+  "checked_at": "2026-10-06",
+  "version": "20261006-h3",
+  "popularity_scope": "GitHub repository, not individual Skill rating or video quality",
+  "criteria": [
+    "H3 relevance",
+    "license and attribution",
+    "community adoption",
+    "maintenance",
+    "compatibility with Studio JSON and compiler"
+  ],
+  "selected": [
+    {
+      "profile_id": "h3-official-storyboard",
+      "name": "H3 官方格式／分鏡",
+      "source": {
+        "name": "MiniMax 官方 · H3 Prompt Writing",
+        "url": "https://github.com/MiniMax-AI/MiniMax-H3/blob/d21241f0a4b3acbb34c97dae47fa417b7065e438/skills/h3-prompt-writing/SKILL.md",
+        "license": "MiniMax H3 Community License",
+        "license_url": "https://github.com/MiniMax-AI/MiniMax-H3/blob/d21241f0a4b3acbb34c97dae47fa417b7065e438/README.md#license",
+        "commit": "d21241f0a4b3acbb34c97dae47fa417b7065e438",
+        "repo_url": "https://github.com/MiniMax-AI/MiniMax-H3",
+        "repository_stars": 9584,
+        "repository_forks": 709,
+        "checked_at": "2026-10-06",
+        "provenance": "official"
+      },
+      "source_sha256": "95d74fee00e78641fb9e774ab17488516ceece441231519287f0d3128eaa8c54",
+      "license_file": "licenses/minimax-h3-community.txt",
+      "license_sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+    },
+    {
+      "profile_id": "h3-3d-animation",
+      "name": "H3 3D 動畫故事分鏡",
+      "source": {
+        "name": "MiniMax 官方 · 3D Animation Short Generator",
+        "url": "https://github.com/MiniMax-AI/MiniMax-H3/blob/d21241f0a4b3acbb34c97dae47fa417b7065e438/skills/3d-animation-short-generator/SKILL.md",
+        "license": "MiniMax H3 Community License",
+        "license_url": "https://github.com/MiniMax-AI/MiniMax-H3/blob/d21241f0a4b3acbb34c97dae47fa417b7065e438/README.md#license",
+        "commit": "d21241f0a4b3acbb34c97dae47fa417b7065e438",
+        "repo_url": "https://github.com/MiniMax-AI/MiniMax-H3",
+        "repository_stars": 9584,
+        "repository_forks": 709,
+        "checked_at": "2026-10-06",
+        "provenance": "official"
+      },
+      "source_sha256": "64336677c7dd6ab4cf465ed3a1306140ceebb3d1a15d4a113f18d03828897dae",
+      "license_file": "licenses/minimax-h3-community.txt",
+      "license_sha256": "59b99642b95ea21630e311198ddbfffbfe05aadba0c2f5d884cbdf4efcc90f44"
+    },
+    {
+      "profile_id": "h3-performance-beats",
+      "name": "H3 角色表演／節拍",
+      "source": {
+        "name": "H3 Storyboard · 角色表演與節拍",
+        "url": "https://github.com/phileiny/h3-storyboard-skill/blob/ce732bae6e05d2e4c4943e3e1fda2d515f9a2ff3/skills/h3-storyboard/SKILL.md",
+        "license": "MIT",
+        "license_url": "https://github.com/phileiny/h3-storyboard-skill/blob/ce732bae6e05d2e4c4943e3e1fda2d515f9a2ff3/LICENSE",
+        "commit": "ce732bae6e05d2e4c4943e3e1fda2d515f9a2ff3",
+        "repo_url": "https://github.com/phileiny/h3-storyboard-skill",
+        "repository_stars": 175,
+        "repository_forks": 4,
+        "checked_at": "2026-10-06",
+        "provenance": "community"
+      },
+      "source_sha256": "bc0182884fee126253d4cc7e5b1c4b56169617a5b0791244d6b68420f2f451e3",
+      "license_file": "licenses/h3-storyboard.txt",
+      "license_sha256": "61e2ad90a3b30a5d48d12438c79a2a1d585a4ef60f5317cdb6470d10b59405dd"
+    },
+    {
+      "profile_id": "h3-director-continuity",
+      "name": "H3 導演／鏡頭銜接",
+      "source": {
+        "name": "Oh My MiniMax H3 Director · WenWu",
+        "url": "https://github.com/TFboy1/oh-my-minimaxh3-director/blob/911266137075a0b9fabf6268dc1c91ae05138ad9/SKILL.md",
+        "license": "MIT",
+        "license_url": "https://github.com/TFboy1/oh-my-minimaxh3-director/blob/911266137075a0b9fabf6268dc1c91ae05138ad9/LICENSE",
+        "commit": "911266137075a0b9fabf6268dc1c91ae05138ad9",
+        "repo_url": "https://github.com/TFboy1/oh-my-minimaxh3-director",
+        "repository_stars": 139,
+        "repository_forks": 19,
+        "checked_at": "2026-10-06",
+        "provenance": "community"
+      },
+      "source_sha256": "8b7d17afc0191047f8175ce29f25b02aeff4be798fb75688c6b7af7064866cf6",
+      "license_file": "licenses/h3-director.txt",
+      "license_sha256": "19b5b0d85d49ba306d5ba5c9412758b0027125b4edd4995554f8018b60546f03"
+    },
+    {
+      "profile_id": "h3-reference-planning",
+      "name": "H3 多模態素材／分鏡規劃",
+      "source": {
+        "name": "MiniMax H3 Video Prompt · 素材規劃",
+        "url": "https://github.com/penposs/minimax-h3-video-prompt/blob/2e2bb0e745c178c4db26f99b7ba7c4c53040a961/SKILL.md",
+        "license": "MIT",
+        "license_url": "https://github.com/penposs/minimax-h3-video-prompt/blob/2e2bb0e745c178c4db26f99b7ba7c4c53040a961/LICENSE",
+        "commit": "2e2bb0e745c178c4db26f99b7ba7c4c53040a961",
+        "repo_url": "https://github.com/penposs/minimax-h3-video-prompt",
+        "repository_stars": 65,
+        "repository_forks": 6,
+        "checked_at": "2026-10-06",
+        "provenance": "community"
+      },
+      "source_sha256": "9baecd2d52f72f1f400ac6e2b5cf6e17c59590a1dbbc8d4bafe058fc331f7da4",
+      "license_file": "licenses/h3-video-prompt.txt",
+      "license_sha256": "f7cf5e22da0e3415fbbe6bc51ded6634a214c423012a0224a94ae957af26d190"
+    }
+  ],
+  "official_license_revision": "42ed227ee7df40d41602854ae760620d6eb651fe",
+  "other_candidates": [
+    {
+      "repo": "gnipbao/minimax-h3-video-reverse-skill",
+      "stars": 213,
+      "forks": 33,
+      "commit": "2fd1cc182606b81b69e0a9dca31c6cc7c2e973af",
+      "license": "MIT",
+      "reason": "Requires source-video observation; current writing workspace supplies text and appearance summaries."
+    },
+    {
+      "repo": "chiphoton/MiniMax-H3-Codex-Drama",
+      "stars": 54,
+      "forks": 10,
+      "commit": "4f16b7f12a27167f279a01456764d5b765338b08",
+      "license": "MIT",
+      "reason": "Broader production suite overlaps existing scheduling and editing."
+    },
+    {
+      "repo": "sjh00/minimax-h3-storyboard-prompt-skills",
+      "stars": 35,
+      "forks": 0,
+      "commit": "b9c6bfa90675c696b17ca16e9d2d6e777e24356c",
+      "license": null,
+      "reason": "No standalone license found; use the directly attributed official guide instead."
+    }
+  ],
+  "compatibility": {
+    "studio_json": true,
+    "original_dialogue": true,
+    "zero_bgm": true,
+    "generation_clip_seconds": [
+      5,
+      15
+    ],
+    "upstream_code_execution": false,
+    "automatic_character_image_requirement_changed": false
+  }
+}

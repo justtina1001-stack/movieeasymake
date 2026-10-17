@@ -3,29 +3,39 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-from functools import lru_cache
 from io import BytesIO
 import json
 import math
-from pathlib import Path
 import re
 import threading
 
 import av
 import numpy as np
 from aiohttp import web
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from video_editor import CLIP_ID, EditorError, VideoReader, fade_gain, number
 from editor_motion import position_at, validate_position_keyframes
 from editor_speed import clip_duration, source_at, validate_speed_curve
 from editor_animations import animation_at, transition_pairs, transition_surface, validate_animations, validate_transition_pairs, validate_transition_setting
+from editor_fonts import font_candidates, font_catalog, has_glyph, load_font, validate_font_family
 
 MAX_LAYERS = 50
+MAX_SUBTITLE_CUES = 5000
 MAX_ACTIVE = 12
 MAX_TEXT_PIXELS = 16 * 1024 * 1024
 RASTER_CACHE_BYTES = 192 * 1024 * 1024
 COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
+
+
+def is_subtitle_layer(layer):
+    """Subtitle text retains the existing portable overlay representation."""
+    track = layer.get("track_id") if isinstance(layer, dict) else None
+    return (isinstance(layer, dict) and layer.get("kind") == "text"
+            and isinstance(track, str) and CLIP_ID.fullmatch(track) is not None
+            and track.startswith("subtitle_") and len(track) > len("subtitle_"))
+
+
 TEXT_STYLE_DEFAULTS = {"stroke_width": 0, "stroke_color": "#000000", "fill_mode": "solid",
                        "gradient_start": "#FFFFFF", "gradient_end": "#FF8A3D", "gradient_angle": 90}
 
@@ -58,6 +68,8 @@ def validate_layer(layer, fps=24, ids=None):
         raise EditorError("圖層只能使用文字、圖片或影片。")
     if kind != "text" and any(key in layer for key in TEXT_STYLE_DEFAULTS):
         raise EditorError("文字描邊與漸層設定只能使用文字圖層。")
+    if kind != "text" and "font_family" in layer:
+        raise EditorError("字型設定只能使用文字圖層。")
     start = number(layer.get("start"), "圖層起點", 0, 600)
     end = number(layer.get("end"), "圖層終點", 0, 600)
     if end - start + 1e-9 < 1 / fps:
@@ -119,6 +131,9 @@ def validate_layer(layer, fps=24, ids=None):
         clean.update(text=text, font_size=number(layer.get("font_size", .06), "字級", .01, .3),
                      color=color.upper(), background=background if background == "transparent" else background.upper(),
                      bold=bold, align=align)
+        font_family = validate_font_family(layer.get("font_family", "default"))
+        if font_family != "default":
+            clean["font_family"] = font_family
         clean.update(_validate_text_style(layer))
     if ids is not None:
         ids.add(layer_id)
@@ -126,8 +141,11 @@ def validate_layer(layer, fps=24, ids=None):
 
 
 def validate_overlays(layers, store, fps, ids):
-    if not isinstance(layers, list) or len(layers) > MAX_LAYERS:
-        raise EditorError("最多可加入 50 個文字／圖片／影片圖層。")
+    if not isinstance(layers, list) or len(layers) > MAX_LAYERS + MAX_SUBTITLE_CUES:
+        raise EditorError("最多可加入 50 個一般圖層與 5,000 句字幕。")
+    subtitle_count = sum(is_subtitle_layer(layer) for layer in layers)
+    if subtitle_count > MAX_SUBTITLE_CUES or len(layers) - subtitle_count > MAX_LAYERS:
+        raise EditorError("最多可加入 50 個一般文字／圖片／影片圖層；字幕另有 5,000 句容量。")
     clean = []
     for layer in layers:
         item = validate_layer(layer, fps, ids)
@@ -181,53 +199,35 @@ def validate_overlays(layers, store, fps, ids):
 
 
 def _font_candidates(bold):
-    filename = "msjhbd.ttc" if bold else "msjh.ttc"
-    weight = "Bold" if bold else "Regular"
-    return [(f"C:/Windows/Fonts/{filename}", 0),
-            (f"/usr/share/fonts/opentype/noto/NotoSansCJK-{weight}.ttc", 3),
-            (f"/usr/share/fonts/opentype/noto/NotoSansCJK-{weight}.ttc", 0),
-            (f"/usr/share/fonts/opentype/noto/NotoSansCJKtc-{weight}.otf", 0),
-            ("/System/Library/Fonts/PingFang.ttc", 0),
-            ("C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf", 0),
-            (f"/usr/share/fonts/truetype/dejavu/DejaVuSans{'-Bold' if bold else ''}.ttf", 0)]
+    return font_candidates(bold)
 
 
-@lru_cache(maxsize=32)
-def _font(size, bold):
-    for path, index in _font_candidates(bold):
-        if Path(path).is_file():
-            try:
-                return ImageFont.truetype(path, size, index=index)
-            except OSError:
-                continue
-    raise EditorError("找不到可用的文字字型。請安裝微軟正黑體或 Noto Sans CJK 後重新啟動 Studio。", 422)
+# Share the synchronized caches directly; an extra wrapper cache could retain
+# an old font when a preview completes concurrently with an installation scan.
+_font = load_font
+_has_glyph = has_glyph
 
 
-@lru_cache(maxsize=2048)
-def _has_glyph(character, bold):
-    font = _font(24, bold)
-    missing, glyph = font.getmask("\U0010ffff"), font.getmask(character)
-    return glyph.size != missing.size or bytes(glyph) != bytes(missing)
-
-
-def font_information():
+def font_information(refresh=False):
+    items = font_catalog(refresh=refresh)
     try:
         regular, bold = _font(24, False), _font(24, True)
         return {"available": True, "family": regular.getname()[0], "bold_family": bold.getname()[0],
                 "cjk": all(_has_glyph(char, False) and _has_glyph(char, True) for char in "中文測試"),
-                "fixed": True}
+                "fixed": False, "source": "installed", "items": items}
     except EditorError as error:
-        return {"available": False, "cjk": False, "fixed": True, "error": str(error)}
+        return {"available": False, "cjk": False, "fixed": False, "source": "installed", "error": str(error), "items": items}
 
 
 def raster_text(layer, width, height):
     """Unrotated opacity-1 PNG source; preview and encoder use this exact layout."""
     box_width = max(1, round(layer["width"] * width))
     size = max(1, round(layer["font_size"] * min(width, height)))
-    font = _font(size, layer["bold"])
+    font_family = layer.get("font_family", "default")
+    font = _font(size, layer["bold"], font_family)
     for character in set(layer["text"]):
-        if not character.isspace() and not _has_glyph(character, layer["bold"]):
-            raise EditorError("目前字型缺少這段文字的字元。請改用支援的文字或安裝 Noto Sans CJK／微軟正黑體。", 422)
+        if not character.isspace() and not _has_glyph(character, layer["bold"], font_family):
+            raise EditorError("目前所選字型缺少這段文字的字元。請改選支援這些文字的字型（中文可選微軟正黑體或 Noto Sans CJK）。", 422)
     stroke_width = round(size * layer.get("stroke_width", 0))
     # Outlines expand glyph bounds rather than increasing font advances. Reserve
     # their full radius on every side before wrapping and allocating the raster.
@@ -345,6 +345,10 @@ class OverlayCompositor:
         self.video_readers = {}
         self.cancel_event = cancel_event or threading.Event()
         self.transitions = transition_pairs(layers, overlays=True)
+        self.layer_indices = {layer["id"]: index for index, layer in enumerate(layers)}
+        self.events = sorted((time, change, index) for index, layer in enumerate(layers)
+                             for time, change in ((layer["start"], 1), (layer["end"], -1)))
+        self.active_indices, self.event_cursor, self.last_time = set(), 0, float("-inf")
 
     def _source(self, layer):
         if layer["kind"] == "text":
@@ -401,7 +405,7 @@ class OverlayCompositor:
         if layer["kind"] == "text":
             # IDs remain stable while text settings change. Include source
             # styles without frame-local fade or animated-position values.
-            source_key = tuple(layer.get(name, TEXT_STYLE_DEFAULTS.get(name)) for name in
+            source_key = (layer.get("font_family", "default"),) + tuple(layer.get(name, TEXT_STYLE_DEFAULTS.get(name)) for name in
                                ("text", "width", "font_size", "color", "background", "bold", "align", *TEXT_STYLE_DEFAULTS))
             key = (key, source_key) if source_only else (key, source_key, layer["x"], layer["y"], layer["rotation"], layer["opacity"])
         if key in self.cache:
@@ -439,7 +443,7 @@ class OverlayCompositor:
             pixels = video.reformat(width=max(1, round(video.width * ratio)), height=max(1, round(video.height * ratio)), format="rgba").to_ndarray()
             raster, left, top = self._prepare(animated, Image.fromarray(pixels), video.width / video.height)
             cached = False
-        elif layer.get("position_keyframes") or layer.get("animation_in") or layer.get("animation_out"):
+        elif layer.get("position_keyframes") or layer.get("animation_in") or layer.get("animation_out") or layer.get("animation_idle"):
             # Keep one original source raster, never a cache entry per frame.
             (source, _, _), source_cached = self._cached(layer, source_only=True)
             try:
@@ -474,7 +478,18 @@ class OverlayCompositor:
         # A transition occupies the same single stacking level as its track.
         # Its two RGBA surfaces are combined before compositing over lower tracks.
         slots, paired, active_video = {}, set(), set()
-        indices = {layer["id"]: index for index, layer in enumerate(self.layers)}
+        indices = self.layer_indices
+        if seconds < self.last_time:
+            self.active_indices.clear()
+            self.event_cursor = 0
+        while self.event_cursor < len(self.events) and self.events[self.event_cursor][0] <= seconds:
+            _, change, index = self.events[self.event_cursor]
+            if change > 0:
+                self.active_indices.add(index)
+            else:
+                self.active_indices.discard(index)
+            self.event_cursor += 1
+        self.last_time = seconds
         for previous, following, cut, setting in self.transitions:
             length = setting["duration"]
             if cut - length / 2 <= seconds < cut + length / 2:
@@ -482,8 +497,8 @@ class OverlayCompositor:
                 slots[min(indices[previous["id"]], indices[following["id"]])] = (previous, following, cut, setting, ratio)
                 paired.update((previous["id"], following["id"]))
                 active_video.update((previous["id"], following["id"]))
-        active = {layer["id"] for layer in self.layers if layer["start"] <= seconds < layer["end"] and layer["opacity"] > 0}
-        active_video.update(layer["id"] for layer in self.layers if layer["id"] in active and layer["kind"] == "video")
+        active = {self.layers[index]["id"] for index in self.active_indices if self.layers[index]["opacity"] > 0}
+        active_video.update(self.layers[index]["id"] for index in self.active_indices if self.layers[index]["id"] in active and self.layers[index]["kind"] == "video")
         for key in list(self.video_readers):
             if key not in active_video:
                 self.video_readers.pop(key).close()
@@ -492,7 +507,8 @@ class OverlayCompositor:
         with Image.fromarray(frame.to_ndarray(format="rgb24")) as rgb:
             canvas = rgb.convert("RGBA")
         try:
-            for index, layer in enumerate(self.layers):
+            for index in sorted(self.active_indices | set(slots)):
+                layer = self.layers[index]
                 if index in slots:
                     previous, following, cut, setting, ratio = slots[index]
                     with Image.new("RGBA", (self.width, self.height)) as left, Image.new("RGBA", (self.width, self.height)) as right:
@@ -557,7 +573,7 @@ def register_editor_overlays(app):
             in_flight -= 1
 
     async def fonts(request):
-        return web.json_response(await asyncio.to_thread(font_information))
+        return web.json_response(await asyncio.to_thread(font_information, refresh=request.query.get("refresh") == "1"))
 
     app.router.add_post("/api/editor/text-preview", preview)
     app.router.add_get("/api/editor/fonts", fonts)

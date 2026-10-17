@@ -49,6 +49,7 @@ class Surface {
     return selector.split(",").map(value => value.trim()).some(value => value === this.tagName.toLowerCase() ||
       value.startsWith("#") && this.getAttribute("id") === value.slice(1) ||
       value.startsWith(".") && this.classList.contains(value.slice(1)) ||
+      /^\[role=([^\]]+)\]$/.test(value) && this.getAttribute("role") === /^\[role=([^\]]+)\]$/.exec(value)[1] ||
       value === "[contenteditable=true]" && this.getAttribute("contenteditable") === "true") ? this : this.parentNode?.closest(selector) || null;
   }
   contains(node) { return node === this || this.children.some(child => child.contains(node)); }
@@ -77,6 +78,7 @@ function harness(options = {}) {
     inspector: "inspectorPanel", librarySeparator: "layoutLibrarySeparator", inspectorSeparator: "layoutInspectorSeparator", viewerSeparator: "layoutViewerSeparator",
     maximizeButton: "previewMaximize", resetButton: "layoutReset" };
   for (const [name, id] of Object.entries(ids)) elements[name].setAttribute("id", id);
+  for (const axis of ["library", "inspector", "viewer"]) elements[`${axis}Separator`].setAttribute("role", "separator");
   for (const axis of ["library", "inspector", "viewer"]) elements[`${axis}Separator`].setAttribute("aria-orientation", axis === "viewer" ? "horizontal" : "vertical");
   elements.shell.clientWidth = win.innerWidth; elements.shell.clientHeight = 824; elements.shell.rect.width = win.innerWidth;
   elements.viewer.clientHeight = 480; elements.viewer.offsetHeight = 480; elements.stage.clientHeight = 280; elements.stage.offsetHeight = 280;
@@ -392,14 +394,14 @@ test("the shipped layout callbacks resize the existing camera without changing f
   h.unchanged(); h.cleanup();
 });
 
-test("the shipped active-layout flag blocks camera gestures and Space while normal separator Space still plays", () => {
+test("the shipped active-layout flag blocks camera gestures and separator Space keeps its native behavior", () => {
   const h = editorHarness(); h.previewViewport.setZoom(1); h.previewViewport.setHand(true);
-  h.doc.dispatch("keydown", { key: " ", code: "Space", target: h.elements.librarySeparator }); assert.equal(h.calls.play, 1);
+  h.doc.dispatch("keydown", { key: " ", code: "Space", target: h.elements.librarySeparator }); assert.equal(h.calls.play, 0);
   h.dispatch("library", "pointerdown", { clientX: 300 }); assert.equal(h.state.layoutDragging, true); assert.equal(h.nodes.previewZoom.disabled, true);
   const wheel = h.elements.stage.dispatch("wheel", { ctrlKey: true, deltaY: -80 }); assert.equal(wheel.defaultPrevented, false);
   near(h.previewViewport.snapshot().scale, 1); h.elements.stage.dispatch("pointerdown"); assert.equal(h.previewViewport.isPanning, false);
   const space = h.doc.dispatch("keydown", { key: " ", code: "Space", target: h.elements.librarySeparator });
-  assert.equal(space.defaultPrevented, true); assert.equal(h.calls.play, 1);
+  assert.equal(space.defaultPrevented, true); assert.equal(h.calls.play, 0);
   h.dispatch("library", "pointercancel"); assert.equal(h.state.layoutDragging, false); h.unchanged(); h.cleanup();
 });
 

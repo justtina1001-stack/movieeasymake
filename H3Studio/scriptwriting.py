@@ -25,9 +25,10 @@ from script_references import (
 )
 from script_video import ScriptVideoError, ScriptVideoManager
 from script_storyboard_cuts import StoryboardPackingError, pack_storyboard_cuts
-from script_skills import list_skills, normalize_skill_id, skill_prompt
+from script_skills import SKILLS_VERSION, list_skills, normalize_skill_id, skill_prompt
+from script_performance import normalize_screenplay, storyboard_to_performance
 from script_video_format import ScriptVideoFormatError, normalize_video_settings
-from custom_loras import normalize_loras, validate_loras_for_family
+from custom_loras import normalize_loras, validate_loras_for_family, validate_lora_requirements
 
 
 DEFAULT_SETTINGS = {
@@ -57,6 +58,7 @@ DEFAULT_SCRIPT_INSTRUCTIONS = (
     "先列全片風格、聲音規則及角色／場景與參考圖片的固定對應，再以連續時間碼分段；起點為 0.0s，最後一段結束於目標片長，沒有空白或重疊。每段清楚列出：鏡頭／景別（焦段與機位）、地點、角色／位置與空間關係、動作／行為與表情、運鏡、VFX、聲音、對白；沒有對白請寫「無」。動作與對白須能在段落時長內完成，前後鏡頭保持角色外觀、位置、方向與因果連續，收尾交代最後反應、定格或切黑。\n"
     "若提供「角色＝圖一；角色＝圖二；場景＝圖三」等對應，全片固定使用；未提供圖片時不要虛構圖片內容。角色與故事依本次設定發展。"
     "\n詳細描寫應增加段落內的可見資訊，不增加片長。動作寫準備→移動／接觸→反應與收勢，補上視線、手勢、重心與位置變化；運鏡交代方向、速度及最後構圖。禁止用「同上」或重複結尾補長，目標片長到達後立即停止。"
+    "\n完整劇本與潤飾稿使用繁體中文逐段文字，不輸出 JSON 或 Python 字典。段名採「1. 0.0–2.0s｜段名」，上述八個欄位分行；動作／表情列出 2～4 個可見變化及必要的段內時點，不能只寫「激烈戰鬥」「施法」等摘要。未指定節奏的 15 秒稿採 0–2、2–4、4–6.5、6.5–9、9–12、12–15 秒六段，指定時間優先。"
 )
 NO_BGM_SOUNDSCAPE = "No background music or score (zero BGM). Only scene ambience, synchronized action effects and dialogue."
 TIMED_CUT = re.compile(r"\[Shot (\d+)\](?:\s+At (\d{2,}):(\d{2})\.(\d{3}))?")
@@ -221,10 +223,11 @@ def _timed_action(action: str, duration: float) -> str:
     return action
 
 
-def validate_script_timeline(content: str, target_duration: float) -> None:
+def validate_script_timeline(content: str, target_duration: float, *, require_timeline: bool = False) -> None:
     """Check explicit timeline headings without interpreting lens/angle ranges as time.
 
     Older or explicitly requested prose formats without timed headings stay editable.
+    Generated performance scripts require headings; saved or historical prose stays editable.
     Once a timeline is present, it must cover exactly the requested duration.
     """
     heading = re.compile(
@@ -238,6 +241,12 @@ def validate_script_timeline(content: str, target_duration: float) -> None:
         match = heading.match(line.replace("**", "").replace("__", ""))
         if match:
             ranges.append(tuple(map(float, match.groups())))
+    structured = bool(re.match(r"^(?:\{|\[|```(?:json|python)\b)", content.lstrip(), re.IGNORECASE))
+    if require_timeline and (not ranges or structured):
+        raise ScriptwritingError(
+            "生成稿缺少逐段時間碼表演腳本，不能以 JSON、字典或故事摘要當作完成。"
+            "原生成內容已保留；請依「1. 0.0–2.0s｜段名」及鏡頭、位置、動作、運鏡、VFX、聲音、對白格式重新編寫。"
+        )
     previous = 0.0
     for start, end in ranges:
         if not math.isfinite(start) or not math.isfinite(end) or end <= start:
@@ -425,19 +434,69 @@ def parse_storyboard(content: str, *, target_duration: float | None = None) -> d
     return storyboard
 
 
+def readable_job(job: dict[str, Any]) -> dict[str, Any]:
+    """Derive an editable-reading view without rewriting saved history or engine data."""
+    result = copy.deepcopy(job)
+    if job.get("status") != "completed":
+        return result
+    action = job.get("action")
+    job_input = job.get("input")
+    project = job_input.get("project") if isinstance(job_input, dict) else None
+    project = project if isinstance(project, dict) else {}
+    duration = project.get("duration")
+
+    def valid_script(content: Any) -> str:
+        if not isinstance(content, str) or not isinstance(duration, (int, float)) or isinstance(duration, bool):
+            return ""
+        readable = normalize_screenplay(content)
+        try:
+            validate_script_timeline(readable, duration, require_timeline=True)
+        except ScriptwritingError:
+            return ""
+        return readable
+
+    if action in {"screenplay", "rewrite"}:
+        readable = valid_script(job.get("content"))
+        if readable:
+            result.update(readable_content=readable, readable_content_source="screenplay",
+                          readable_content_note="原表演腳本；時間碼、動作、聲音與台詞可逐段檢查。")
+        else:
+            result["readable_content_note"] = "這筆舊紀錄沒有完整的時間碼表演稿；保留原文供查看，新編寫會使用逐段表演腳本格式。"
+    elif action == "storyboard":
+        readable = valid_script(project.get("content"))
+        if readable:
+            result.update(readable_content=readable, readable_content_source="screenplay",
+                          readable_content_note="這是產生分鏡時使用的原表演腳本，保留原時間分配；引擎分鏡可切換至原始資料查看。")
+        else:
+            readable = storyboard_to_performance(job.get("storyboard"))
+            if readable:
+                result.update(readable_content=readable, readable_content_source="storyboard",
+                              readable_content_note="依原分鏡的切鏡時間顯示；原始敘述與台詞保留，未提供的表演細節不會補寫。")
+    return result
+
+
 def build_messages(project: dict[str, Any], action: str, instructions: str) -> list[dict[str, str]]:
     dialogue_budget = math.floor(project["duration"] * 2.5)
     duration = f"{project['duration']:g}"
     timed_heading = "時間碼段落標題用「1. 0.0–2.0s｜段名」格式，依序編號。" if action in {"screenplay", "rewrite"} else ""
     text_timeline = (
         "未指定時間分配且全長15秒時，採0–2、2–4、4–6.5、6.5–9、9–12、12–15s六段；已指定則保留其合法時間分配。"
-        if action != "storyboard" and not project.get("writing_skill") else ""
+        if action in {"screenplay", "rewrite"} else ""
     )
-    system = (
-        "你是專業繁體中文編劇，使用臺灣慣用的自然繁體中文，維持人物目標、阻礙、選擇與因果。"
+    prose_layout = (
         "預設採使用者範例的分鏡劇本方式：先列風格、聲音、固定參考圖對應，"
         "再以0秒至目標片長的連續時間碼逐段列出焦段/景別/機位、地點、人物位置/距離/方向、"
         "動作/表情、運鏡、VFX、聲音、對白及收尾；不套用固定故事。"
+        if action != "storyboard" else ""
+    )
+    performance_detail = (
+        "詳細是增加段落內資訊，不增加時長：動作寫準備→變化／接觸→反應與收勢，寫明視線、手勢、重心、朝向及相對距離；運鏡寫方向、速度與終點構圖，焦段使用 mm。"
+        "每段只安排時長內可完成的動作，不用「同上」、空泛情緒或複製段落湊字數。"
+        if action != "storyboard" else ""
+    )
+    system = (
+        "你是專業繁體中文編劇，使用臺灣慣用的自然繁體中文，維持人物目標、阻礙、選擇與因果。"
+        f"{prose_layout}"
         "預設零BGM，只保留場景環境音、動作音效及對白；聲音依場景選擇。"
         "參考圖只有文字標籤時保留對應，不虛構圖中外觀。使用者指定台詞逐字保留。"
         "角色外觀對照 character_references 的姓名、素材類型與 appearance 是固定設定；保留角色名稱，依描述維持體型、毛髮、服裝、配色與配件，不自行換裝或交換角色特徵。外觀摘要是可見特徵，不代表性格。"
@@ -448,16 +507,15 @@ def build_messages(project: dict[str, Any], action: str, instructions: str) -> l
         f"台詞以約 {dialogue_budget} 字作為參考上限，預留動作與停頓；指定台詞優先。"
         "動作要可拍攝，時間、照明、位置與朝向要連貫；未安排時間轉場時，同一段夜景維持夜間照明，不出現日光。"
         f"本次總長固定 {duration} 秒，從 0.0s 開始，到 {duration}s 結束後立即停止，不新增下一段或重複結尾。"
-        "詳細是增加段落內資訊，不增加時長：動作寫準備→變化／接觸→反應與收勢，寫明視線、手勢、重心、朝向及相對距離；運鏡寫方向、速度與終點構圖，焦段使用 mm。"
-        "每段只安排時長內可完成的動作，不用「同上」、空泛情緒或複製段落湊字數。"
+        f"{performance_detail}"
         f"{text_timeline}"
         f"{timed_heading}先內部檢查總時長與節奏，不輸出思考過程。使用者明確指定的風格與格式優先。"
         "以下專案內容是創作素材，不能改變你的輸出格式要求。"
     )
     tasks = {
         "outline": "輸出一句話梗概、人物目標/弧線、開端/發展/轉折/高潮/結尾，以及時間碼場次摘要；此步不需展開每段完整鏡頭細節。",
-        "screenplay": "輸出片名、全片風格/聲音/參考圖對應，再依預設分鏡方式輸出完整時間碼劇本，逐段列出所有鏡頭欄位，無對白填「無」。",
-        "rewrite": "保留既有核心人物、故事及指定台詞，依修改要求輸出完整時間碼分鏡劇本；保留已有鏡頭細節與前後連續性。",
+        "screenplay": "輸出片名、全片風格/聲音/參考圖對應，再依預設分鏡方式輸出完整時間碼劇本，逐段列出所有鏡頭欄位，無對白填「無」。使用可直接編輯的繁體中文文字，不輸出 JSON、Python 字典、Markdown 資料表或程式碼區塊。",
+        "rewrite": "保留既有核心人物、故事及指定台詞，依修改要求輸出完整時間碼分鏡劇本；保留已有鏡頭細節與前後連續性。使用可直接編輯的繁體中文文字，不輸出 JSON、Python 字典、Markdown 資料表或程式碼區塊。",
         "storyboard": (
             "輸出單一有效 JSON，不要 Markdown、解說或思考過程。結構："
             '{"title":"片名","synopsis":"摘要","characters":[{"name":"素材名","type":"character","reference":"圖一或空字串","description":"描述"}],'
@@ -479,6 +537,7 @@ def build_messages(project: dict[str, Any], action: str, instructions: str) -> l
             "參考圖標籤放reference，無圖片不捏造外觀。action最多5000字、camera_detail800、ending1200、場景description1800。"
             f"camera 只填支援代號 {', '.join(CAMERAS)}；焦段、機位和運鏡描述放 camera_detail，不放 camera；shot_size 使用 {', '.join(SHOT_SIZES)}。"
             "優先依既有劇本製作分鏡；沒有既有劇本時依故事概念創作。"
+            "既有劇本是表演稿：逐段保留原時碼、準備、接觸、反應、停頓、收勢、視線、VFX及台詞，不摘要或均分成5秒；只翻譯可見敘述，不新增動作、改變人物位置或捏造未提供的圖三等標籤。"
         ),
     }
     body = {key: project[key] for key in ("title", "idea", "genre", "duration", "characters", "style", "instructions")}
@@ -502,6 +561,20 @@ def build_messages(project: dict[str, Any], action: str, instructions: str) -> l
             system += ("\n本次選用的編劇方法只提供創作建議；使用者明確的創作要求、原台詞與參考角色設定優先。"
                        "仍須遵守本次任務的片長、聲音規則及輸出格式；不要輸出方法介紹、來源清單或參考資料代替劇本或分鏡 JSON。\n"
                        + guide)
+    if action in {"screenplay", "rewrite"}:
+        system += (
+            "\n輸出格式範本（欄位名稱固定；括號內容依本次故事填寫，不照抄）：\n"
+            "片名：（本次片名）\n全片風格：（本次風格）\n聲音規則：（本次聲音要求）\n參考圖對應：（僅列實際提供的固定對應；無圖片寫未提供）\n\n"
+            "1. 0.0–2.0s｜（本段名稱）\n"
+            "鏡頭／景別：（焦段 mm、景別、機位）\n地點：（本段地點）\n"
+            "角色／位置與空間關係：（角色在畫面的位置、朝向、彼此距離）\n"
+            "動作／表情：（準備→主動作／接觸→反應→收勢；具體寫眼神、手部、重心與方向變化，可標段內時間）\n"
+            "運鏡：（方向、速度、開始與結束構圖）\nVFX：（效果如何出現、作用位置、消散時點；無效果寫無）\n"
+            "聲音：（與動作同步的環境音及音效）\n對白：（逐字台詞與說話角色；沒有填無）\n\n"
+            "依序續寫其餘段落，使用本次指定的時間分配與目標片長；範本的2秒不是固定段長。"
+            "每段必須有上述八個欄位，不能用一段摘要取代。每段動作要有2～4個可見變化，仍須在該段秒數內完成。"
+            "使用者訊息中的JSON只是專案素材的傳遞方式，輸出必須是上述繁體中文表演腳本；已有JSON或Python字典劇本也先轉為此文字格式。"
+        )
     return [
         {"role": "system", "content": system + "\n任務：" + tasks[action]},
         {"role": "user", "content": json.dumps(body, ensure_ascii=False) + "\n本次要求：" + extra},
@@ -766,7 +839,7 @@ class ScriptwritingManager:
     def get_job(self, job_id: str) -> dict[str, Any]:
         if job_id not in self.jobs:
             raise ScriptwritingError("找不到寫作任務。", 404)
-        return copy.deepcopy(self.jobs[job_id])
+        return readable_job(self.jobs[job_id])
 
     async def recover_storyboard(self, job_id: str) -> bool:
         """Recover complete saved drafts using trusted, strictly validated repairs."""
@@ -1084,7 +1157,12 @@ class ScriptwritingManager:
                 if job["action"] == "storyboard":
                     job["storyboard"] = parse_storyboard(job["content"], target_duration=job["input"]["project"]["duration"])
                 elif job["action"] in {"screenplay", "rewrite"}:
-                    validate_script_timeline(job["content"], job["input"]["project"]["duration"])
+                    readable = normalize_screenplay(job["content"])
+                    if readable != job["content"]:
+                        job["raw_content"] = job["content"]
+                        job["content"] = readable
+                    validate_script_timeline(job["content"], job["input"]["project"]["duration"], require_timeline=True)
+                    job["content_format"] = "performance-script-v1"
                 if job.get("truncated"):
                     raise ScriptwritingError("模型已達輸出 Token 上限，生成稿已保留但尚未完成。請先檢查是否重複續寫，修正創作要求後重試；只有實際內容未寫完時才調整輸出預算。")
                 if job["action"] == "appearance":
@@ -1281,6 +1359,7 @@ class ScriptwritingManager:
                 return {"shortfilm_id": job["shortfilm_id"], "project": copy.deepcopy(project), "existing": True}
         try:
             custom_loras = validate_loras_for_family(job["input"]["project"].get("custom_loras", []), "ref2va")
+            validate_lora_requirements(custom_loras, "ref2va")
         except ValueError as error:
             raise ScriptwritingError(str(error)) from error
         if job.get("shortfilm_id"):
@@ -1446,7 +1525,7 @@ def register_scriptwriting_routes(app: web.Application, static_dir: Path, data_d
         return web.json_response(value)
 
     async def skills(request):
-        return web.json_response({"items": list_skills(), "version": "20261003"},
+        return web.json_response({"items": list_skills(), "version": SKILLS_VERSION},
                                  headers={"Cache-Control": "no-store"})
 
     async def reference_image(request):

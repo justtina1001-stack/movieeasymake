@@ -33,7 +33,7 @@ from h3_media import prepare_media_payload, normalized_reference_video, referenc
 from h3_prompt_translation import H3PromptTranslator, original_h3_payload, prepare_h3_payload
 from shortfilm_batch import ShortFilmBatchManager, ShortFilmBatchError, generation_source
 from custom_loras import active_loras
-from lora_catalog import describe_loras, builtin_lora_items
+from lora_catalog import describe_loras, builtin_lora_items, recommended_lora_items
 from engine_installer import EngineInstaller, InstallerError, installer_preflight, resolve_install_target
 from model_updates import ModelUpdateError, ModelUpdateManager
 from music3 import (
@@ -62,9 +62,12 @@ from video_editor import register_editor_routes
 from editor_media_io import register_editor_media_io
 from editor_project_files import register_editor_project_files
 from editor_overlays import register_editor_overlays
+from editor_captions import register_editor_captions
+from editor_media_library import register_editor_media_library
 from job_thumbnails import register_job_thumbnails
 from shortfilm import (
     ShortFilmError,
+    ShortFilmConflictError,
     ShortFilmStore,
     append_continuous_scene,
     changed_reference_aliases,
@@ -2167,24 +2170,41 @@ class JobManager:
 
 
 def find_video_output(value: Any) -> dict[str, str] | None:
-    if isinstance(value, dict):
-        filename = value.get("filename")
-        if isinstance(filename, str) and Path(filename).suffix.lower() in {".mp4", ".webm", ".mov", ".mkv"}:
-            return {
-                "filename": filename,
-                "subfolder": str(value.get("subfolder") or ""),
-                "type": str(value.get("type") or "output"),
-            }
-        for child in value.values():
-            found = find_video_output(child)
-            if found:
-                return found
-    elif isinstance(value, list):
-        for child in value:
-            found = find_video_output(child)
-            if found:
-                return found
-    return None
+    """Select generated media, never a loader's preview of its input video."""
+    best: dict[str, str] | None = None
+    best_rank = 3
+
+    def visit(item: Any) -> None:
+        nonlocal best, best_rank
+        if isinstance(item, dict):
+            # History also contains the submitted prompt and other metadata.
+            # Only node results identify files produced by this execution.
+            if "outputs" in item:
+                visit(item["outputs"])
+                return
+            filename = item.get("filename")
+            media_type = str(item.get("type") or "output")
+            if (
+                isinstance(filename, str)
+                and Path(filename).suffix.lower() in {".mp4", ".webm", ".mov", ".mkv"}
+                and media_type in {"output", "temp"}
+            ):
+                # Preserve legacy descriptors without type and temporary video
+                # results, but prefer an explicitly saved output over either.
+                rank = 0 if item.get("type") == "output" else (2 if media_type == "temp" else 1)
+                if rank < best_rank:
+                    best_rank = rank
+                    best = {"filename": filename, "subfolder": str(item.get("subfolder") or ""), "type": media_type}
+                return
+            for key, child in item.items():
+                if key not in {"prompt", "status", "extra_data"}:
+                    visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return best
 
 
 def json_response_error(error: Exception, status: int = 400) -> web.Response:
@@ -2243,6 +2263,8 @@ def create_app() -> web.Application:
     register_editor_media_io(app)
     register_editor_project_files(app)
     register_editor_overlays(app)
+    register_editor_captions(app)
+    register_editor_media_library(app)
     app["script_video_renderer"] = ScriptVideoRenderer(app)
     register_scriptwriting_routes(app, STATIC_DIR, DATA_DIR)
     app["h3_prompt_translator"] = H3PromptTranslator(app)
@@ -2262,6 +2284,7 @@ def create_app() -> web.Application:
                 "names": custom_names,
                 "items": describe_loras(custom_names),
                 "builtin_items": builtin_lora_items(names),
+                "recommended_items": recommended_lora_items(custom_names),
                 "mode": comfy.mode,
                 "folder": str(comfy.comfy_dir / "models" / "loras" / "h3studio_custom") if comfy.mode == "local" else "遠端 ComfyUI / models / loras / h3studio_custom",
             })
@@ -2550,7 +2573,13 @@ def create_app() -> web.Application:
         return web.FileResponse(path, headers={"Content-Type": mimetypes.guess_type(path.name)[0] or "application/octet-stream"})
 
     async def list_shortfilms(_: web.Request) -> web.Response:
-        return web.json_response(shortfilms.list())
+        try:
+            return web.json_response(shortfilms.list())
+        except ShortFilmError as error:
+            return json_response_error(error, 503)
+
+    async def shortfilm_storage_status(_: web.Request) -> web.Response:
+        return web.json_response(shortfilms.storage_status())
 
     async def create_shortfilm(request: web.Request) -> web.Response:
         try:
@@ -2572,6 +2601,8 @@ def create_app() -> web.Application:
         try:
             payload = await request.json()
             return web.json_response(shortfilms.update(request.match_info["project_id"], payload))
+        except ShortFilmConflictError as error:
+            return web.json_response({"error": str(error), "code": "shortfilm_revision_conflict", "current_revision": error.current_revision}, status=409)
         except (ShortFilmError, json.JSONDecodeError, OSError, ValueError) as error:
             return json_response_error(error)
 
@@ -3030,7 +3061,15 @@ def create_app() -> web.Application:
             page_size = min(20, max(1, int(request.query.get("page_size", "20"))))
         except ValueError:
             return json_response_error(Music3Error("頁碼格式錯誤。"))
-        return web.json_response(music_jobs.list_page(page, page_size))
+        result = music_jobs.list_page(page, page_size)
+        focus = request.query.get("focus", "")
+        if re.fullmatch(r"[a-f0-9]{32}", focus) and not any(item["id"] == focus for item in result["items"]):
+            for candidate_page in range(1, result["total_pages"] + 1):
+                candidate = music_jobs.list_page(candidate_page, page_size)
+                if any(item["id"] == focus for item in candidate["items"]):
+                    result = candidate
+                    break
+        return web.json_response(result)
 
     async def create_music_job(request: web.Request) -> web.Response:
         try:
@@ -3099,7 +3138,9 @@ def create_app() -> web.Application:
             if comfy.mode == "remote":
                 raise VoiceError("遠端語音模型由 GPU 主機管理者安裝；同事端不需安裝語音環境或模型。")
             payload = await request.json()
-            return web.json_response(await voice_installer.start(str(payload.get("mode") or "custom")), status=202)
+            if not isinstance(payload, dict):
+                raise VoiceError("語音模型安裝設定格式錯誤。")
+            return web.json_response(await voice_installer.start(str(payload.get("model_id") or payload.get("mode") or "custom")), status=202)
         except (VoiceError, json.JSONDecodeError) as error:
             return json_response_error(error, 409)
 
@@ -3114,7 +3155,15 @@ def create_app() -> web.Application:
             page_size = min(20, max(1, int(request.query.get("page_size", "20"))))
         except ValueError:
             return json_response_error(VoiceError("頁碼格式錯誤。"))
-        return web.json_response(voice_jobs.list_page(page, page_size))
+        result = voice_jobs.list_page(page, page_size)
+        focus = request.query.get("focus", "")
+        if re.fullmatch(r"[a-f0-9]{32}", focus) and not any(item["id"] == focus for item in result["items"]):
+            for candidate_page in range(1, result["total_pages"] + 1):
+                candidate = voice_jobs.list_page(candidate_page, page_size)
+                if any(item["id"] == focus for item in candidate["items"]):
+                    result = candidate
+                    break
+        return web.json_response(result)
 
     async def create_voice_job(request: web.Request) -> web.Response:
         try:
@@ -3246,6 +3295,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/symbol/prepare", prepare_symbol)
     app.router.add_get("/api/assets/{asset_id}", asset)
     app.router.add_get("/api/shortfilms", list_shortfilms)
+    app.router.add_get("/api/shortfilm-storage", shortfilm_storage_status)
     app.router.add_post("/api/shortfilms", create_shortfilm)
     app.router.add_get("/api/shortfilms/{project_id}", get_shortfilm)
     app.router.add_put("/api/shortfilms/{project_id}", update_shortfilm)
@@ -3368,7 +3418,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         launch = plan_startup(args.port, auto_port=args.auto_port,
-                              required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails", "clip_animations", "clip_transitions"))
+                              required_editor_capabilities=("position_keyframes", "speed_curves", "overlay_tracks", "text_style", "generated_video_thumbnails", "clip_animations", "clip_transitions", "text_fonts", "text_idle_animations", "transition_effects", "reference_transitions", "color_adjustments"))
         if launch.existing:
             verify_running_studio(launch.port)
     except (ValueError, RuntimeError) as error:

@@ -75,6 +75,25 @@ class RemoteVoiceConnection:
             raise RemoteVoiceError("遠端主機尚未提供相容的語音服務，請更新並重新啟動主機 Studio。")
         return result
 
+    @staticmethod
+    def require_model_support(status, compiled):
+        """Keep legacy hosts usable, but never let them ignore a new selection."""
+        model_id = compiled.get("model_id", compiled["mode"])
+        if model_id == compiled["mode"]:
+            return
+        models = status.get("models", {})
+        model = models.get(model_id)
+        capabilities = status.get("capabilities", {})
+        if isinstance(model, dict) and (model.get("mode", compiled["mode"]) != compiled["mode"]
+                                       or model.get("size", "1.7B") != "1.7B"):
+            raise RemoteVoiceError("遠端 GPU 主機的語音模型宣告與選擇不符；請更新並重新啟動主機 Studio。")
+        if (not isinstance(model, dict)
+                or not isinstance(capabilities, dict) or capabilities.get("model_selection") is not True):
+            raise RemoteVoiceError("遠端 GPU 主機尚未支援所選 1.7B 語音模型；請更新並重新啟動主機 Studio。")
+        if compiled.get("instruct") and (model.get("supports_instruct") is not True
+                                         or capabilities.get("custom_voice_instruct") is not True):
+            raise RemoteVoiceError("遠端 GPU 主機尚未支援內建聲線的表演指令；請更新並重新啟動主機 Studio。")
+
     async def upload_reference(self, path):
         path = Path(path)
         if not path.is_file() or path.stat().st_size > MAX_REFERENCE_BYTES:

@@ -181,7 +181,7 @@ class CameraRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.chat_requests, [])
         self.assertEqual(self.unloads, [])
         archived = json.loads((self.manager.history_directory / f"{failed['id']}.json").read_text(encoding="utf-8"))
-        self.assertEqual(archived, recovered)
+        self.assertEqual(archived, scripts.stored_record(recovered))
 
     async def test_only_silent_pair_correction_can_recover_a_complete_failed_draft(self):
         raw = draft("static")

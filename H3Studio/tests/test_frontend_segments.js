@@ -14,6 +14,8 @@ function fixture(shots = []) {
   const context = vm.createContext({
     project: {id: 'project', assets: [], scenes: [{id: 'scene', title: 'scene', shots}]},
     shortFilmBatchRunning: false, shortFilmBatch: null, shortFilmBatchLoading: false,
+    shortFilmRecoveries: new Map(),
+    getShortFilmSaveCoordinator: () => ({status: () => ({state: 'saved'})}),
     shortFilmProjects: [], messages: [], submissions: [], waits: [], locks: [], calls: [],
     $: element, structuredClone, confirm: () => true,
     toast(message) { context.messages.push(message); },

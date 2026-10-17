@@ -21,7 +21,7 @@ function fixture() {
     deck: { pause: () => pauses.push("main") }, videoLayers: { pause: () => pauses.push("layers") }, transitionPreview: { pause: () => pauses.push("transitions") }, renderPlaybackStatus() {},
     seek(time, play) { state.playhead = time; seeks.push({ project: state.session.project.id, time, play }); },
   });
-  for (const name of ["pause", "togglePlay", "animationNext", "previewSelectedAnimation"]) load(context, name);
+  for (const name of ["pause", "togglePlay", "animationNext", "requireSelectedTransitionSupport", "previewSelectedAnimation"]) load(context, name);
   return { context, state, pending, seeks, pauses, button };
 }
 test("a project switch during audio initialization cannot start a stale animation preview in the newly opened project", async () => {
@@ -57,4 +57,19 @@ test("cancelling animation preview initialization never reinstalls its discarded
 test("failed audio initialization keeps the preview paused and preserves the reported error", async () => {
   const f = fixture(), preview = f.context.previewSelectedAnimation("in"); f.pending.reject(new Error("audio initialization failed"));
   await assert.rejects(preview, /audio initialization failed/); assert.equal(f.state.playing, false); assert.equal(f.state.animationPreviewEnd, null);
+});
+
+test("text idle preview plays only its middle interval and keeps the configured entry and exit unchanged", async () => {
+  const f = fixture(), title = { id: "title", kind: "text", start: 2, end: 6, animation_in: { type: "fade", duration: 0.5 }, animation_out: { type: "slide_up", duration: 0.75 }, animation_idle: { preset: "float", speed: 1.5, amount: 0.8 } };
+  f.state.session.project.overlays = [title]; f.state.selectedKind = "overlay"; f.state.selected = "title"; f.context.selectedClip = () => title; f.context.clipTimelineStart = () => title.start;
+  const before = JSON.stringify(title), preview = f.context.previewSelectedAnimation("idle"); f.pending.resolve(); await preview;
+  assert.equal(f.state.playing, true); assert.equal(f.state.animationPreviewEnd, 5.25); assert.deepEqual(f.seeks, [{ project: "A", time: 2.5, play: false }, { project: "A", time: 2.5, play: true }]); assert.equal(JSON.stringify(title), before);
+});
+
+test("text idle preview does not start when its middle interval is empty or its intensity is zero", async () => {
+  for (const zero of [false, true]) {
+    const f = fixture(), title = { id: "title", kind: "text", start: 2, end: 4, animation_in: { duration: 1 }, animation_out: { duration: 1 }, animation_idle: { preset: "pulse", amount: zero ? 0 : 1 } };
+    f.state.session.project.overlays = [title]; f.state.selectedKind = "overlay"; f.state.selected = "title"; f.context.selectedClip = () => title; f.context.clipTimelineStart = () => title.start;
+    await f.context.previewSelectedAnimation("idle"); assert.equal(f.state.playing, false); assert.deepEqual(f.seeks, []); assert.equal(f.state.animationPreviewEnd, null);
+  }
 });

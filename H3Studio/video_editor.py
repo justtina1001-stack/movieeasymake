@@ -535,11 +535,12 @@ def video_layer_audio(layers):
     return clips
 
 
-def fit_frame(frame, width, height):
+def fit_frame(frame, width, height, background=(0, 0, 0)):
     scale = min(width / frame.width, height / frame.height)
     fitted_width, fitted_height = max(1, round(frame.width * scale)), max(1, round(frame.height * scale))
     pixels = frame.reformat(width=fitted_width, height=fitted_height, format="rgb24").to_ndarray()
-    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    canvas = np.empty((height, width, 3), dtype=np.uint8)
+    canvas[:] = background
     left, top = (width - fitted_width) // 2, (height - fitted_height) // 2
     canvas[top:top + fitted_height, left:left + fitted_width] = pixels
     return av.VideoFrame.from_ndarray(canvas, format="rgb24")
@@ -553,6 +554,7 @@ def render_project(project, media_paths, output_path, cancel_event, progress_cal
     Encoder threads are bounded; decoding uses one thread per codec.
     """
     fps, width, height = project["fps"], project["width"], project["height"]
+    background = tuple(bytes.fromhex(project.get("background", "#000000")[1:]))
     counts, cumulative, previous_boundary = [], 0.0, 0
     for clip in project["clips"]:
         duration = clip_duration(clip)
@@ -566,9 +568,9 @@ def render_project(project, media_paths, output_path, cancel_event, progress_cal
         previous_boundary = boundary
     main_frames = sum(counts)
     overlay_end = max((layer["end"] for layer in project.get("overlays", []) if layer["kind"] == "video"), default=0)
-    total_frames = max(main_frames, math.floor(overlay_end * fps + .5 + 1e-7))
+    total_frames = max(main_frames, math.floor(max(overlay_end, project.get("canvas_duration", 0)) * fps + .5 + 1e-7))
     if not total_frames:
-        raise EditorError("請先在時間軸加入影片。")
+        raise EditorError("請先加入影片，或在輸出設定指定背景片長。")
     segments = list(zip(project["clips"], counts))
     if total_frames > main_frames:
         segments.append((None, total_frames - main_frames))
@@ -579,13 +581,15 @@ def render_project(project, media_paths, output_path, cancel_event, progress_cal
             timeline.callback(mixer.close)
             layer_mixer = AudioMixer(video_layer_audio(project.get("overlays", [])), media_paths, cancel_event, tracks=3)
             timeline.callback(layer_mixer.close)
-            transitions = MainTransitionCompositor(project["clips"], media_paths, width, height, fps, cancel_event)
+            transitions = MainTransitionCompositor(project["clips"], media_paths, width, height, fps, cancel_event, background)
             timeline.callback(transitions.close)
             compositor = None
             if project.get("overlays"):
                 from editor_overlays import OverlayCompositor
                 compositor = OverlayCompositor(project["overlays"], media_paths, width, height, cancel_event=cancel_event, fps=fps)
                 timeline.callback(compositor.close)
+            from editor_color import ColorCompositor
+            colors = ColorCompositor(project.get("color_adjustments", []))
             video = output.add_stream("libx264", rate=fps)
             video.width, video.height, video.pix_fmt = width, height, "yuv420p"
             video.codec_context.thread_count = 2
@@ -608,17 +612,18 @@ def render_project(project, media_paths, output_path, cancel_event, progress_cal
                     for frame_index in range(frames):
                         if cancel_event.is_set():
                             raise ExportCancelled()
-                        frame = (fit_frame(reader.at(source_at(clip, frame_index / fps)), width, height) if reader else
-                                 av.VideoFrame.from_ndarray(np.zeros((height, width, 3), np.uint8), format="rgb24"))
+                        frame = (fit_frame(reader.at(source_at(clip, frame_index / fps)), width, height, background) if reader else
+                                 av.VideoFrame.from_ndarray(np.full((height, width, 3), background, np.uint8), format="rgb24"))
                         if clip:
                             gain = fade_gain(frame_index / fps, duration, clip)
                             if gain < 1:
-                                pixels = np.rint(frame.to_ndarray(format="rgb24") * gain).astype(np.uint8)
+                                pixels = np.rint(frame.to_ndarray(format="rgb24") * gain + np.asarray(background) * (1 - gain)).astype(np.uint8)
                                 frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
-                            frame = animate_main_frame(frame, clip, frame_index / fps, duration, width, height)
+                            frame = animate_main_frame(frame, clip, frame_index / fps, duration, width, height, background)
                             frame = transitions.apply(frame, clip, video_index / fps)
                         if compositor is not None:
                             frame = compositor.apply(frame, video_index / fps)
+                        frame = colors.apply(frame, video_index / fps)
                         frame.pts, frame.time_base = video_index, Fraction(1, fps)
                         for packet in video.encode(frame):
                             output.mux(packet)
@@ -724,6 +729,9 @@ class EditorStore:
         async with self.import_lock:
             for item in self.media.values():
                 if item.get("source") == payload and (self.media_dir / f"{item['id']}.source").is_file():
+                    if item.get("library_removed_at"):
+                        from editor_media_library import restore_library_media
+                        return restore_library_media(self, item)
                     return item
             return await self._import_source(payload, source_id)
 
@@ -789,6 +797,12 @@ class EditorStore:
             raise EditorError("超過 1920 像素的尺寸僅支援 21:9 的 2520×1080。")
         if type(fps) is not int or fps not in FRAME_RATES:
             raise EditorError("幀率只能使用 24、25、30 或 60。")
+        canvas_duration = number(payload.get("canvas_duration", current.get("canvas_duration", 0)), "背景片長", 0, 600)
+        if 0 < canvas_duration < 1 / fps - 1e-9:
+            raise EditorError("背景片長至少需要一個影格，或使用 0 依影片決定。")
+        background = payload.get("background", current.get("background", "#000000"))
+        if not isinstance(background, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", background):
+            raise EditorError("背景顏色須為 #RRGGBB。")
         clips = payload.get("clips", current.get("clips", []))
         if not isinstance(clips, list) or len(clips) > 50:
             raise EditorError("時間軸最多 50 個片段。")
@@ -877,8 +891,17 @@ class EditorStore:
                 previous_end = clip["start"] + clip_duration(clip)
         from editor_overlays import validate_overlays
         overlays = validate_overlays(payload.get("overlays", current.get("overlays", [])), self, fps, ids)
-        return {"id": current["id"], "name": name.strip(), "clips": clean, "audio_clips": clean_audio, "overlays": overlays, "width": width,
-                "height": height, "fps": fps, "updated_at": now()}
+        from editor_color import validate_color_adjustments
+        colors = validate_color_adjustments(payload.get("color_adjustments", current.get("color_adjustments", [])), fps, ids)
+        project = {"id": current["id"], "name": name.strip(), "clips": clean, "audio_clips": clean_audio, "overlays": overlays, "width": width,
+                   "height": height, "fps": fps, "updated_at": now()}
+        if colors:
+            project["color_adjustments"] = colors
+        if canvas_duration:
+            project["canvas_duration"] = canvas_duration
+        if background.lower() != "#000000":
+            project["background"] = background.lower()
+        return project
 
     def create_project(self, payload):
         project = self._project(payload, {"id": uuid.uuid4().hex})
@@ -899,8 +922,8 @@ class EditorStore:
         project = self._get(self.projects, project_id, "剪輯專案")
         snapshot = self._project(project, project)
         snapshot["updated_at"] = project["updated_at"]
-        if not snapshot["clips"] and not any(layer["kind"] == "video" for layer in snapshot["overlays"]):
-            raise EditorError("請先在時間軸加入影片。")
+        if not snapshot["clips"] and not any(layer["kind"] == "video" for layer in snapshot["overlays"]) and not snapshot.get("canvas_duration"):
+            raise EditorError("請先加入影片，或在輸出設定指定背景片長。")
         job_id = uuid.uuid4().hex
         job = {"id": job_id, "project_id": project_id, "status": "queued", "progress": 0,
                "created_at": now(), "updated_at": now(), "snapshot": snapshot}
@@ -912,7 +935,18 @@ class EditorStore:
 
     @staticmethod
     def public_export(job):
-        return {key: value for key, value in job.items() if key != "snapshot"}
+        result = {key: value for key, value in job.items() if key != "snapshot"}
+        snapshot = job.get("snapshot", {})
+        result["source"] = {key: snapshot[key] for key in ("name", "width", "height", "fps", "updated_at") if key in snapshot}
+        result["source"]["duration"] = max(sum(clip_duration(clip) for clip in snapshot.get("clips", [])),
+                                            max((layer["end"] for layer in snapshot.get("overlays", []) if layer.get("kind") == "video"), default=0),
+                                            snapshot.get("canvas_duration", 0))
+        return result
+
+    def list_exports(self, project_id):
+        self._get(self.projects, project_id, "剪輯專案")
+        return [self.public_export(job) for job in sorted(self.exports.values(), key=lambda item: item.get("created_at", ""), reverse=True)
+                if job.get("project_id") == project_id]
 
     def _update_export(self, job_id, **changes):
         job = self.exports[job_id]
@@ -1020,14 +1054,17 @@ def register_editor_routes(app, static_dir, data_dir):
         return web.json_response(sorted(store.projects.values(), key=lambda item: item["updated_at"], reverse=True), headers={"Cache-Control": "no-store"})
 
     async def create_project(request):
-        payload = await request.json() if request.can_read_body else {}
+        payload = await request.clone(client_max_size=32 * 1024**2).json() if request.can_read_body else {}
         return web.json_response(store.create_project(payload), status=201)
 
     async def get_project(request):
         return web.json_response(store._get(store.projects, request.match_info["project_id"], "剪輯專案"), headers={"Cache-Control": "no-store"})
 
     async def update_project(request):
-        return web.json_response(store.update_project(request.match_info["project_id"], await request.json()))
+        return web.json_response(store.update_project(request.match_info["project_id"], await request.clone(client_max_size=32 * 1024**2).json()))
+
+    async def list_exports(request):
+        return web.json_response(store.list_exports(request.match_info["project_id"]), headers={"Cache-Control": "no-store"})
 
     async def start_export(request):
         return web.json_response(store.start_export(request.match_info["project_id"]), status=202)
@@ -1062,6 +1099,7 @@ def register_editor_routes(app, static_dir, data_dir):
     app.router.add_get("/api/editor/projects/{project_id}", get_project)
     app.router.add_put("/api/editor/projects/{project_id}", update_project)
     app.router.add_post("/api/editor/projects/{project_id}/exports", start_export)
+    app.router.add_get("/api/editor/projects/{project_id}/exports", list_exports)
     app.router.add_get("/api/editor/exports/{export_id}", get_export)
     app.router.add_post("/api/editor/exports/{export_id}/cancel", cancel_export)
     app.router.add_get("/api/editor/exports/{export_id}/file", export_file)

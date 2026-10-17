@@ -139,6 +139,14 @@ class VoiceRemoteAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.json(), result)
         cancel.assert_awaited_once_with()
 
+    async def test_local_install_dispatches_explicit_large_model_id(self):
+        self.app["comfy"].mode = "local"
+        result = {"state": "starting", "active": True, "requested_mode": "clone", "requested_model_id": "clone_1_7b"}
+        with patch.object(self.app["voice_installer"], "start", new=AsyncMock(return_value=result)) as start:
+            response = await self.client.post("/api/voice/install", json={"mode": "clone", "model_id": "clone_1_7b"})
+        self.assertEqual(response.status, 202)
+        start.assert_awaited_once_with("clone_1_7b")
+
     async def test_remote_job_is_queued_without_client_model_checks(self):
         self.remote_mode()
         manager = self.app["voice_jobs"]

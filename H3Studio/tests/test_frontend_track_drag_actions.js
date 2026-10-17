@@ -163,7 +163,7 @@ test("pointer identity and handle routing keep unrelated gestures out", () => {
   h.dispatch("pointercancel"); clean(h);
 });
 
-for (const state of [{ backendReady: false }, { busy: true }, { exportJob: { status: "running" } }, { speedDrag: {} }])
+for (const state of [{ backendReady: false }, { busy: true }, { speedDrag: {} }])
   test(`locked state ${JSON.stringify(state)} blocks starting`, () => {
     const h = harness({ state }), before = signature(h.session.project);
     h.dispatch("pointerdown"); clean(h); unchanged(h, before);
@@ -305,4 +305,10 @@ test("joining two overlay rows keeps the source editing and places both clips on
     assert.equal(moved[key], moving[key]);
   assert.equal(moved.track_id, "target"); assert.equal(h.session.undoStack.length, 1); assert.equal(h.draftWrites, 1);
   assert.equal(h.calls.some(call => call[0] === "seek"), false);
+});
+
+test("an immutable export snapshot allows a new timeline gesture", () => {
+  const h = harness({ state: { exportJob: { status: "running" } } });
+  h.dispatch("pointerdown"); assert.ok(h.state.trackDrag);
+  h.dispatch("pointercancel"); clean(h);
 });

@@ -31,7 +31,7 @@ def _now():
 def generation_source(project):
     """Keep every generation setting, excluding only persisted execution state."""
     source = copy.deepcopy(project)
-    for field in ("created_at", "updated_at", "segment_draft"):
+    for field in ("created_at", "updated_at", "revision", "segment_draft"):
         source.pop(field, None)
     for _, shot in flatten_shots(source):
         for field in RUNTIME_FIELDS:

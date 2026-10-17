@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { clone, signature, canonicalSavedSignature, resolveDraft, ProjectSession, ProjectAutoSaver, editableContent, requireTextStyleSupport, requireAnimationSupport } = require("../static/editor.js");
+const { clone, signature, canonicalSavedSignature, resolveDraft, ProjectSession, ProjectAutoSaver, editableContent, requireTextStyleSupport, requireAnimationSupport, requireTransitionEffectSupport, requireTextFontSupport, requireTextIdleSupport, requireColorSupport, requireSavedColor } = require("../static/editor.js");
 
 const project = () => ({ id: "persist-project", name: "續編測試", width: 1280, height: 720, fps: 24, updated_at: "r1",
   clips: [{ id: "v1", media_id: "video", in: 0, out: 4, speed: 1, volume: 1 }],
@@ -129,7 +129,7 @@ function newProjectFixture(source, animationReady = false, transitionReady = fal
   const events = [], requests = [], original = clone(source);
   const state = { session: new ProjectSession(source), projects: [original], busy: false,
     textStyleReady: true, clipAnimationsReady: animationReady, clipTransitionsReady: transitionReady };
-  const context = vm.createContext({ state, clone, editableContent, requireTextStyleSupport, requireAnimationSupport,
+  const context = vm.createContext({ state, clone, editableContent, requireTextStyleSupport, requireAnimationSupport, requireTransitionEffectSupport, requireTextFontSupport, requireTextIdleSupport, requireColorSupport, requireSavedColor,
     canSwitch: () => true, project: () => state.session.project, renderDisabled() {},
     saveProject: async () => { events.push("save"); }, rememberDraft: () => { events.push("draft"); },
     json: (method, data) => ({ method, body: JSON.stringify(data) }),

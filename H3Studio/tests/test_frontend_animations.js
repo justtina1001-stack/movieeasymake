@@ -78,3 +78,15 @@ test("transition durations follow actual speed-curve timeline duration and may b
   const value = project([a, b], [layer("c", 0, 2, { transition_out: { ...spec("wipe_right", 1), next_id: "d" } }), layer("d", 2, 4)]);
   assert.equal(math.transitionAt(value, 2).length, 2); assert.equal(math.transitionPairs(value)[0].cut, 2);
 });
+
+for (const type of ["white_flash", "blur_dissolve", "wave_distort", "rgb_glitch", "radial_zoom", "horizontal_blur"]) test(`${type} binds main and overlay neighbors while retaining the three-field schema`, () => {
+  const transition = { type, duration: 1.25, next_id: "b" }, value = project([clip("a", 4, { transition_out: transition }), clip("b", 3)]);
+  math.validateAnimations(value.clips[0], 4); math.validateTransitions(value);
+  assert.deepEqual(math.canonicalAnimations(value.clips[0]), { transition_out: transition });
+  const [pair] = math.transitionPairs(value); assert.equal(pair.type, type); assert.equal(pair.start, 3.375); assert.equal(pair.end, 4.625);
+  assert.equal(math.transitionAt(value, 4)[0].progress, 0.5);
+  const overlay = project([], [layer("a", 0, 2, { transition_out: transition }), layer("b", 2, 4)]);
+  math.validateTransitions(overlay); assert.equal(math.transitionPairs(overlay)[0].type, type);
+  assert.throws(() => math.validateAnimations({ transition_out: { ...transition, strength: 0.5 } }, 4));
+  assert.throws(() => math.validateAnimations({ animation_in: spec(type) }, 4));
+});

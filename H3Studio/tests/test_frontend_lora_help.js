@@ -13,6 +13,17 @@ const inventory = {names:[wushu,combat,unknown],folder:'h3studio_custom',mode:'l
   {name:wushu,title:'武術動作',purpose:'武術／連續動作',family:'ref2va',trigger:'wushu_action',trigger_required:true,usage:'強度由使用者選擇',limits:'需角色參考；不保證動作',source_url:'https://example.org/wushu',known:true},
   {name:combat,title:'戰鬥動作',purpose:'較激烈的戰鬥',family:'both',trigger:'',usage:'選用詞 prfight2 由作者建議',limits:'未經本機畫質驗證',source_url:'https://example.org/combat',known:true},
 ],builtin_items:[{name:builtin,title:'內建 Turbo',purpose:'減少採樣步數',family:'ref2va',known:true,manual_selectable:false,trigger:'',usage:'由生成品質管理',limits:'適用 Ref2VA',source_url:'https://example.org/turbo'}]};
+const candidates = [
+  {name:'h3studio_custom/camera.safetensors',title:'Camera Motion',family:null,default_strength:0.8,trigger:'camera motion',trigger_required:true,trigger_placement:'prefix'},
+  {name:'h3studio_custom/physics.safetensors',title:'Spatial Physics',family:null,default_strength:0.3},
+  {name:'h3studio_custom/orbit.safetensors',title:'360 Orbit',family:'fl2va',default_strength:1},
+  {name:'h3studio_custom/swap.safetensors',title:'Character Swap',family:'ref2va',default_strength:1,requires_source_video:true},
+  {name:'h3studio_custom/realism.safetensors',title:'Realism People',family:'both',default_strength:0.8},
+  {name:'h3studio_custom/3d.safetensors',title:'3D Animation',family:null,default_strength:0.4,availability:'gated'},
+].map(item=>({known:true,purpose:`用途：${item.title}`,usage:'依作者範例選用',limits:'尚未在本機推論驗證',source_url:`https://example.org/${item.name.split('/').pop()}`,installed:false,manual_selectable:false,availability:'missing',...item}));
+function recommendedInventory(installed=[]) {
+  return {...inventory,names:[...inventory.names,...installed],items:[...inventory.items,...candidates.filter(item=>installed.includes(item.name)).map(item=>({...item,installed:true,availability:'installed',manual_selectable:true}))],recommended_items:[...inventory.items.map(item=>({...item,installed:true,availability:'installed',manual_selectable:true})),...candidates.map(item=>installed.includes(item.name)?{...item,installed:true,availability:'installed',manual_selectable:true}:item)]};
+}
 
 function helpers() {
   const context=vm.createContext({URL});
@@ -174,7 +185,7 @@ test('refresh failures and changed catalogs retain draft rows and known cached h
   assert.match(f.element('#quickLoraPanel').innerHTML,/武術／連續動作/);
   assert.deepEqual(f.rows('quick'),[row]);assert.equal(f.saves.quick,0);
   f.fail(null);f.setResponse({names:[],folder:'new',mode:'remote'});await f.click('quick','refresh');
-  assert.deepEqual(f.rows('quick'),[row]);assert.match(f.element('#quickLoraPanel').innerHTML,/目前引擎未找到/);
+  assert.deepEqual(f.rows('quick'),[row]);assert.match(f.element('#quickLoraPanel').innerHTML,/尚未安裝/);
 });
 
 test('inflight catalog refresh never overwrites edits or a newly selected shortfilm project',async()=>{
@@ -204,6 +215,71 @@ test('all relevant pages load the shared helper before their application scripts
   for(const [page,script] of [['index','app'],['images','images']]) {
     const html=fs.readFileSync(path.join(__dirname,`../static/${page}.html`),'utf8');
     assert.ok(html.indexOf('/static/lora-help.js?') < html.indexOf(`/static/${script}.js?`));
-    assert.match(html,/lora-help.css\?v=20261005-lora-help/);
+    assert.match(html,/lora-help.css\?v=20261005-lora-recommendations/);
   }
+});
+
+test('recommendations remain separate from installed names and expose missing and gated sources',()=>{
+  const h=helpers(),data=h.catalog(recommendedInventory());
+  assert.deepEqual(plain(data.names),inventory.names);
+  assert.equal(data.items.length,3);assert.equal(data.recommended_items.length,8);assert.equal(h.choices(data).length,9);
+  for(const candidate of candidates) {
+    const item=h.item(data,candidate.name);
+    assert.equal(item.installed,false);assert.ok(h.selectionReason(item));
+    assert.match(h.html(item),/href="https:\/\/example.org\//);assert.match(h.html(item),/初始強度/);
+  }
+  assert.equal(h.status(h.item(data,candidates[5].name)),'受限下載');
+  assert.match(h.html(h.item(data,candidates[5].name)),/受限下載/);
+  assert.equal(h.family(h.item(data,candidates[0].name)),null);
+  assert.match(h.html(h.item(data,candidates[0].name)),/作者未明確區分 FL2VA／Ref2VA/);
+});
+
+test('installed recommendation metadata merges by case without changing actual engine filenames',()=>{
+  const h=helpers(),actual=candidates[0].name.toUpperCase();
+  const data=h.catalog({names:[actual],items:[],recommended_items:[{...candidates[0],installed:false,manual_selectable:true}]});
+  assert.equal(h.item(data,candidates[0].name).name,actual);
+  assert.equal(data.recommended_items[0].name,actual);assert.equal(h.choices(data).length,1);
+  assert.equal(h.item(data,actual).default_strength,0.8);assert.equal(h.item(data,actual).installed,true);
+  assert.equal(h.selectionReason(h.item(data,actual)),'');
+});
+
+test('invalid recommendation fields use safe fallback without implying a confirmed model family',()=>{
+  const h=helpers();
+  for(const default_strength of [NaN,Infinity,-1,3,'0.8',null]) {
+    const data=h.catalog({names:['bad.safetensors'],items:[{name:'bad.safetensors',known:true,family:'invalid',default_strength,requires_source_video:'true',trigger_placement:'invalid'}],recommended_items:[null,{},'<iframe>']});
+    const item=h.item(data,'bad.safetensors');assert.equal(item.default_strength,0.5);assert.equal(item.family,null);assert.equal(item.requires_source_video,false);assert.equal(item.trigger_placement,'visual');assert.equal(data.recommended_items.length,0);
+  }
+  const data=h.catalog({names:[],recommended_items:[{...candidates[0],installed:'true',source_url:'javascript:alert(1)',title:'<iframe>'}]});
+  assert.equal(h.item(data,candidates[0].name).installed,false);assert.match(h.html(h.item(data,candidates[0].name)),/&lt;iframe&gt;/);assert.doesNotMatch(h.html(h.item(data,candidates[0].name)),/href=/);
+});
+
+test('main and shortfilm catalogs show unavailable choices disabled without changing saved rows',async()=>{
+  const row={name:candidates[3].name,strength:0.65,family:'ref2va',enabled:true},f=panels({shortfilm:[row]});
+  f.setResponse(recommendedInventory());await f.click('quick','refresh');
+  for(const scope of ['quick','sf']) {
+    const html=f.element(scope==='quick'?'#quickLoraPanel':'#sfLoraPanel').innerHTML;
+    for(const candidate of candidates) { assert.match(html,new RegExp(`value="${candidate.name.replaceAll('.','\\.')}"[^>]*disabled`));assert.ok(html.includes(candidate.title)); }
+    assert.match(html,/受限下載/);assert.match(html,/來源/);
+    f.change(scope,'picker',candidates[0].name);await f.click(scope,'add');
+  }
+  assert.deepEqual(f.rows('quick'),[]);assert.deepEqual(f.rows('sf'),[row]);assert.deepEqual(f.saves,{quick:0,sf:0});
+});
+
+test('explicit additions use candidate defaults while refresh preserves strength enabled and manual family',async()=>{
+  const camera=candidates[0],row={name:camera.name,strength:0.25,family:'both',enabled:false},f=panels({shortfilm:[row]});f.context.state.mode='fl2va';
+  f.setResponse(recommendedInventory([camera.name]));await f.click('quick','refresh');
+  assert.deepEqual(f.rows('sf'),[row]);assert.deepEqual(f.saves,{quick:0,sf:0});
+  f.change('quick','picker',camera.name);assert.deepEqual(f.rows('quick'),[]);await f.click('quick','add');
+  assert.deepEqual(f.rows('quick'),[{name:camera.name,strength:0.8,family:'fl2va',enabled:true}]);assert.equal(f.saves.quick,1);
+  await f.click('quick','refresh');assert.equal(f.rows('quick')[0].strength,0.8);assert.deepEqual(f.rows('sf'),[row]);assert.equal(f.saves.quick,1);
+});
+
+test('Orbit and Swap can only be newly selected in their compatible main modes and never shortfilm',async()=>{
+  const orbit=candidates[2].name,swap=candidates[3].name,f=panels();f.context.state.mode='r2v';f.setResponse(recommendedInventory([orbit,swap]));await f.click('quick','refresh');
+  for(const scope of ['quick','sf']) for(const name of [orbit,swap]) {f.change(scope,'picker',name);await f.click(scope,'add');assert.equal(f.rows(scope).length,0);}
+  assert.match(f.element('#sfLoraPanel').innerHTML,/需來源影片，請到影片工作室→角色替換/);
+  f.context.state.mode='fl2va';f.change('quick','picker',orbit);await f.click('quick','add');assert.deepEqual(f.rows('quick'),[{name:orbit,strength:1,family:'fl2va',enabled:true}]);
+  f.context.state.mode='replace';f.change('quick','picker',swap);await f.click('quick','add');assert.equal(f.rows('quick')[1].strength,1);assert.equal(f.rows('quick')[1].family,'ref2va');
+  f.context.state.mode='r2v';vm.runInContext('renderLoraPanels();',f.context);assert.equal(f.rows('quick').length,2);assert.match(f.element('#quickLoraPanel').innerHTML,/已保留設定/);
+  const saves=f.saves.quick;f.change('quick','name',swap,0);assert.equal(f.rows('quick')[0].name,orbit);assert.equal(f.saves.quick,saves);
 });

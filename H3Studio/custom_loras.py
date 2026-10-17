@@ -1,7 +1,7 @@
 """User-selected model adapters; paths are relative to the active ComfyUI catalog."""
 import math
 import re
-from lora_catalog import known_lora_family, required_trigger
+from lora_catalog import known_lora_family, required_trigger, trigger_placement, requires_source_video
 
 
 def normalize_loras(value):
@@ -36,7 +36,8 @@ def normalize_loras(value):
         known_family = known_lora_family(name)
         if known_family:
             if family not in {known_family, "both"}:
-                raise ValueError("Wushu r2v v7 權重只適用 Ref2VA，請選擇對應版本。")
+                label = "Ref2VA" if known_family == "ref2va" else "FL2VA"
+                raise ValueError(f"LoRA「{name}」只適用 {label}，請選擇對應版本。")
             family = known_family
         result.append(dict(name=name, strength=strength, family=family,
                            enabled=item.get("enabled", True) is not False))
@@ -62,9 +63,32 @@ def validate_loras_for_family(items, family):
 
 def required_lora_triggers(items, family):
     """Only required upstream cues from enabled, applicable, nonzero adapters."""
+    return [item["cue"] for item in required_lora_trigger_specs(items, family)]
+
+
+def required_lora_trigger_specs(items, family):
     result = []
+    seen = set()
     for item in active_loras(normalize_loras(items), family):
         cue = required_trigger(item["name"])
-        if cue and cue not in result:
-            result.append(cue)
+        if cue and cue not in seen:
+            result.append(dict(cue=cue, placement=trigger_placement(item["name"])))
+            seen.add(cue)
     return result
+
+
+def validate_lora_requirements(items, family, *, has_source_video=False, has_replacement_image=False):
+    """Enforce known requirements; preserve legacy filtering for unknown files."""
+    normalized = normalize_loras(items)
+    for item in normalized:
+        if not item["enabled"] or item["strength"] == 0:
+            continue
+        known_family = known_lora_family(item["name"])
+        if known_family and known_family != family:
+            target = "Ref2VA" if family == "ref2va" else "FL2VA"
+            raise ValueError(f"LoRA「{item['name']}」不適用 {target}；請停用或選擇對應模式。")
+        if item["family"] in {family, "both"} and requires_source_video(item["name"]) and not has_source_video:
+            raise ValueError("Character Swap LoRA 需要來源影片；請到影片工作室的角色替換模式提供原始表演影片與新角色圖片，或停用此 LoRA。")
+        if item["family"] in {family, "both"} and requires_source_video(item["name"]) and not has_replacement_image:
+            raise ValueError("Character Swap LoRA 需要新角色參考圖片；請在角色或生物參考欄位提供圖片，或停用此 LoRA。")
+    return normalized

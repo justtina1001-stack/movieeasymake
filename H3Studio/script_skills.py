@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-SKILLS_VERSION = "20261003"
+SKILLS_VERSION = "20261006-h3"
 SKILLS_DIRECTORY = Path(__file__).resolve().parent / "writing_skills"
 MAX_SKILL_PROMPT_CHARS = 2400
 
@@ -29,9 +29,64 @@ _SOURCES = {
     },
 }
 
+
+def _h3_source(name, repo, commit, path, stars, forks, *, official=False):
+    root = f"https://github.com/{repo}"
+    return {
+        "name": name,
+        "url": f"{root}/blob/{commit}/{path}",
+        "license": "MiniMax H3 Community License" if official else "MIT",
+        "license_url": f"{root}/blob/{commit}/README.md#license" if official else f"{root}/blob/{commit}/LICENSE",
+        "commit": commit, "repo_url": root,
+        "repository_stars": stars, "repository_forks": forks,
+        "checked_at": "2026-10-06",
+        "provenance": "official" if official else "community",
+    }
+
+
+# Stars describe the source repository, never the quality of an individual Skill.
+# These snapshots are reviewed locally; generation never fetches upstream files.
+_SOURCES.update({
+    "h3-official": _h3_source("MiniMax 官方 · H3 Prompt Writing", "MiniMax-AI/MiniMax-H3",
+        "d21241f0a4b3acbb34c97dae47fa417b7065e438", "skills/h3-prompt-writing/SKILL.md", 9584, 709, official=True),
+    "h3-animation": _h3_source("MiniMax 官方 · 3D Animation Short Generator", "MiniMax-AI/MiniMax-H3",
+        "d21241f0a4b3acbb34c97dae47fa417b7065e438", "skills/3d-animation-short-generator/SKILL.md", 9584, 709, official=True),
+    "h3-beats": _h3_source("H3 Storyboard · 角色表演與節拍", "phileiny/h3-storyboard-skill",
+        "ce732bae6e05d2e4c4943e3e1fda2d515f9a2ff3", "skills/h3-storyboard/SKILL.md", 175, 4),
+    "h3-director": _h3_source("Oh My MiniMax H3 Director · WenWu", "TFboy1/oh-my-minimaxh3-director",
+        "911266137075a0b9fabf6268dc1c91ae05138ad9", "SKILL.md", 139, 19),
+    "h3-reference": _h3_source("MiniMax H3 Video Prompt · 素材規劃", "penposs/minimax-h3-video-prompt",
+        "2e2bb0e745c178c4db26f99b7ba7c4c53040a961", "SKILL.md", 65, 6),
+})
+
 # Metadata and genre adaptations are written for H3 Studio. Sources supply
 # general craft methods, rather than eleven upstream genre plug-ins.
 _PROFILES = [
+    {"id": "h3-official-storyboard", "name": "H3 官方格式／分鏡", "category": "H3 分鏡",
+     "description": "依官方 H3 模式與時軸規範規劃鏡頭，交由工具編譯成可用提示詞。",
+     "recommended_for": ["H3 分鏡", "時間碼與對白", "角色參考圖對應"],
+     "guide": ["區分角色外觀參考與首尾幀，依現有模式規劃。", "每鏡列出構圖、位置、動作、運鏡、聲音及終態。", "短切鏡放在有效影片片段內，保留原台詞及穩定說話角色。"],
+     "sources": ["h3-official"]},
+    {"id": "h3-3d-animation", "name": "H3 3D 動畫故事分鏡", "category": "H3 動畫",
+     "description": "整理故事節拍、角色表演與空間錨點，保持動畫短片的動作與前後交接。",
+     "recommended_for": ["3D 動畫短片", "角色喜劇與冒險", "有角色圖的 CG 故事"],
+     "guide": ["先建立角色目標與故事因果，再安排必要素材。", "以預備、主動作、反應與收勢呈現角色表演。", "逐鏡追蹤地標、人物位置、道具與光位，避免換鏡後重置。"],
+     "sources": ["h3-animation", "h3-official"]},
+    {"id": "h3-performance-beats", "name": "H3 角色表演／節拍", "category": "H3 表演",
+     "description": "降低單鏡動作負荷，以視線、呼吸及姿態變化呈現情緒，保留無對白表演。",
+     "recommended_for": ["人物情緒變化", "無對白表演", "角色特寫"],
+     "guide": ["先確定每鏡要讓觀眾理解的變化，再選景別。", "每個主要節拍聚焦一個可見反應，避免同時塞入大量動作。", "只使用原有台詞；沉默角色保持沉默，不插入假對白。"],
+     "sources": ["h3-beats", "h3-official"]},
+    {"id": "h3-director-continuity", "name": "H3 導演／鏡頭銜接", "category": "H3 導演",
+     "description": "以觀察目的與交接錨點安排切鏡，連續追蹤視線、方向、位置與物件狀態。",
+     "recommended_for": ["多鏡頭敘事", "動作與追逐", "鏡頭衔接與空間連續"],
+     "guide": ["每鏡揭露新資訊，避免換景別重演同一動作。", "將上一鏡的末態接到下一鏡的起態，保持位置與因果。", "運鏡跟隨具體刺激與動作；指定一鏡到底時保持連續。"],
+     "sources": ["h3-director", "h3-official"]},
+    {"id": "h3-reference-planning", "name": "H3 多模態素材／分鏡規劃", "category": "H3 參考",
+     "description": "為每份角色、物件與場景素材分配明確職責，減少外觀、姿勢及背景互相混用。",
+     "recommended_for": ["多角色圖片", "商品與場景參考", "固定外觀的分鏡"],
+     "guide": ["整理必須出現、必須保持及允許變化的內容。", "每份實際素材有明確職責，只使用已有的外觀描述與綁定。", "核對素材名稱、台詞歸屬、數量與最後可見狀態。"],
+     "sources": ["h3-reference", "h3-official"]},
     {"id": "cinematic-story", "name": "通用電影敘事", "category": "劇情",
      "description": "把一句想法補成有目標、阻礙、轉折與收尾的短故事。",
      "recommended_for": ["只有初步想法", "角色小故事", "一般短片"],

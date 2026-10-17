@@ -67,7 +67,7 @@ class ScriptHistoryStorageTests(unittest.TestCase):
 
         self.assertEqual(loaded.history_directory, self.directory / "history")
         for record in records:
-            self.assertEqual(loaded.get_job(record["id"]), record)
+            self.assertEqual(fixture_module.stored_record(loaded.get_job(record["id"])), record)
             archived = json.loads((loaded.history_directory / f"{record['id']}.json").read_text(encoding="utf-8"))
             self.assertEqual(archived, record)
         self.assertEqual(self.load().jobs, loaded.jobs)
@@ -84,8 +84,8 @@ class ScriptHistoryStorageTests(unittest.TestCase):
 
         loaded = self.load()
 
-        self.assertEqual(loaded.get_job(new_first["id"]), new_first)
-        self.assertEqual(loaded.get_job(new_second["id"]), new_second)
+        self.assertEqual(fixture_module.stored_record(loaded.get_job(new_first["id"])), new_first)
+        self.assertEqual(fixture_module.stored_record(loaded.get_job(new_second["id"])), new_second)
         self.assertEqual(self.load().jobs, loaded.jobs)
 
     def test_saved_running_and_queued_jobs_restart_as_interrupted(self):
@@ -152,7 +152,7 @@ class ScriptHistoryStorageTests(unittest.TestCase):
 
         self.assertIsInstance(manager.history_persistence_error, str)
         self.assertTrue(manager.history_persistence_error)
-        self.assertEqual(self.load().get_job(job["id"]), job)
+        self.assertEqual(fixture_module.stored_record(self.load().get_job(job["id"])), job)
         manager._save_jobs(job["id"])
         self.assertIsNone(manager.history_persistence_error)
 
@@ -180,10 +180,10 @@ class ScriptHistoryStorageTests(unittest.TestCase):
 
         restored = self.load()
 
-        self.assertEqual(restored.get_job(job["id"]), job)
+        self.assertEqual(fixture_module.stored_record(restored.get_job(job["id"])), job)
         preserved = [path for path in restored.directory.glob("jobs*") if path.is_file() and path.read_bytes() == broken]
         self.assertTrue(preserved, "The malformed index must remain available for recovery or diagnosis")
-        self.assertEqual(self.load().get_job(job["id"]), job)
+        self.assertEqual(fixture_module.stored_record(self.load().get_job(job["id"])), job)
 
     def test_corrupt_archive_at_startup_recovers_from_healthy_index_and_preserves_bytes(self):
         manager = self.load()
@@ -196,12 +196,12 @@ class ScriptHistoryStorageTests(unittest.TestCase):
 
         restored = self.load()
 
-        self.assertEqual(restored.get_job(job["id"]), job)
+        self.assertEqual(fixture_module.stored_record(restored.get_job(job["id"])), job)
         self.assertEqual(json.loads(archive.read_text(encoding="utf-8")), job)
         backups = list(restored.history_directory.glob(f"{archive.name}.corrupt-*.bak"))
         self.assertTrue(backups)
         self.assertTrue(any(path.read_bytes() == broken for path in backups))
-        self.assertEqual(self.load().get_job(job["id"]), job)
+        self.assertEqual(fixture_module.stored_record(self.load().get_job(job["id"])), job)
         self.assertIsNone(restored.history_persistence_error)
 
     def test_corrupt_archive_during_save_recovers_old_record_and_commits_new_content(self):
@@ -217,14 +217,14 @@ class ScriptHistoryStorageTests(unittest.TestCase):
 
         manager._save_jobs(old_job["id"])
 
-        self.assertEqual(manager.get_job(old_job["id"]), new_job)
+        self.assertEqual(fixture_module.stored_record(manager.get_job(old_job["id"])), new_job)
         self.assertEqual(json.loads(archive.read_text(encoding="utf-8")), new_job)
         indexed = json.loads(manager.jobs_path.read_text(encoding="utf-8"))
         self.assertEqual({item["id"]: item for item in indexed}, {new_job["id"]: new_job})
         backups = list(manager.history_directory.glob(f"{archive.name}.corrupt-*.bak"))
         self.assertTrue(backups)
         self.assertTrue(any(path.read_bytes() == broken for path in backups))
-        self.assertEqual(self.load().get_job(old_job["id"]), new_job)
+        self.assertEqual(fixture_module.stored_record(self.load().get_job(old_job["id"])), new_job)
         self.assertIsNone(manager.history_persistence_error)
 
 
@@ -254,7 +254,7 @@ class ScriptHistoryAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["input"]["project"], project)
         self.assertEqual(result["input"]["instructions"], "保留結尾。")
         archived = json.loads((self.manager.history_directory / f"{result['id']}.json").read_text(encoding="utf-8"))
-        self.assertEqual(archived, result)
+        self.assertEqual(archived, fixture_module.stored_record(result))
         self.assertEqual(self.reload().get_job(result["id"]), result)
         response = await self.client.get("/api/scripts/jobs")
         listing = await response.json()
@@ -348,7 +348,7 @@ class ScriptHistoryAPITests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=status):
                 response = await self.client.delete(f"/api/scripts/jobs/{job['id']}")
                 self.assertEqual(response.status, 409, await response.text())
-                self.assertEqual(self.manager.get_job(job["id"]), job)
+                self.assertEqual(fixture_module.stored_record(self.manager.get_job(job["id"])), job)
 
     async def test_completed_job_cannot_be_deleted_while_model_unload_is_running(self):
         self.mode = "unload_hold"

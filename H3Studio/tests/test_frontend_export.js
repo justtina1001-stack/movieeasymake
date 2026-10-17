@@ -75,7 +75,7 @@ function harness(options = {}) {
     locked: () => !state.backendReady || state.busy || ["queued", "running"].includes(state.exportJob?.status),
     canSwitch: () => !state.busy && !["queued", "running"].includes(state.exportJob?.status),
     clamp: (value, min, max) => Math.max(min, Math.min(max, value)),
-    renderDisabled() { calls.push("render-disabled"); },
+    renderDisabled() { calls.push("render-disabled"); }, loadExportHistory() { calls.push("history-refresh"); },
     pause() { calls.push("pause"); }, notify(message) { messages.push(message); },
     storagePut(key, value) { calls.push(`store:${key}`); persisted.set(key, copy(value)); return true; },
     async api(path, settings = {}) {
@@ -192,13 +192,14 @@ test("a late poll response after switching projects cannot persist under the new
   assert.equal(h.downloads.length, 0); assert.equal(h.timers.size, 0);
 });
 
-test("project identity also guards a late response when the export ID is unchanged", async () => {
+test("switching projects keeps the active export scoped to its original project", async () => {
   const response = deferred(), h = harness({ job: job("running", { auto_download: true }), api: () => response.promise });
   const pending = h.sandbox.pollExport();
   h.state.session = new core.ProjectSession(project("project-b"));
   response.resolve(job("completed")); await pending;
-  assert.equal(h.state.exportJob.status, "running");
-  assert.equal(h.persisted.size, 0); assert.equal(h.downloads.length, 0); assert.equal(h.timers.size, 0);
+  assert.equal(h.state.exportJob.status, "completed");
+  assert.equal(h.persisted.has("h3-editor-export:project-a"), true); assert.equal(h.persisted.has("h3-editor-export:project-b"), false);
+  assert.equal(h.state.session.project.id, "project-b"); assert.equal(h.downloads.length, 1); assert.equal(h.timers.size, 0);
 });
 
 test("an obsolete poll failure does not schedule retries against the new project", async () => {

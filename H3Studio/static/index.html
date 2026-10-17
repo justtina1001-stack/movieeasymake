@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
   <link rel="stylesheet" href="/static/styles.css?v=20261013-generation-stages">
-  <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-help">
+  <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-recommendations">
+  <link rel="stylesheet" href="/static/workspace_ui.css?v=20261017-ux">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -33,7 +34,7 @@
   </header>
 
   <main class="page-shell">
-    <section id="sharedQueue" class="shared-queue" aria-labelledby="sharedQueueTitle" aria-busy="true">
+    <section id="sharedQueue" class="shared-queue queue-idle" aria-labelledby="sharedQueueTitle" aria-busy="true">
       <div class="shared-queue-heading">
         <div><p class="eyebrow">SHARED ENGINE</p><h2 id="sharedQueueTitle">共享生成佇列</h2></div>
         <div class="shared-queue-tools"><span id="queueUpdatedAt">正在讀取...</span><button id="refreshSharedQueue" class="button ghost small" type="button" aria-label="重新整理共享生成佇列">重新整理</button></div>
@@ -132,7 +133,7 @@
           </div>
           <div class="form-grid four">
             <label>畫面比例<select id="aspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label>
-            <label>解析度<select id="megapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">原生畫質 · 0.98MP</option></select></label>
+            <label>解析度<select id="megapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">最高精細 · 0.98MP</option></select></label>
             <label>時長<div class="field-unit"><input id="duration" type="number" min="5" max="15" step="0.5" value="5"><span>秒</span></div></label>
             <div><label for="seed">Seed</label><div class="seed-row"><input id="seed" type="number" min="0" value="1" aria-describedby="videoSeedHelp"><button id="videoSeedAuto" class="button ghost small seed-auto-button" type="button" aria-label="每次影片生成自動更換 Seed" aria-pressed="true">AUTO</button><button id="randomSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div><small id="videoSeedHelp" class="field-help">每次生成前自動換新 Seed，欄位保留本次使用值。</small></div>
           </div>
@@ -141,6 +142,7 @@
             <div><strong id="qualityModeTitle">原生品質模式</strong><span id="qualityModeHint">使用 res_multistep，保留目前步數與 Scheduler。</span></div>
           </div>
           <div id="qualityBuiltinLoraHelp" class="lora-builtin-help"></div>
+          <details class="settings-optional"><summary>進階品質、動態與完成後處理</summary>
           <div class="quality-selector">
             <label>影片解碼<select id="videoVae" aria-describedby="videoVaeHint"><option value="auto">自動（優先 INT8）</option><option value="int8">INT8（較快、省記憶體）</option><option value="fp16">FP16（相容模式）</option></select></label>
             <div><strong>影片解碼效能</strong><span id="videoVaeHint">自動優先使用 INT8；引擎不支援或缺少模型時使用 FP16。主要加速解碼、降低記憶體占用；整體生成時間仍依鏡頭而定。</span></div>
@@ -178,6 +180,7 @@
             </div>
           </div>
           <div id="dimensionPreview" class="dimension-preview">預計輸出 864 × 480 · 24 FPS</div>
+          </details>
         </section>
 
         <section id="symbolLoopPanel" class="panel hidden">
@@ -347,7 +350,7 @@
           <div id="promptTemplateHelp" class="prompt-template-help hidden">
             <div><strong>快速替換關鍵字</strong><span id="promptKeywordStatus">點一下標籤，即可選取提示詞中的對應內容</span></div>
             <div id="promptKeywordList" class="prompt-keyword-list"></div>
-            <small>請替換所有 {{關鍵字}}；不需要的台詞、音效或配樂整句刪除即可。素材名稱請與上方「名稱代號」完全一致。</small>
+            <small>請替換所有 {{關鍵字}}；不需要的台詞、音效或配樂整句刪除即可。素材名稱請與素材區的「名稱代號」完全一致。</small>
           </div>
         </section>
 
@@ -417,6 +420,9 @@
           <div><button id="newShortfilmProject" class="button primary" type="button">＋ 新增短片</button><button id="deleteShortfilmProject" class="button ghost" type="button">刪除專案</button></div>
         </div>
       </header>
+      <span id="shortfilmSaveStatus" class="studio-save-status" role="status" aria-live="polite">尚未選擇短片</span>
+      <div id="shortfilmRecovery" class="shortfilm-recovery hidden" role="status">主機版本與瀏覽器草稿不同。可先另存草稿，再查看主機版本。<div><button id="copyShortfilmDraft" type="button" class="button secondary small">草稿另存新短片</button><button id="discardShortfilmDraft" type="button" class="button ghost small">載入主機版本</button></div></div>
+
 
       <div id="shortfilmEmpty" class="panel shortfilm-empty">
         <span>STORY</span><h2>建立第一個短片專案</h2><p>先建立專案，再加入角色、場景與分鏡。快速生成模式不會受到影響。</p>
@@ -435,7 +441,7 @@
               </div>
               <div class="form-grid three">
                 <label>畫面比例<select id="sfAspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label>
-                <label>解析度<select id="sfMegapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">原生畫質 · 0.98MP</option></select></label>
+                <label>解析度<select id="sfMegapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">最高精細 · 0.98MP</option></select></label>
                 <label>生成品質<select id="sfQuality" aria-describedby="sfQualityHint"><option value="native">原生品質</option><option value="turbo">Turbo 快速預覽</option><option value="turbo_fast">Turbo 新快速 · 4-step v1.1</option><option value="turbo_quality">Turbo 新高品質 · 8-step</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2</option><option value="turbo_ref_quality">Ref Turbo 品質比較 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速（原版）</option></select></label>
               </div>
               <p id="sfQualityHint" class="field-help"></p>
@@ -837,6 +843,8 @@ non_diegetic_music: ...</pre></div>
             <button type="button" data-voice-mode="clone"><strong>複製參考聲線</strong><small>上傳有權使用的參考音訊</small></button>
           </div>
 
+          <label class="music-wide-field">語音模型<select id="voiceModelChoice"><option value="custom_1_7b" selected>1.7B 完整模式（建議）</option><option value="custom">0.6B 快速模式</option></select><small id="voiceModelChoiceHelp" class="field-help">Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice · 支援情緒、語氣與節奏指令。</small></label>
+
           <div class="form-grid two music-core-fields">
             <label>任務名稱<input id="voiceJobName" maxlength="80" placeholder="例如：財神角色開場台詞"></label>
             <label>語言<select id="voiceLanguage"><option value="Chinese">中文</option><option value="Auto">自動判斷</option><option value="English">英文</option><option value="Japanese">日文</option><option value="Korean">韓文</option><option value="German">德文</option><option value="French">法文</option><option value="Spanish">西班牙文</option><option value="Italian">義大利文</option><option value="Portuguese">葡萄牙文</option><option value="Russian">俄文</option></select></label>
@@ -899,8 +907,11 @@ non_diegetic_music: ...</pre></div>
       <div class="modal-actions"><button id="faceRepairCheck" class="button ghost" type="button">重新檢查</button><button id="faceRepairSubmit" class="button primary" type="button" disabled>建立修復工作</button></div>
     </section>
   </div>
-  <script src="/static/lora-help.js?v=20261005-lora-help"></script>
-  <script src="/static/app.js?v=20261013-generation-stages"></script>
+  <script src="/static/lora-help.js?v=20261005-lora-recommendations"></script>
+  <script src="/static/shortfilm_persistence.js?v=20261017-ux"></script>
+  <script src="/static/audio_workspace.js?v=20261017-ux"></script>
+  <script src="/static/app.js?v=20261017-ux"></script>
   <script src="/static/face-repair.js?v=20260917-face-repair"></script>
+  <script src="/static/workspace_ui.js?v=20261017-ux"></script>
 </body>
 </html>

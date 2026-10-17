@@ -12,10 +12,10 @@ from script_skills import (
 
 
 class ScriptSkillCatalogTests(unittest.TestCase):
-    def test_catalog_has_eleven_complete_unique_local_methods(self):
+    def test_catalog_has_sixteen_complete_unique_local_methods(self):
         catalog = list_skills()
-        self.assertEqual(len(catalog), 11)
-        self.assertEqual(len({item["id"] for item in catalog}), 11)
+        self.assertEqual(len(catalog), 16)
+        self.assertEqual(len({item["id"] for item in catalog}), 16)
         for item in catalog:
             with self.subTest(skill=item["id"]):
                 self.assertTrue(item["description"])
@@ -24,7 +24,7 @@ class ScriptSkillCatalogTests(unittest.TestCase):
                 self.assertNotIn("instructions", item)
                 self.assertTrue((SKILLS_DIRECTORY / item["id"] / "SKILL.md").is_file())
                 for source in item["sources"]:
-                    self.assertEqual(source["license"], "MIT")
+                    self.assertIn(source["license"], {"MIT", "MiniMax H3 Community License"})
                     self.assertEqual(len(source["commit"]), 40)
                     self.assertIn(source["commit"], source["url"])
                     self.assertIn(source["commit"], source["license_url"])
@@ -74,6 +74,40 @@ class ScriptSkillCatalogTests(unittest.TestCase):
                 self.assertIn(owner, notice)
                 self.assertIn("Permission is hereby granted", notice)
                 self.assertIn('THE SOFTWARE IS PROVIDED "AS IS"', notice)
+
+    def test_h3_profiles_have_reviewed_source_popularity_and_full_notices(self):
+        expected = {
+            "h3-official-storyboard": ("official", 9584, "minimax-h3-community.txt"),
+            "h3-3d-animation": ("official", 9584, "minimax-h3-community.txt"),
+            "h3-performance-beats": ("community", 175, "h3-storyboard.txt"),
+            "h3-director-continuity": ("community", 139, "h3-director.txt"),
+            "h3-reference-planning": ("community", 65, "h3-video-prompt.txt"),
+        }
+        for skill_id, (provenance, stars, notice_file) in expected.items():
+            with self.subTest(skill=skill_id):
+                source = get_skill(skill_id)["sources"][0]
+                self.assertEqual(source["provenance"], provenance)
+                self.assertEqual(source["repository_stars"], stars)
+                self.assertEqual(source["checked_at"], "2026-10-06")
+                self.assertTrue(source["repo_url"].startswith("https://github.com/"))
+                notice = (SKILLS_DIRECTORY / "licenses" / notice_file).read_text(encoding="utf-8")
+                if provenance == "official":
+                    self.assertIn("MiniMax H3 COMMUNITY LICENSE AGREEMENT", notice)
+                    self.assertNotEqual(source["license"], "MIT")
+                else:
+                    self.assertIn("Permission is hereby granted", notice)
+                    self.assertIn('THE SOFTWARE IS PROVIDED "AS IS"', notice)
+
+    def test_h3_guides_keep_silent_performance_and_studio_owned_format(self):
+        performance = get_skill("h3-performance-beats")["instructions"]
+        self.assertIn("Silent characters stay silent", performance)
+        self.assertIn("never invent a <d> line", performance)
+        self.assertIn("not hard model limits", performance)
+        official = get_skill("h3-official-storyboard")["instructions"]
+        self.assertIn("compiler assign reference labels", official)
+        self.assertIn("Do not paste a second six-section prompt", official)
+        self.assertIn("original language tag and exact words", official)
+        self.assertIn("existing asset", get_skill("h3-reference-planning")["instructions"])
 
     def test_changing_a_bundled_method_changes_startup_fingerprint(self):
         with tempfile.TemporaryDirectory() as directory:

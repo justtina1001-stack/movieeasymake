@@ -16,12 +16,38 @@ from PIL import Image
 
 from domain import RequestError
 from queue_cancel import QueueCancelError
-from qwen_image_models import MODEL_FILES, LICENSE_URL
+from qwen_image_models import MODEL_FILES, LICENSE_URL, TURBO_MODEL_FILE, TURBO_SIGMAS, TURBO_STEPS
 from lora_catalog import describe_loras
 from image_upscale import compile_upscale, build_upscale_workflow, upscale_capabilities, MODELS as UPSCALE_MODELS
 
 ACTIVE = {"queued", "preparing", "running"}
 MAX_SEED = 2**53 - 1
+MODEL_VARIANTS = ("standard", "turbo")
+
+
+def node_enum_choices(schema, name):
+    """Read legacy combo lists and native V3 COMBO options without guessing."""
+    inputs = schema.get("input", {})
+    if not isinstance(inputs, dict):
+        return []
+    required, optional = inputs.get("required"), inputs.get("optional")
+    required = required if isinstance(required, dict) else {}
+    optional = optional if isinstance(optional, dict) else {}
+    spec = required.get(name, optional.get(name, []))
+    if not isinstance(spec, (list, tuple)) or not spec:
+        return []
+    metadata = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+    if metadata.get("multiselect", False) is not False:
+        return []
+    choices = spec[0]
+    if choices == "COMBO":
+        choices = metadata.get("options")
+    return list(choices) if isinstance(choices, (list, tuple)) and all(isinstance(value, str) for value in choices) else []
+
+
+def validate_variant_lora(variant, lora, strength):
+    if variant == "turbo" and lora and strength > 0:
+        raise RequestError("官方 Turbo 尚未驗證與額外 LoRA 疊加；請關閉 LoRA，或改用標準模型。")
 
 
 def is_image_lora(name):
@@ -47,6 +73,9 @@ def compile_image_request(payload):
     mode = payload.get("mode", "generate")
     if mode not in ("generate", "edit"):
         raise RequestError("圖片模式必須是文字生圖或參考圖編輯。")
+    variant = payload.get("model_variant", "standard")
+    if variant not in MODEL_VARIANTS:
+        raise RequestError("圖片模型必須是標準模型或官方 Turbo。")
     refs = payload.get("image_asset_ids", [])
     if not isinstance(refs, list) or len(refs) > 10 or any(not isinstance(x, str) or not re.fullmatch(r"[a-f0-9]{32}", x) for x in refs):
         raise RequestError("參考圖片最多 10 張，且必須先上傳。")
@@ -63,6 +92,8 @@ def compile_image_request(payload):
     if width % 32 or height % 32:
         raise RequestError("圖片寬高必須是 32 的倍數。")
     steps = integer("steps", 25, 1, 50)
+    if variant == "turbo":
+        steps = TURBO_STEPS
     resolution = integer("reference_resolution", 1024, 256, 2048)
     if resolution % 32:
         raise RequestError("參考圖處理解析度必須是 32 的倍數。")
@@ -80,19 +111,24 @@ def compile_image_request(payload):
     strength = payload.get("lora_strength", 1.0)
     if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(strength) or not 0 <= strength <= 1.5:
         raise RequestError("LoRA 強度必須介於 0～1.5。")
+    validate_variant_lora(variant, lora, strength)
     if payload.get("transparent", False):
         text = f"This is an RGBA format image with transparency. {text}\nThe image has an alpha channel and a transparent background."
-    return dict(name=name, prompt=text, original_prompt=prompt, mode=mode, image_asset_ids=refs,
+    return dict(name=name, prompt=text, original_prompt=prompt, mode=mode, model_variant=variant, image_asset_ids=refs,
                 width=width, height=height, steps=steps, seed=seed,
                 transparent=payload.get("transparent", False), reference_resolution=resolution,
                 lora_name=lora, lora_strength=strength)
 
 
 def build_image_workflow(compiled, uploaded, job_id):
+    variant = compiled.get("model_variant", "standard")
+    if variant not in MODEL_VARIANTS:
+        raise RequestError("圖片模型必須是標準模型或官方 Turbo。")
+    validate_variant_lora(variant, compiled.get("lora_name"), compiled.get("lora_strength", 1))
     def node(kind, **inputs):
         return {"class_type": kind, "inputs": inputs}
     workflow = {
-        "1": node("UNETLoader", unet_name=MODEL_FILES[0][1], weight_dtype="default"),
+        "1": node("UNETLoader", unet_name=(TURBO_MODEL_FILE if variant == "turbo" else MODEL_FILES[0])[1], weight_dtype="default"),
         "2": node("CLIPLoader", clip_name=MODEL_FILES[1][1], type="qwen_image", device="default"),
         "3": node("VAELoader", vae_name=MODEL_FILES[2][1]),
         "4": node("TextEncodeQwenImage21", clip=["2", 0], vae=["3", 0], prompt=compiled["prompt"],
@@ -105,6 +141,16 @@ def build_image_workflow(compiled, uploaded, job_id):
         "7": node("VAEDecode", samples=["6", 0], vae=["3", 0]),
         "8": node("SaveImage", images=["7", 0], filename_prefix=f"H3Studio/QwenImage21/{job_id}"),
     }
+    if variant == "turbo":
+        workflow["40"] = node("ManualSigmas", sigmas=", ".join(str(sigma) for sigma in TURBO_SIGMAS))
+        workflow["41"] = node("KSamplerSelect", sampler_name="euler")
+        # SamplerCustom applies the same native empty-latent correction as
+        # KSampler: EmptyLatentImage's 4 channels /8 become Qwen's 64 channels /16.
+        # Editing already supplies the correctly sized latent at encoder output 2.
+        workflow["6"] = node("SamplerCustom", model=["1", 0], positive=["4", 0], negative=["4", 1],
+                             latent_image=["4", 2] if compiled["mode"] == "edit" else ["5", 0],
+                             add_noise=True, noise_seed=compiled["seed"], cfg=1.0,
+                             sampler=["41", 0], sigmas=["40", 0])
     if compiled.get("lora_name") and compiled.get("lora_strength", 1) > 0:
         workflow["9"] = node("LoraLoaderModelOnly", model=["1", 0],
                              lora_name=compiled["lora_name"], strength_model=compiled["lora_strength"])
@@ -119,39 +165,105 @@ def build_image_workflow(compiled, uploaded, job_id):
 
 async def image_capabilities(comfy):
     result = {"ready": False, "nodes_ready": False, "models": [], "license_url": LICENSE_URL,
-              "mode": comfy.mode, "error": None, "lora_supported": False, "loras": [], "lora_items": []}
+              "mode": comfy.mode, "error": None, "lora_supported": False, "loras": [], "lora_items": [],
+              "model_variant_supported": True,
+              "variants": [
+                  {"id": "standard", "label": "標準模型", "ready": False, "steps": 25,
+                   "model_filename": MODEL_FILES[0][1], "error": None},
+                  {"id": "turbo", "label": "官方 Turbo", "ready": False, "steps": TURBO_STEPS,
+                   "model_filename": TURBO_MODEL_FILE[1], "error": None},
+              ]}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             async def info(name):
                 async with session.get(f"{comfy.base_url}/object_info/{name}", headers=comfy.auth_headers()) as response:
                     response.raise_for_status()
-                    return (await response.json()).get(name, {})
+                    payload = await response.json()
+                    schema = payload.get(name, {}) if isinstance(payload, dict) else {}
+                    return schema if isinstance(schema, dict) else {}
+            async def optional_info(name):
+                try:
+                    return await info(name)
+                except (aiohttp.ClientError, TimeoutError, ValueError, TypeError):
+                    return {}
             encode, unet, clip, vae = await asyncio.gather(*(info(n) for n in (
                 "TextEncodeQwenImage21", "UNETLoader", "CLIPLoader", "VAELoader")))
             result["nodes_ready"] = bool(encode)
             for model, schema, field in zip(MODEL_FILES, (unet, clip, vae), ("unet_name", "clip_name", "vae_name")):
-                choices = schema.get("input", {}).get("required", {}).get(field, [[]])[0]
+                choices = node_enum_choices(schema, field)
                 found = model[1] in choices
                 if comfy.mode == "local":
                     path = comfy.comfy_dir / "models" / model[0] / model[1]
                     found = found and path.is_file() and path.stat().st_size == model[2]
                 result["models"].append({"filename": model[1], "installed": found, "size": model[2]})
-            result["ready"] = result["nodes_ready"] and all(m["installed"] for m in result["models"])
+            standard, turbo = result["variants"]
+            standard["ready"] = result["nodes_ready"] and all(m["installed"] for m in result["models"])
             if not result["nodes_ready"]:
-                result["error"] = "引擎尚未載入 Qwen-Image-2.1 節點，請主機管理者更新至支援此模型的 ComfyUI（本版驗證 v0.37.0）並重啟。"
-            elif not result["ready"]:
-                result["error"] = "模型尚未齊全，請在 GPU 主機執行 setup_qwen_image.bat。遠端使用者不需下載模型。"
+                standard["error"] = "引擎尚未載入 Qwen-Image-2.1 節點，請主機管理者更新至支援此模型的 ComfyUI（本版驗證 v0.37.0）並重啟。"
+            elif not standard["ready"]:
+                standard["error"] = "標準模型尚未齊全，請在 GPU 主機執行 setup_qwen_image.bat。遠端使用者不需下載模型。"
+            choices = node_enum_choices(unet, "unet_name")
+            turbo_found = TURBO_MODEL_FILE[1] in choices
+            if comfy.mode == "local":
+                path = comfy.comfy_dir / "models" / TURBO_MODEL_FILE[0] / TURBO_MODEL_FILE[1]
+                turbo_found = turbo_found and path.is_file() and path.stat().st_size == TURBO_MODEL_FILE[2]
+            manual, custom, select = ({}, {}, {})
+            if turbo_found:
+                manual, custom, select = await asyncio.gather(*(optional_info(n) for n in (
+                    "ManualSigmas", "SamplerCustom", "KSamplerSelect")))
+
+            def input_type(schema, name):
+                inputs = schema.get("input", {})
+                if not isinstance(inputs, dict):
+                    return None
+                required, optional = inputs.get("required"), inputs.get("optional")
+                required = required if isinstance(required, dict) else {}
+                optional = optional if isinstance(optional, dict) else {}
+                spec = required.get(name, optional.get(name, []))
+                return spec[0] if isinstance(spec, (list, tuple)) and spec else None
+
+            def outputs_match(schema, expected):
+                outputs = schema.get("output")
+                return isinstance(outputs, (list, tuple)) and list(outputs[:len(expected)]) == expected
+
+            # These schemas protect the final sigma list and LATENT output index;
+            # a similarly named node with another contract must not enable Turbo.
+            custom_inputs = {"model": "MODEL", "add_noise": "BOOLEAN", "noise_seed": "INT", "cfg": "FLOAT",
+                             "positive": "CONDITIONING", "negative": "CONDITIONING", "sampler": "SAMPLER",
+                             "sigmas": "SIGMAS", "latent_image": "LATENT"}
+            euler_choices = node_enum_choices(select, "sampler_name")
+            turbo_nodes_ready = (
+                outputs_match(encode, ["CONDITIONING", "CONDITIONING", "LATENT"])
+                and input_type(manual, "sigmas") == "STRING" and outputs_match(manual, ["SIGMAS"])
+                and all(input_type(custom, name) == kind for name, kind in custom_inputs.items())
+                and outputs_match(custom, ["LATENT"])
+                and isinstance(euler_choices, (list, tuple)) and "euler" in euler_choices
+                and outputs_match(select, ["SAMPLER"])
+                and outputs_match(unet, ["MODEL"])
+                and outputs_match(clip, ["CLIP"]) and outputs_match(vae, ["VAE"])
+            )
+            shared_ready = all(model["installed"] for model in result["models"][1:])
+            turbo["ready"] = bool(turbo_nodes_ready and turbo_found and shared_ready)
+            if not turbo_found or not shared_ready:
+                turbo["error"] = "官方 Turbo 模型或共用編碼器／VAE 尚未齊全，請在 GPU 主機安裝後重新檢查。"
+            elif not turbo_nodes_ready:
+                turbo["error"] = "官方 Turbo 需要相容的 Qwen 編碼、ManualSigmas、SamplerCustom 與 KSamplerSelect（Euler）節點；請主機管理者檢查引擎。"
+            result["ready"] = any(profile["ready"] for profile in result["variants"])
+            result["error"] = None if result["ready"] else standard["error"] or turbo["error"]
             # Optional adapters must never prevent base-model generation.
             try:
                 lora = await info("LoraLoaderModelOnly")
                 result["lora_supported"] = bool(lora)
-                choices = lora.get("input", {}).get("required", {}).get("lora_name", [[]])[0]
+                choices = node_enum_choices(lora, "lora_name")
                 result["loras"] = sorted(n for n in choices if is_image_lora(n))
                 result["lora_items"] = describe_loras(result["loras"], image=True)
             except (aiohttp.ClientError, TimeoutError, ValueError, TypeError):
                 pass
     except (aiohttp.ClientError, TimeoutError, ValueError, TypeError, OSError):
         result["error"] = "暫時無法檢查引擎；請確認 ComfyUI 已啟動或等待目前運算完成後重試。"
+        for profile in result["variants"]:
+            profile.update(ready=False, error=result["error"])
+        result["ready"] = False
     return result
 
 
@@ -172,6 +284,8 @@ class ImageJobManager:
                     continue
                 if job.get("status") in ACTIVE and not job.get("prompt_id"):
                     job.update(status="interrupted", error="Studio 重啟前尚未送出；可依原設定重新生成。")
+                if job.get("mode") != "upscale":
+                    job.setdefault("model_variant", "standard")
                 self.jobs[job["id"]] = job
             except (OSError, ValueError, KeyError, TypeError):
                 continue
@@ -208,7 +322,8 @@ class ImageJobManager:
             compiled.update(mode="upscale", name=f"{source['name'][:65]} · {compiled['scale']} 倍放大",
                             prompt=description, original_prompt=description, source_job_id=source_id,
                             image_asset_ids=[asset["id"]], steps=None, seed=None, transparent=source_transparent,
-                            reference_resolution=1024, lora_name="", lora_strength=0)
+                            reference_resolution=1024, lora_name="", lora_strength=0,
+                            source_model_variant=source.get("model_variant", source.get("source_model_variant", "standard")))
             return self._create_job(compiled)
 
     def _create_job(self, compiled):
@@ -262,8 +377,21 @@ class ImageJobManager:
                 self.update(job_id, status="preparing", current_node="檢查放大模型" if is_upscale else "檢查圖片模型")
                 await self.comfy.ensure_running()
                 status = await upscale_capabilities(self.comfy) if is_upscale else await image_capabilities(self.comfy)
-                if not status["ready"]:
-                    raise RequestError(status["error"])
+                if is_upscale:
+                    if not status["ready"]:
+                        raise RequestError(status["error"])
+                else:
+                    variant = job.get("model_variant", "standard")
+                    if variant not in MODEL_VARIANTS:
+                        raise RequestError("圖片模型必須是標準模型或官方 Turbo。")
+                    profiles = status.get("variants")
+                    profile = next((item for item in profiles or [] if item.get("id") == variant), None)
+                    # Older standard-job consumers can still supply legacy status;
+                    # Turbo always requires its own positive readiness result.
+                    ready = profile.get("ready", False) if profile else variant == "standard" and profiles is None and status.get("ready", False)
+                    if not ready:
+                        raise RequestError((profile or {}).get("error") or status.get("error") or "所選圖片模型尚未在目前引擎就緒，請重新檢查模型。")
+                    validate_variant_lora(variant, job.get("lora_name"), job.get("lora_strength", 1))
                 if is_upscale and not any(m["id"] == job["upscale_model"] and m["installed"] for m in status["models"]):
                     raise RequestError("所選放大模型已不在目前引擎中。")
                 if job.get("lora_name") and job.get("lora_strength", 1) > 0:
@@ -400,6 +528,11 @@ def register_image_routes(app, static_dir, data_dir):
     async def listing(request):
         page_number = max(1, int(request.query.get("page", 1)))
         records = sorted(manager.jobs.values(), key=lambda j: j["created_at"], reverse=True)
+        focus = request.query.get("focus", "")
+        if focus:
+            focus_index = next((index for index, item in enumerate(records) if item.get("id") == focus), None)
+            if focus_index is not None:
+                page_number = focus_index // 12 + 1
         pages = max(1, math.ceil(len(records) / 12))
         page_number = min(page_number, pages)
         return web.json_response({"items": records[(page_number - 1)*12:page_number*12], "page": page_number,

@@ -9,7 +9,7 @@ from PIL import Image
 
 import scriptwriting
 from script_references import build_appearance_messages
-from script_skills import list_skills, skill_prompt
+from script_skills import SKILLS_VERSION, list_skills, skill_prompt
 from scriptwriting import (
     DEFAULT_SETTINGS, ScriptwritingError, ScriptwritingManager, build_messages,
     fit_context_settings, normalize_project, validate_context,
@@ -47,7 +47,7 @@ class WritingSkillProjectTests(unittest.TestCase):
                     self.assertEqual(build_messages(project, action, "保留原稿"),
                                      build_messages(legacy, action, "保留原稿"))
 
-    def test_selected_skill_omits_default_six_beats_and_preserves_explicit_timing(self):
+    def test_selected_skill_preserves_default_six_beats_and_explicit_user_timing(self):
         template = "未指定時間分配且全長15秒時，採0–2、2–4、4–6.5、6.5–9、9–12、12–15s六段；已指定則保留其合法時間分配。"
         timings = (
             "依0–2、2–4、4–6.5、6.5–9、9–12、12–15秒六段編寫。",
@@ -60,11 +60,12 @@ class WritingSkillProjectTests(unittest.TestCase):
                 with self.subTest(timing=timing, action=action):
                     original = build_messages(unselected, action, "保留原分段和台詞，不新增鏡頭")
                     guided = build_messages(selected, action, "保留原分段和台詞，不新增鏡頭")
-                    if action != "storyboard":
+                    if action in {"screenplay", "rewrite"}:
                         self.assertIn(template, original[0]["content"])
+                        self.assertIn(template, guided[0]["content"])
                     else:
                         self.assertNotIn(template, original[0]["content"])
-                    self.assertNotIn(template, guided[0]["content"])
+                        self.assertNotIn(template, guided[0]["content"])
                     self.assertEqual(guided[1], original[1])
                     body = json.loads(guided[1]["content"].split("\n", 1)[0])
                     self.assertEqual(body["instructions"], timing)
@@ -100,6 +101,19 @@ class WritingSkillProjectTests(unittest.TestCase):
                     self.assertEqual(messages, before)
                     self.assertEqual(fitted["num_ctx"], DEFAULT_SETTINGS["num_ctx"])
                     self.assertGreaterEqual(fitted["num_predict"], 1024)
+
+    def test_human_screenplay_layout_stays_distinct_from_machine_storyboard_with_every_skill(self):
+        for skill in ("", *(item["id"] for item in list_skills())):
+            project = normalize_project({"writing_skill": skill, "idea": "阿青登上列車。"})
+            for action in ("screenplay", "rewrite"):
+                with self.subTest(skill=skill, action=action):
+                    system = build_messages(project, action, "")[0]["content"]
+                    self.assertIn("1. 0.0–2.0s｜段名", system)
+                    self.assertNotIn("輸出單一有效 JSON", system)
+                    self.assertRegex(system, r"(?:禁止|不要|不輸出|不得)[^。\n]{0,80}(?:JSON|字典)")
+            system = build_messages(project, "storyboard", "")[0]["content"]
+            self.assertIn("輸出單一有效 JSON", system)
+            self.assertNotIn("1. 0.0–2.0s｜段名", system)
 
     def test_long_manuscript_keeps_every_input_and_only_adjusts_output_budget(self):
         manuscript = "詳細動作與場景。" * 150
@@ -138,7 +152,7 @@ class WritingSkillAPITests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.get("/api/scripts/skills")
         self.assertEqual(response.status, 200)
         catalog = await response.json()
-        self.assertEqual(catalog, {"items": list_skills(), "version": "20261003"})
+        self.assertEqual(catalog, {"items": list_skills(), "version": SKILLS_VERSION})
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         response = await self.client.get("/api/scripts/status")
         self.assertEqual(response.status, 200)

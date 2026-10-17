@@ -6,11 +6,17 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../static/images.js'), 'utf8');
 const loraSource = fs.readFileSync(path.join(__dirname, '../static/lora-help.js'), 'utf8');
 const a='a'.repeat(32), b='b'.repeat(32), c='c'.repeat(32);
+const variants = (standard=true, turbo=true) => ({model_variant_supported:true, variants:[
+  {id:'standard',label:'原版',ready:standard,steps:25,model_filename:'standard.safetensors',error:standard ? '' : '原版模型尚未安裝'},
+  {id:'turbo',label:'官方 Turbo',ready:turbo,steps:8,model_filename:'turbo.safetensors',error:turbo ? '' : 'Turbo 模型尚未安裝'},
+]});
+const imageJob = extra => ({id:a,name:'來源圖片',mode:'generate',status:'completed',width:1024,height:1024,steps:25,seed:42,prompt:'來源描述',transparent:false,reference_resolution:1024,image_asset_ids:[],...extra});
+function deferred() { let resolve; const promise=new Promise(done=>{resolve=done;}); return {promise,resolve}; }
 
-async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscaleStatus={}}={}) {
+async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscaleStatus={}, referenceWait=null}={}) {
   const elements = new Map(), calls=[];
   let stored = JSON.stringify(draft);
-  const defaults={imageMode:'generate',imageWidth:'1024',imageHeight:'1024',imageSteps:'25',imageSeed:'42',referenceResolution:'1024',imageLoraStrength:'1'};
+  const defaults={imageMode:'generate',imageModel:'standard',imageWidth:'1024',imageHeight:'1024',imageSteps:'25',imageSeed:'42',referenceResolution:'1024',imageLoraStrength:'1'};
   function el(id) {
     if(!elements.has(id)) elements.set(id, {
       value:defaults[id] || '', type:['imageSeedAuto','imageTransparent'].includes(id)?'checkbox':'text', checked:id==='imageSeedAuto',
@@ -20,15 +26,16 @@ async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscale
     });
     return elements.get(id);
   }
-  let statusError = false;
+  let statusError = false, statusData = status, jobsData = jobs;
   const context=vm.createContext({document:{getElementById:el,hidden:false},localStorage:{getItem:()=>stored,setItem:(_,s)=>stored=s},setInterval(){},FormData,URL,
     async fetch(url,options) {
       calls.push({url,options});
       if (url === '/api/images/status' && statusError) throw new Error('連線失敗');
       if(options?.method === 'DELETE') return {ok:!deleteError,json:async()=>deleteError?{error:'刪除失敗'}:{deleted:true}};
-      const data = url === '/api/images/status' ? {ready:true,lora_supported:true,loras:[],...status} :
+      if(url.endsWith('/reference') && referenceWait) return {ok:true,json:async()=>referenceWait};
+      const data = url === '/api/images/status' ? {ready:true,lora_supported:true,loras:[],...statusData} :
         url === '/api/images/upscale/status' ? {ready:true,models:[{id:'general',installed:true},{id:'anime',installed:true}],...upscaleStatus} :
-        url.startsWith('/api/images/jobs?page=') ? {items:jobs,page:1,total_pages:1} :
+        url.startsWith('/api/images/jobs?page=') ? {items:jobsData,page:1,total_pages:1} :
         url === '/api/queue' ? {available:true,jobs:{},running_count:0,pending_count:0,local_waiting_count:0} :
         url.endsWith('/reference') ? {id:c} : {seed:17,id:'job'};
       return {ok:true,json:async()=>data};
@@ -39,8 +46,113 @@ async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscale
   await new Promise(setImmediate);
   const fire=async(id,type,event={})=>{await el(id).listeners[type]({preventDefault(){},...event});};
   const click=(id,dataset)=>fire(id,'click',{target:{closest:()=>({dataset,disabled:false})}});
-  return {el,fire,click,calls,draft:()=>JSON.parse(stored),setStatusError:()=>{statusError=true;}};
+  return {el,fire,click,calls,draft:()=>JSON.parse(stored),setStatusError:()=>{statusError=true;},setStatus:value=>{statusData=value;statusError=false;},setJobs:value=>{jobsData=value;}};
 }
+
+test('legacy drafts and jobs select standard while an old backend blocks Turbo without changing the draft',async()=>{
+  const f=await fixture({draft:{imagePrompt:'舊稿',imageSteps:'33'},jobs:[imageJob({})]});
+  assert.equal(f.el('imageModel').value,'standard'); assert.equal(f.el('imageSteps').value,'33'); assert.equal(f.el('generateImage').disabled,false);
+  await f.fire('imageForm','submit');
+  const legacy=JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body);
+  assert.equal(legacy.model_variant,undefined); assert.equal(legacy.steps,33);
+  f.el('imageModel').value='turbo'; await f.fire('imageModel','input');
+  assert.equal(f.el('generateImage').disabled,true); assert.match(f.el('imageModelStatus').textContent,/重新啟動 Studio/);
+  const before=f.draft(); await f.fire('imageForm','submit'); assert.deepEqual(f.draft(),before);
+  assert.equal(f.calls.filter(call=>call.url==='/api/images/jobs').length,1);
+  await f.click('imageJobs',{reuse:a}); assert.equal(f.el('imageModel').value,'standard'); assert.equal(f.el('imageSteps').value,'25');
+});
+
+test('Turbo submits fixed eight steps without LoRA and restores standard steps and LoRA across switching and draft reload',async()=>{
+  const name='qwen_image_2_1/style.safetensors',status={...variants(),loras:[name]};
+  const f=await fixture({status,draft:{imagePrompt:'原稿',imageSteps:'37',imageLora:name,imageLoraStrength:'0.65'}});
+  f.el('imageModel').value='turbo'; await f.fire('imageModel','input');
+  assert.equal(f.el('imageSteps').value,'8'); assert.equal(f.el('imageSteps').disabled,true); assert.equal(f.el('imageLora').disabled,true); assert.equal(f.el('imageLoraStrength').disabled,true);
+  assert.match(f.el('loraStatus').textContent,/Turbo 已含加速，回原版可使用 LoRA/);
+  assert.equal(f.draft().imageModel,'turbo'); assert.equal(f.draft().standardImageSteps,'37'); assert.equal(f.draft().imageLora,name); assert.equal(f.draft().imageLoraStrength,'0.65');
+  f.el('imageSteps').value='50'; await f.fire('imageForm','submit');
+  const payload=JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body);
+  assert.equal(payload.model_variant,'turbo'); assert.equal(payload.steps,8); assert.equal(payload.lora_name,''); assert.equal(payload.lora_strength,0);
+  const saved=f.draft(); await f.fire('refreshStatus','click'); assert.deepEqual(f.draft(),saved); assert.equal(f.el('imageModel').value,'turbo');
+  const restored=await fixture({draft:saved,status}); assert.equal(restored.el('imageModel').value,'turbo'); assert.equal(restored.el('imageSteps').value,'8');
+  restored.el('imageModel').value='standard'; await restored.fire('imageModel','input');
+  assert.equal(restored.el('imageSteps').value,'37'); assert.equal(restored.el('imageSteps').disabled,false); assert.equal(restored.el('imageLora').value,name); assert.equal(restored.el('imageLoraStrength').value,'0.65');
+  await restored.fire('imageForm','submit'); const original=JSON.parse(restored.calls.find(call=>call.url==='/api/images/jobs').options.body);
+  assert.equal(original.model_variant,'standard'); assert.equal(original.steps,37); assert.equal(original.lora_name,name); assert.equal(original.lora_strength,0.65);
+});
+
+test('overall ready cannot submit an unavailable selected profile or a missing profile inventory',async()=>{
+  for(const config of [
+    {status:variants(false,true),draft:{imageModel:'standard'},error:/原版模型尚未安裝/},
+    {status:variants(true,false),draft:{imageModel:'turbo'},error:/Turbo 模型尚未安裝/},
+    {status:{model_variant_supported:true,variants:[]},draft:{imageModel:'standard'},error:/尚未就緒/},
+  ]) {
+    const f=await fixture(config); assert.equal(f.el('generateImage').disabled,true); assert.match(f.el('imageModelStatus').textContent,config.error);
+    await f.fire('imageForm','submit'); assert.equal(f.calls.some(call=>call.url==='/api/images/jobs'),false);
+  }
+  const f=await fixture({status:variants(false,true)}); f.el('imageModel').value='turbo'; await f.fire('imageModel','input');
+  assert.equal(f.el('generateImage').disabled,false); await f.fire('imageForm','submit');
+  assert.equal(JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body).model_variant,'turbo');
+});
+
+test('refreshing profile readiness never resets the selected model steps or saved standard LoRA',async()=>{
+  const name='qwen_image_2_1/not-installed.safetensors';
+  const f=await fixture({status:variants(),draft:{imageModel:'turbo',imageSteps:'8',standardImageSteps:'41',imageLora:name,imageLoraStrength:'0.8'}});
+  assert.equal(f.el('generateImage').disabled,false); const saved=f.draft();
+  for(const status of [variants(true,false),{model_variant_supported:false},variants(false,true)]) {
+    f.setStatus(status); await f.fire('refreshStatus','click'); assert.equal(f.el('imageModel').value,'turbo'); assert.equal(f.el('imageSteps').value,'8'); assert.deepEqual(f.draft(),saved);
+  }
+  assert.equal(f.el('generateImage').disabled,false);
+  f.el('imageModel').value='standard'; await f.fire('imageModel','input'); assert.equal(f.el('imageSteps').value,'41'); assert.equal(f.el('imageLora').value,name); assert.equal(f.el('generateImage').disabled,true);
+});
+
+test('continue and reuse explicitly restore the source generation model instead of the current selector',async()=>{
+  const name='qwen_image_2_1/style.safetensors';
+  for(const action of ['continue','reuse']) {
+    const turbo=await fixture({status:{...variants(),loras:[name]},draft:{imageSteps:'31',imageLora:name,imageLoraStrength:'0.6'},jobs:[imageJob({model_variant:'turbo',steps:8})]});
+    await turbo.click('imageJobs',{[action]:a}); assert.equal(turbo.el('imageModel').value,'turbo'); assert.equal(turbo.el('imageSteps').value,'8'); assert.equal(turbo.draft().standardImageSteps,'31'); assert.equal(turbo.draft().imageLora,name);
+    await turbo.fire('imageForm','submit'); const fast=JSON.parse(turbo.calls.find(call=>call.url==='/api/images/jobs').options.body); assert.equal(fast.model_variant,'turbo'); assert.equal(fast.lora_strength,0);
+    const standard=await fixture({status:{...variants(),loras:[name]},draft:{imageModel:'turbo',imageSteps:'8',standardImageSteps:'38'},jobs:[imageJob({steps:40,lora_name:name,lora_strength:0.55})]});
+    await standard.click('imageJobs',{[action]:a}); assert.equal(standard.el('imageModel').value,'standard'); assert.equal(standard.el('imageSteps').value,'40'); assert.equal(standard.el('imageLora').value,name);
+    await standard.fire('imageForm','submit'); const original=JSON.parse(standard.calls.find(call=>call.url==='/api/images/jobs').options.body); assert.equal(original.model_variant,'standard'); assert.equal(original.steps,40); assert.equal(original.lora_strength,0.55);
+  }
+});
+
+test('continue keeps the clicked source model and metadata when job polling replaces the page during reference import',async()=>{
+  const name='qwen_image_2_1/style.safetensors';
+  for(const config of [
+    {job:imageJob({model_variant:'turbo',steps:8}),selected:'standard',expected:'turbo',replacement:[]},
+    {job:imageJob({steps:40,lora_name:name,lora_strength:0.55}),selected:'turbo',expected:'standard',replacement:[]},
+    {job:imageJob({mode:'upscale',source_model_variant:'turbo',steps:null,seed:null}),selected:'standard',expected:'turbo',replacement:[imageJob({model_variant:'standard',name:'已替換的來源'})]},
+  ]) {
+    const pending=deferred(), job={...config.job,name:'點選時的圖片',transparent:true,reference_resolution:512};
+    const f=await fixture({status:{...variants(),loras:[name]},draft:{imageModel:config.selected,standardImageSteps:'31',imageSteps:config.selected === 'turbo' ? '8' : '31'},jobs:[job],referenceWait:pending.promise});
+    const importing=f.click('imageJobs',{continue:a}); assert.equal(f.calls.some(call=>call.url===`/api/images/jobs/${a}/reference`),true);
+    f.setJobs(config.replacement); await f.fire('refreshJobs','click');
+    pending.resolve({id:c}); await importing;
+    assert.equal(f.el('imageModel').value,config.expected); assert.equal(f.el('imageName').value,'點選時的圖片 · 編輯');
+    assert.equal(f.el('imageTransparent').checked,true); assert.equal(f.el('referenceResolution').value,512); assert.deepEqual(f.draft().refs,[{id:c}]);
+    if(config.expected === 'standard') { assert.equal(f.el('imageSteps').value,'40'); assert.equal(f.el('imageLora').value,name); }
+    else assert.equal(f.el('imageSteps').value,'8');
+    await f.fire('imageForm','submit'); const payload=JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body);
+    assert.equal(payload.model_variant,config.expected); assert.equal(payload.reference_resolution,512); assert.equal(payload.transparent,true);
+    if(config.expected === 'standard') { assert.equal(payload.lora_name,name); assert.equal(payload.lora_strength,0.55); }
+  }
+});
+
+test('upscale results use their recorded source variant for editing and never treat the upscale model as a generation profile',async()=>{
+  for(const [source,expected] of [[undefined,'standard'],['turbo','turbo'],['standard','standard']]) {
+    const f=await fixture({status:variants(),draft:{imageModel:expected === 'turbo' ? 'standard' : 'turbo'},jobs:[imageJob({mode:'upscale',model:'turbo',source_model_variant:source,steps:null,seed:null,scale:2})]});
+    assert.match(f.el('imageJobs').innerHTML,/模型：Real-ESRGAN/);
+    await f.click('imageJobs',{continue:a}); assert.equal(f.el('imageModel').value,expected);
+    await f.fire('imageForm','submit'); assert.equal(JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body).model_variant,expected);
+  }
+});
+
+test('result cards and details distinguish Turbo standard legacy and Real-ESRGAN models',async()=>{
+  const f=await fixture({jobs:[imageJob({model_variant:'turbo'}),imageJob({id:b}),imageJob({id:c,mode:'upscale',scale:2,source_model_variant:'turbo'})]});
+  assert.match(f.el('imageJobs').innerHTML,/模型：官方 Turbo · 快速 8 步/); assert.match(f.el('imageJobs').innerHTML,/模型：原版 · 精細生成/); assert.match(f.el('imageJobs').innerHTML,/模型：Real-ESRGAN · 增強放大/);
+  const html=fs.readFileSync(path.join(__dirname,'../static/images.html'),'utf8'); assert.match(html,/id="imageModel"/); assert.match(html,/images.js\?v=20261012-official-turbo/);
+});
 
 test('promoting a reference changes submitted order and preserves the prompt',async()=>{
   const f=await fixture({draft:{imageMode:'edit',imagePrompt:'保留圖 1',refs:[{id:a},{id:b}]}});
@@ -199,6 +311,13 @@ test('upscale preview shows exact dimensions and submits a separate job without 
   const call=f.calls.find(c=>c.url===`/api/images/jobs/${a}/upscale`);
   assert.deepEqual(JSON.parse(call.options.body),{scale:4,model:'general'});
   assert.equal(f.el('imagePrompt').value,'保留原提示');
+});
+
+test('upscaling a standard source never copies the current Turbo selection into its separate upscale request',async()=>{
+  const f=await fixture({status:variants(),jobs:[imageJob({width:512,height:512,model_variant:'standard'})],draft:{imageModel:'turbo',standardImageSteps:'36',imagePrompt:'保留Turbo草稿'}});
+  const before=f.draft(); await f.click('imageJobs',{upscale:a}); await f.fire('submitUpscale','click');
+  const call=f.calls.find(item=>item.url===`/api/images/jobs/${a}/upscale`); assert.deepEqual(JSON.parse(call.options.body),{scale:2,model:'general'});
+  assert.deepEqual(f.draft(),before); assert.equal(f.el('imageModel').value,'turbo');
 });
 
 test('oversized upscale and missing model block submission',async()=>{

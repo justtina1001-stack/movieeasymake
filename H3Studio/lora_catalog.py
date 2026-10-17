@@ -10,6 +10,12 @@ from copy import deepcopy
 
 WUSHU_FILE = "wushu_h3_r2v_v7_2000.safetensors"
 COMBAT_FILE = "H3_Combat_V2.safetensors"
+CAMERA_FILE = "camera_motion_h3_lora_v1_3000_pruned.safetensors"
+PHYSICS_FILE = "wushu_spatial_physics_clean_3000_pruned.safetensors"
+ORBIT_FILE = "minimax_h3_flf2v_lora_v1.safetensors"
+SWAP_FILE = "h3_character_swap_pro4500_1000.safetensors"
+REALISM_FILE = "h3-realism-people-t2v-i2v-r2v.safetensors"
+ANIMATION_FILE = "3dsrx_minimax_h3_rank16-step00001250.safetensors"
 
 _CUSTOM = {
     WUSHU_FILE.casefold(): {
@@ -23,6 +29,7 @@ _CUSTOM = {
         "revision": "1aab496db1c70df44b3edb2cf4e90d8ae3c5b26d",
         "sha256": "f070becda73c65a19a8204384db51bb8204d2303055852172c25aa699589326e",
         "size": 310167928,
+        "default_strength": 0.5,
     },
     COMBAT_FILE.casefold(): {
         "title": "Combat Base V2 · 戰鬥動態",
@@ -35,6 +42,83 @@ _CUSTOM = {
         "revision": "233a183fb7d28b3b10d777b00d9b3ed3c691af81",
         "sha256": "5b3edb09e9d6029439badf9bc9db4ba4a355ae679b0810888de82c4793c0bac8",
         "size": 155110280,
+        "default_strength": 0.5,
+    },
+    CAMERA_FILE.casefold(): {
+        "title": "Camera Motion · 攝影機運動",
+        "purpose": "補強推近、拉遠、跟拍、環繞與航拍的運鏡表現。",
+        "family": None, "trigger": "camera motion", "trigger_required": True,
+        "trigger_placement": "prefix", "default_strength": 0.8,
+        "usage": "生成時將 camera motion 放在視覺敘述開頭，再描述主體、場景與單一主要運鏡。作者建議 0.8～1.0；可自由調整或停用。",
+        "limits": "作者使用 H3 pruned／INT8／ConvRot，未明確區分 FL2VA 與 Ref2VA；需手動指定適用家族並比較結果。超過 1.2 可能不穩，不能保證修正角色分身。尚未在本機推論驗證。",
+        "source_url": "https://huggingface.co/Jojocodex/minimax-h3-Camera-Motion-lora",
+        "known": True, "license": "apache-2.0",
+        "revision": "fac88d6196ca84f3cee014ec79c71dc73572ab0a",
+        "sha256": "9d7d98d7377f56efed3aa7d507f767936112d208906f49908ec9a8ae912be88b",
+        "size": 155109680,
+    },
+    PHYSICS_FILE.casefold(): {
+        "title": "Spatial Physics · 空間物理",
+        "purpose": "補強物體碰撞、掉落、反彈、遮擋與空間關係。",
+        "family": None, "trigger": "", "trigger_required": False,
+        "default_strength": 0.3,
+        "usage": "使用 clean 3000 pruned 版本，從作者最新建議的 0.3～0.5 開始；描述清楚物件數量、碰撞對象、運動方向與結果。作者說明可與 Turbo 比較搭配。",
+        "limits": "仍在訓練與測試階段，效果不穩；主要學習物體物理，不能保證解決人物重複或腳印數量。作者未明確區分 FL2VA／Ref2VA；需手動指定家族。尚未在本機推論驗證。",
+        "source_url": "https://huggingface.co/Jojocodex/minimax-h3-spatial-physics-lora",
+        "known": True, "license": "apache-2.0",
+        "revision": "476b24df28b9b7cc5481b750469698f5cc4b0558",
+        "sha256": "7d14f3701560068e7004159c8b2a7278bd2dbfc9e5e3b60d0bc9aef6c049919d",
+        "size": 155109672,
+    },
+    ORBIT_FILE.casefold(): {
+        "title": "360 Orbit · 定格環繞",
+        "purpose": "主體維持定格姿勢，由攝影機繞行一圈；適合角色或道具展示。",
+        "family": "fl2va", "trigger": "", "trigger_required": False,
+        "default_strength": 1.0,
+        "usage": "在首尾圖片模式使用同一張圖作首幀與尾幀，描述時間凍結、只有攝影機連續環繞。作者測試 768×768、約 3 秒、28 步、強度 1.0、關閉聲音；請依來源範例比較。",
+        "limits": "只適用 FL2VA，不可用於腳本自動影片的 Ref2VA。不是一般人物表演 LoRA；作者資料是 28 段以人物為主的短方形片段，本工具 5～15 秒及其他主題尚未推論驗證。",
+        "source_url": "https://huggingface.co/pablodawson/MiniMax-H3-360-Orbit-LoRA",
+        "known": True, "license": "minimax-h3-community-license-agreement",
+        "revision": "5ddbc2dbbe95edbbdaf5017c3e934b1d01791697",
+        "sha256": "14f13e3effaf3e729fdc0c97680344aa63f473be0c55963f963d718b3db2a4d4",
+        "size": 155111424,
+    },
+    SWAP_FILE.casefold(): {
+        "title": "Character Swap · 影片角色替換",
+        "purpose": "依角色圖片替換來源影片的指定人物，嘗試保留原場景。",
+        "family": "ref2va", "trigger": "", "trigger_required": False,
+        "default_strength": 1.0, "requires_source_video": True,
+        "usage": "到影片工作室的角色替換模式，提供原始表演影片與新角色圖片，指名要替換的人物；作者起始強度為 1.0。不需要額外觸發詞。",
+        "limits": "實驗性 Ref2VA adapter，必須有來源影片；只有圖片的腳本自動影片不能套用。長片、切鏡、動作時序、表情及音訊仍可能漂移，不能當成通用身份鎖定。尚未在本機推論驗證。",
+        "source_url": "https://huggingface.co/akatz-ai/MiniMax-H3-Character-Swap-LoRA",
+        "known": True, "license": "minimax-h3-community-license-agreement",
+        "revision": "62407e0cc8089c363abd9ce4b0b27662abb237af",
+        "sha256": "4b2a3f420ae804c0aa3422761ff84dbd1bf52eef6900ffab6d2e66df63cb4e79",
+        "size": 155110320,
+    },
+    REALISM_FILE.casefold(): {
+        "title": "Realism People · 寫實人物",
+        "purpose": "補強真人近景、皮膚紋理、表情、手勢與電影式光線。",
+        "family": "both", "trigger": "r34l1sm", "trigger_required": True,
+        "trigger_placement": "prefix", "default_strength": 0.8,
+        "usage": "作者支援文生、圖生與參考生影片；生成時在視覺敘述開頭帶入 r34l1sm。作者完整效果強度 1.0，較輕效果 0.6～0.8；可自行調整。",
+        "limits": "偏向真人與寫實畫風，可能改變 3D CG 或卡通角色的質感；不要預設所有題材都套用。作者宣稱支援兩個家族，本機尚未推論驗證，仍需比較畫面與聲音。",
+        "source_url": "https://huggingface.co/fal/MiniMax-H3-Realism-People-LoRA",
+        "known": True, "license": "minimax-h3-community-license",
+        "revision": "039cc8579d7aa357a882d7f4111b25da4f72dccc",
+        "sha256": "acc529601d2da117fb81179e76c56e488a3beab1171659d305f04fa3655b787e",
+        "size": 131229656,
+    },
+    ANIMATION_FILE.casefold(): {
+        "title": "3D Animation Style · 3D 動畫風格",
+        "purpose": "強化 3D 動畫畫風；適合探索明亮 CG、動物與奇幻角色題材。",
+        "family": None, "trigger": "3dsrx", "trigger_required": True,
+        "default_strength": 0.4, "gated": True,
+        "usage": "先到作者 Hugging Face 頁面登入並自行接受存取條款，取得檔案後放入引擎自訂 LoRA 資料夾並重新掃描。作者建議文生 0.8、圖生 0.4；更強風格可自行比較。",
+        "limits": "作者要求登入接受存取條款。模型卡只明列文生與圖生，沒有確認 Ref2VA；取得檔案後仍需手動指定家族並測試。這是風格 adapter，不保證角色數量或身份一致。",
+        "source_url": "https://huggingface.co/SOLRICKS/3D-Animation-Style-MiniMax-H3",
+        "known": True, "license": "minimax-h3-community-license-agreement",
+        "revision": "c06b8d8d44cb6ba0e5224549b3d243d1728f7019",
     },
 }
 
@@ -85,11 +169,21 @@ def _basename(name):
 
 def known_lora_family(name):
     """Only constrain an author-explicit adapter family, not unknown adapters."""
-    return "ref2va" if _basename(name) == WUSHU_FILE.casefold() else None
+    family = _CUSTOM.get(_basename(name), {}).get("family")
+    return family if family in {"ref2va", "fl2va"} else None
 
 
 def required_trigger(name):
-    return "wushu_action" if _basename(name) == WUSHU_FILE.casefold() else ""
+    metadata = _CUSTOM.get(_basename(name), {})
+    return metadata.get("trigger", "") if metadata.get("trigger_required") else ""
+
+
+def trigger_placement(name):
+    return _CUSTOM.get(_basename(name), {}).get("trigger_placement", "visual")
+
+
+def requires_source_video(name):
+    return _CUSTOM.get(_basename(name), {}).get("requires_source_video") is True
 
 
 def describe_lora(name, *, image=False):
@@ -111,6 +205,26 @@ def describe_lora(name, *, image=False):
 
 def describe_loras(names, *, image=False):
     return [describe_lora(name, image=image) for name in names]
+
+
+def recommended_lora_items(names):
+    """Show candidates without treating absent weights as engine selections."""
+    available = {}
+    for name in names:
+        available.setdefault(_basename(name), name.replace("\\", "/"))
+    items = []
+    for filename, metadata in _CUSTOM.items():
+        # Metadata keys are casefolded; recover the exact public filename.
+        exact = next(value for value in (WUSHU_FILE, COMBAT_FILE, CAMERA_FILE,
+                     PHYSICS_FILE, ORBIT_FILE, SWAP_FILE, REALISM_FILE, ANIMATION_FILE)
+                     if value.casefold() == filename)
+        installed = filename in available
+        details = {"trigger_placement": "visual", "requires_source_video": False, **deepcopy(metadata)}
+        items.append(dict(name=available.get(filename, "h3studio_custom/" + exact),
+                          **details, installed=installed,
+                          manual_selectable=installed,
+                          availability="installed" if installed else "gated" if metadata.get("gated") else "missing"))
+    return items
 
 
 def builtin_lora_items(names):

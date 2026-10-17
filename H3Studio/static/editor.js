@@ -5,6 +5,7 @@
   const motion = typeof module !== "undefined" && module.exports ? require("./editor_motion.js") : root.H3EditorMotion;
   const speedMath = typeof module !== "undefined" && module.exports ? require("./editor_speed.js") : root.H3EditorSpeed;
   const animationsCore = typeof module !== "undefined" && module.exports ? require("./editor_animations.js") : root.H3EditorAnimations;
+  const colorMath = typeof module !== "undefined" && module.exports ? require("./editor_color.js") : root.H3EditorColor;
   const { canonicalAnimations, validateAnimations, clampAnimations, splitAnimations, validateTransitions } = animationsCore;
   const { speedCurve, canonicalSpeedCurve, validateSpeedCurve, clipDuration, sourceAt, sourceAtExtended, timelineAt, speedAtSource } = speedMath;
   const { positionKeyframes, canonicalPositionKeyframes, validatePositionKeyframes, positionAt, keyframeIndexAt, upsertPositionKeyframe, positionChanges, retimePositionKeyframes } = motion;
@@ -17,6 +18,9 @@
   const speedLabel = clip => speedCurve(clip).length ? "曲線變速" : `${speedOf(clip)}×`;
   const audioClips = project => project.audio_clips || [];
   const overlays = project => project.overlays || [];
+  const isSubtitleLayer = layer => layer?.kind === "text" && typeof layer.track_id === "string" && /^subtitle_[A-Za-z0-9_-]+$/.test(layer.track_id) && layer.track_id.length <= 64;
+  const subtitleCount = project => overlays(project).filter(isSubtitleLayer).length;
+  const generalLayerCount = project => overlays(project).length - subtitleCount(project);
   const EDITOR_DIMENSIONS = new Set([360, 416, 480, 512, 544, 576, 608, 640, 720, 736, 768, 832, 854, 864, 960, 992, 1024, 1080, 1088, 1152, 1280, 1344, 1440, 1504, 1680, 1920, 2520]);
   function validateCanvasDimensions(width, height) {
     if (!Number.isInteger(width) || !Number.isInteger(height) || !EDITOR_DIMENSIONS.has(width) || !EDITOR_DIMENSIONS.has(height) || (Math.max(width, height) > 1920 && !((width === 2520 && height === 1080) || (width === 1080 && height === 2520)))) throw new Error("專案畫面尺寸不在支援範圍內。");
@@ -37,7 +41,7 @@
   }
   const mediaKind = media => media?.kind || "video";
   const mainDuration = project => project.clips.reduce((sum, clip) => sum + duration(clip), 0);
-  const totalDuration = project => Math.max(mainDuration(project), ...overlays(project).filter(layer => layer.kind === "video").map(layer => layer.end), 0);
+  const totalDuration = project => Math.max(mainDuration(project), ...overlays(project).filter(layer => layer.kind === "video").map(layer => layer.end), project.canvas_duration || 0);
   const nonzeroFades = item => ({ ...((item.fade_in ?? 0) !== 0 ? { fade_in: item.fade_in } : {}), ...((item.fade_out ?? 0) !== 0 ? { fade_out: item.fade_out } : {}) });
   const visualLength = item => item.kind && item.kind !== "video" ? item.end - item.start : duration(item);
   function transitionNeighbor(value, item) {
@@ -72,6 +76,32 @@
     // New-project requests omit clip collections; the server supplies empty ones.
     if (!ready && [...(value.clips || []), ...overlays(value)].some(item => Object.keys(canonicalAnimations(item)).length)) throw new Error("目前 Studio 尚未載入進退場動畫與轉場更新，動畫設定尚未送出儲存、草稿仍保留。請重新啟動 Studio 後再儲存。");
   }
+  function isTransitionEffect(type) { return animationsCore.TRANSITION_EFFECT_TYPES.includes(type); }
+  function isReferenceTransition(type) { return animationsCore.REFERENCE_TRANSITION_TYPES.includes(type); }
+  function requireTransitionEffectSupport(value, ready, referenceReady = false) {
+    const transitions = [...(value.clips || []), ...overlays(value)].map(item => canonicalAnimations(item).transition_out?.type);
+    if (!referenceReady && transitions.some(isReferenceTransition)) throw new Error("目前 Studio 尚未載入「放射／橫向模糊」轉場更新，設定尚未送出儲存，草稿仍保留；請重新啟動 Studio 後再儲存。");
+    if (!ready && transitions.some(type => isTransitionEffect(type) && !isReferenceTransition(type))) throw new Error("目前 Studio 尚未載入內建轉場特效，特效設定尚未送出儲存，草稿仍保留；請重新啟動 Studio 後再儲存。");
+  }
+  function canonicalTextFont(layer) {
+    return layer.kind === "text" && layer.font_family !== undefined && layer.font_family !== "default" ? { font_family: layer.font_family } : {};
+  }
+  function validateTextFont(layer) {
+    if (!Object.hasOwn(layer, "font_family")) return;
+    if (layer.kind !== "text") throw new Error("字型只適用於文字圖層。");
+    if (typeof layer.font_family !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(layer.font_family)) throw new Error("請選擇清單中的字型。");
+  }
+  function normalizeEditorFonts(payload) {
+    if (!payload || typeof payload !== "object" || !Array.isArray(payload.items)) return [];
+    const seen = new Set();
+    return payload.items.filter(item => item && typeof item.id === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(item.id) && item.available === true && !seen.has(item.id) && seen.add(item.id)).map(item => ({ id: item.id, label: typeof item.label === "string" && item.label.trim() ? item.label : item.id, family: typeof item.family === "string" ? item.family : "", bold_family: typeof item.bold_family === "string" ? item.bold_family : "", cjk: item.cjk === true, available: true, bold_available: item.bold_available === true }));
+  }
+  function requireTextFontSupport(value, ready) {
+    if (!ready && overlays(value).some(layer => Object.keys(canonicalTextFont(layer)).length)) throw new Error("目前 Studio 尚未載入字型選擇更新，字型設定尚未送出儲存，草稿仍保留；請重新啟動後再檢查。");
+  }
+  function requireTextIdleSupport(value, ready) {
+    if (!ready && overlays(value).some(layer => canonicalAnimations(layer).animation_idle)) throw new Error("目前 Studio 尚未載入文字待機動畫更新，動畫設定尚未送出儲存，草稿仍保留；請重新啟動後再檢查。");
+  }
   const TEXT_STYLE_DEFAULTS = Object.freeze({ stroke_width: 0, stroke_color: "#000000", fill_mode: "solid", gradient_start: "#ffffff", gradient_end: "#ff8a3d", gradient_angle: 90 });
   function canonicalTextStyle(layer) {
     if (layer.kind !== "text") return {};
@@ -95,18 +125,25 @@
   }
   function editableContent(project) {
     const video = clip => ({ id: clip.id, media_id: clip.media_id, in: clip.in, out: clip.out, volume: clip.volume, speed: speedOf(clip), ...curveFields(clip), ...nonzeroFades(clip), ...canonicalAnimations(clip) });
-    return { name: project.name, clips: project.clips.map(video), audio_clips: audioClips(project).map(clip => ({ ...video(clip), start: clip.start, track: clip.track, fade_in: clip.fade_in, fade_out: clip.fade_out })), overlays: overlays(project).map(canonicalOverlay), width: project.width, height: project.height, fps: project.fps };
+    const colors = colorMath.canonicalAdjustments(project);
+    return { name: project.name, clips: project.clips.map(video), audio_clips: audioClips(project).map(clip => ({ ...video(clip), start: clip.start, track: clip.track, fade_in: clip.fade_in, fade_out: clip.fade_out })), overlays: overlays(project).map(canonicalOverlay), width: project.width, height: project.height, fps: project.fps, ...(project.canvas_duration ? { canvas_duration: project.canvas_duration } : {}), ...(project.background && project.background.toLowerCase() !== "#000000" ? { background: project.background.toLowerCase() } : {}), ...(colors.length ? { color_adjustments: colors } : {}) };
+  }
+  function requireColorSupport(value, ready) {
+    if (!ready && colorMath.adjustments(value).length) throw new Error("Studio 尚未載入調色與濾鏡更新，請重新啟動後再儲存；調色草稿仍保留。");
+  }
+  function requireSavedColor(expected, actual) {
+    if (JSON.stringify(colorMath.canonicalAdjustments(expected)) !== JSON.stringify(colorMath.canonicalAdjustments(actual))) throw new Error("Studio 未完整保存調色片段，請重新啟動後再儲存；調色草稿仍保留。");
   }
   function canonicalOverlay(layer) {
     const common = { id: layer.id, kind: layer.kind, start: layer.start, end: layer.kind === "video" ? layer.start + duration(layer) : layer.end, x: layer.x, y: layer.y, width: layer.width, rotation: layer.rotation, opacity: layer.opacity, ...nonzeroFades(layer), ...canonicalAnimations(layer) };
     if (Object.hasOwn(layer, "track_id")) common.track_id = layer.track_id;
     if (positionKeyframes(layer).length) common.position_keyframes = canonicalPositionKeyframes(layer);
-    return layer.kind === "text" ? { ...common, text: typeof layer.text === "string" ? layer.text.replace(/\r\n?/g, "\n") : layer.text, font_size: layer.font_size, color: layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align, ...canonicalTextStyle(layer) } : layer.kind === "video" ? { ...common, media_id: layer.media_id, in: layer.in, out: layer.out, speed: speedOf(layer), ...curveFields(layer), volume: layer.volume } : { ...common, media_id: layer.media_id };
+    return layer.kind === "text" ? { ...common, text: typeof layer.text === "string" ? layer.text.replace(/\r\n?/g, "\n") : layer.text, font_size: layer.font_size, color: layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align, ...canonicalTextStyle(layer), ...canonicalTextFont(layer) } : layer.kind === "video" ? { ...common, media_id: layer.media_id, in: layer.in, out: layer.out, speed: speedOf(layer), ...curveFields(layer), volume: layer.volume } : { ...common, media_id: layer.media_id };
   }
   function validateOverlays(project, media = null) {
     if (project.overlays !== undefined && !Array.isArray(project.overlays)) throw new Error("圖層資料格式無效。");
     const layers = overlays(project), ids = new Set([...project.clips, ...audioClips(project)].map(clip => clip.id));
-    if (layers.length > 50) throw new Error("每個專案最多 50 個圖層。");
+    if (subtitleCount(project) > 5000 || generalLayerCount(project) > 50) throw new Error("每個專案最多 50 個圖層（一般圖層）；字幕另有 5,000 句容量。");
     const events = [], videoEvents = [], tracks = new Map(); let previousTrack = null;
     for (const layer of layers) {
       if (!layer || typeof layer.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(layer.id) || ids.has(layer.id)) throw new Error("圖層編號無效或重複。");
@@ -118,6 +155,7 @@
       tracks.get(track).push(layer); previousTrack = track;
       validatePositionKeyframes(layer);
       validateTextStyle(layer);
+      validateTextFont(layer);
       validateAnimations(layer, layer.end - layer.start);
       validateSpeedCurve(layer, layer.kind === "video" ? media?.get(layer.media_id)?.duration : undefined);
       if (layer.kind !== "video" && speedCurve(layer).length) throw new Error("曲線變速只適用於影片或音訊片段。");
@@ -142,7 +180,7 @@
   }
   function overlayRasterKey(layer, width, height) {
     const style = { ...TEXT_STYLE_DEFAULTS, ...canonicalTextStyle(layer) }, gradient = style.fill_mode === "linear_gradient";
-    return JSON.stringify({ text: layer.text.replace(/\r\n?/g, "\n"), font_size: layer.font_size, color: gradient ? undefined : layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align, boxWidth: layer.width, width, height,
+    return JSON.stringify({ text: layer.text.replace(/\r\n?/g, "\n"), font_size: layer.font_size, color: gradient ? undefined : layer.color?.toLowerCase(), background: layer.background?.toLowerCase(), bold: layer.bold, align: layer.align, boxWidth: layer.width, width, height, ...canonicalTextFont(layer),
       ...(style.stroke_width > 0 ? { stroke_width: style.stroke_width, stroke_color: style.stroke_color } : {}),
       ...(gradient ? { fill_mode: style.fill_mode, gradient_start: style.gradient_start, gradient_end: style.gradient_end, gradient_angle: style.gradient_angle } : {}) });
   }
@@ -266,6 +304,7 @@
       validateProject(draft, media);
       for (const clip of [...draft.clips, ...audioClips(draft)]) if (typeof clip.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(clip.id) || typeof clip.media_id !== "string") throw new Error("草稿片段識別碼無效。");
       const restored = { ...current, ...editableContent(draft) };
+      if (!colorMath.adjustments(draft).length) delete restored.color_adjustments;
       if (signature(draft) === signature(current)) return { status: "equivalent", project: current, draftProject: clone(draft) };
       if (canonicalSavedSignature(record.savedSignature) === signature(current)) return { status: "recoverable", project: restored, draftProject: clone(draft) };
       return { status: "conflict", project: current, draftProject: clone(draft), reason: "Studio 中的專案已更新，舊草稿已保留。可另存草稿，或下載備份後查看。" };
@@ -291,6 +330,9 @@
     return null;
   }
   function validateProject(project, media = null) {
+    if (project.canvas_duration !== undefined && (!Number.isFinite(project.canvas_duration) || project.canvas_duration < 0 || project.canvas_duration > 600 || project.canvas_duration > 0 && project.canvas_duration < 1 / project.fps - 1e-9)) throw new Error("背景片長須為 0（依影片決定）或一影格至 600 秒。");
+    if (project.background !== undefined && (typeof project.background !== "string" || !/^#[0-9a-f]{6}$/i.test(project.background))) throw new Error("背景顏色須為六位數色碼。");
+    colorMath.validateAdjustments(project);
     if (!Array.isArray(project.clips) || project.clips.length > 50) throw new Error("每個專案最多可加入 50 個片段。");
     if (!Array.isArray(audioClips(project)) || audioClips(project).length > 50) throw new Error("最多可加入 50 個音訊片段。");
     const ids = new Set();
@@ -526,7 +568,10 @@
           if (snapshot.clips.some(clip => JSON.stringify(nonzeroFades(clip)) !== JSON.stringify(nonzeroFades(saved.clips.find(item => item.id === clip.id) || {})))) throw new Error("Studio 後端未保存影片淡入淡出，請重新啟動 Studio；目前草稿仍保留。");
           if ([...snapshot.clips, ...overlays(snapshot)].some(item => JSON.stringify(canonicalAnimations(item)) !== JSON.stringify(canonicalAnimations([...saved.clips, ...overlays(saved)].find(actual => actual.id === item.id) || {})))) throw new Error("Studio 後端未完整保存進退場動畫／轉場，請重新啟動 Studio 後再儲存；目前草稿仍保留。");
           if (overlays(snapshot).some(layer => JSON.stringify(canonicalTextStyle(layer)) !== JSON.stringify(canonicalTextStyle(overlays(saved).find(item => item.id === layer.id) || {})))) throw new Error("Studio 後端未完整保存文字描邊／漸層設定，請重新啟動 Studio 後再儲存；文字樣式草稿仍保留在此頁。");
+          if (overlays(snapshot).some(layer => JSON.stringify(canonicalTextFont(layer)) !== JSON.stringify(canonicalTextFont(overlays(saved).find(item => item.id === layer.id) || {})))) throw new Error("Studio 後端未完整保存文字字型，請重新檢查後再儲存；字型與草稿仍保留在此頁。");
           if (overlays(snapshot).length && JSON.stringify(overlays(snapshot).map(canonicalOverlay)) !== JSON.stringify(overlays(saved).map(canonicalOverlay))) throw new Error("Studio 後端未完整保存文字／圖片圖層，請重新啟動 Studio；圖層草稿仍保留在此頁。");
+          if (JSON.stringify(colorMath.canonicalAdjustments(snapshot)) !== JSON.stringify(colorMath.canonicalAdjustments(saved))) throw new Error("Studio 未完整保存調色片段，請重新啟動後再儲存；調色草稿仍保留。");
+          if ((snapshot.canvas_duration || 0) !== (saved.canvas_duration || 0) || (snapshot.background || "#000000").toLowerCase() !== (saved.background || "#000000").toLowerCase()) throw new Error("Studio 未完整保存背景片長或顏色，請更新主機後再儲存；目前草稿仍保留。");
           const unchanged = signature(this.project) === signature(snapshot);
           if (unchanged) { this.project = clone(saved); this.project.audio_clips ||= []; this.project.overlays ||= []; }
           else this.project.updated_at = saved.updated_at;
@@ -798,16 +843,22 @@
     render();
     return { refresh, render, open, close };
   }
-  const core = { ...motion, ...speedMath, ...animationsCore, normalizeProjectAnimations, requireAnimationSupport, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities, editorHistoryVideoUrl, editorVideoHistoryItems, filterEditorVideoHistory, createEditorVideoHistory };
+  const core = { colorMath, requireColorSupport, requireSavedColor, ...motion, ...speedMath, ...animationsCore, normalizeProjectAnimations, requireAnimationSupport, isTransitionEffect, isReferenceTransition, requireTransitionEffectSupport, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities, editorHistoryVideoUrl, editorVideoHistoryItems, filterEditorVideoHistory, createEditorVideoHistory };
   const trackDragModule = typeof module !== "undefined" && module.exports ? require("./editor_track_drag.js") : root.H3EditorTrackDrag;
   Object.assign(core, trackDragModule.createTrackDragCore(core));
+  Object.assign(core, { canonicalTextFont, validateTextFont, normalizeEditorFonts, requireTextFontSupport, requireTextIdleSupport });
   Object.assign(core, { validateCanvasDimensions, syncOutputSize });
+  Object.assign(core, { isSubtitleLayer, subtitleCount, generalLayerCount });
   if (typeof module !== "undefined" && module.exports) module.exports = core;
   root.H3EditorCore = core;
   if (typeof document === "undefined") return;
 
   const $ = id => document.getElementById(id);
   const animationMath = root.H3EditorAnimations;
+  const subtitleMath = root.H3EditorSubtitles;
+  const autoCaptions = root.H3EditorAutoCaptions;
+  const mediaLibrary = root.H3EditorMediaLibrary;
+  const batchEffects = root.H3EditorBatchEffects;
   const escape = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const state = { session: null, media: new Map(), projects: [], selected: null, playhead: 0, zoom: 60, busy: true,
     playing: false, previewIndex: -1, loadedMedia: null, pendingSeek: null, seekSerial: 0, selectedKind: "video", queuedSeek: null,
@@ -815,18 +866,158 @@
     previews: new Map(), previewRequests: new Set(), previewTimers: new Map(), buffering: false, audioBuffering: false, backendReady: false,
     trimDrag: null, trimSuppressUntil: 0, recoveries: [], archivesReady: false, overlayDrag: null, trackDrag: null, layoutDragging: false,
     textOverlaysReady: false, textStyleReady: false, textStyleChecking: false, imageOverlaysReady: false, videoOverlaysReady: false, visualFadesReady: false, positionKeyframesReady: false, positionChecking: false, speedCurvesReady: false, overlayTracksReady: false, speedDrag: null,
-    clipAnimationsReady: false, clipTransitionsReady: false, animationChecking: false, animationPreviewEnd: null, playRequest: 0,
+    clipAnimationsReady: false, clipTransitionsReady: false, transitionEffectsReady: false, referenceTransitionsReady: false, animationChecking: false, animationPreviewEnd: null, playRequest: 0,
     transitionBuffering: false, transitionCanvases: new Map(), layerBuffering: false, lastPlaybackTick: null, rasterCache: new Map(), rasterNodes: new Map(), rasterQueue: new PreviewRequestQueue(2) };
+  Object.assign(state, { textFontsReady: false, textIdleReady: false, fonts: [], fontCatalogReady: false, fontCatalogBusy: false, fontCatalogError: "", fontCatalogSerial: 0, fontRasterGeneration: 0, subtitleTrack: "", subtitleProject: null, subtitleImportBusy: false });
+  Object.assign(state, { captionReady: false, captionChecking: false, captionJob: null, captionOtherActive: false, captionError: "", captionTimer: null, captionSerial: 0 });
+  Object.assign(state, { mediaRemovalReady: false, mediaLibraryChecking: false, mediaLibraryError: "" });
+  Object.assign(state, { subtitleWorkspaceOpen: false, subtitleWorkspaceTab: "content" });
+  Object.assign(state, { colorReady: false, colorChecking: false, colorError: "", colorWorkspaceOpen: false, colorSelection: "", colorProject: null, colorDrag: null, colorSuppressUntil: 0 });
+  Object.assign(state, { subtitleCapacity: 50, backgroundReady: false, exportHistoryReady: false, exportHistory: [], exportHistorySerial: 0, uploadBatch: null });
+  const subtitleWorkspace = root.H3EditorSubtitleWorkspace.mount(document);
   let video = $("previewVideo");
   const videoElements = [video, $("previewVideoNext")];
-  const project = () => state.speedDrag?.preview || state.overlayDrag?.transaction.preview || state.trimDrag?.transaction.preview || state.session?.project;
+  const project = () => state.colorDrag?.transaction.preview || state.speedDrag?.preview || state.overlayDrag?.transaction.preview || state.trimDrag?.transaction.preview || state.session?.project;
   const exporting = () => ["queued", "running"].includes(state.exportJob?.status);
-  const locked = () => !state.backendReady || state.busy || exporting() || !state.session || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
+  const locked = () => !state.backendReady || state.busy || !state.session || Boolean(state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
   const canSwitch = () => !locked();
-  const selectedClip = () => (state.selectedKind === "overlay" ? overlays(project() || {}) : state.selectedKind === "audio" ? audioClips(project() || {}) : project()?.clips || []).find(clip => clip.id === state.selected);
+  const selectedClip = () => (state.selectedKind === "color" ? colorMath.adjustments(project() || {}) : state.selectedKind === "overlay" ? overlays(project() || {}) : state.selectedKind === "audio" ? audioClips(project() || {}) : project()?.clips || []).find(clip => clip.id === state.selected);
+  const colorPreview = colorMath.mountPreview($("videoCanvas"), document);
+  const colorInspector = root.H3EditorColorUI.mountInspector($("colorPanel"), {
+    onControls: (fields, group) => colorAction(() => editColor(fields, group)), onRange: fields => colorAction(() => editColor(fields)),
+    onPreset: key => colorAction(() => { const preset = colorMath.PRESETS[key]; if (preset) editColor({ ...preset.controls, name: preset.label }); }),
+    onReset: () => colorAction(() => editColor({ ...Object.fromEntries(colorMath.CONTROLS.map(field => [field, 0])), strength: 100, name: "調色片段" })),
+    onAll: () => colorAction(() => editColor({ start: 0, end: totalDuration(project()) })), onAdd: scope => colorAction(() => addColor(scope)),
+    onCheck: () => action(checkColorSupport)(),
+  });
+  function colorAction(fn) { try { return fn(); } catch (error) { errorNotice(error); renderColorControls(); } }
+  function renderColorControls() {
+    const value = project(), selected = selectedClip(), key = `${state.selectedKind}:${selected?.id || ""}`;
+    if (state.colorProject !== value?.id) { state.colorProject = value?.id; state.colorWorkspaceOpen = false; state.colorSelection = ""; state.colorSourceSelection = null; }
+    if (state.colorSelection !== key) {
+      state.colorSelection = key;
+      if (state.selectedKind === "color" && selected) state.colorWorkspaceOpen = true;
+      else if (selected) state.colorWorkspaceOpen = false;
+    }
+    const open = state.colorWorkspaceOpen, inspector = $("inspectorPanel"), source = colorSourceClip();
+    inspector.classList.toggle("color-workspace-open", open);
+    $("editorShell").classList.toggle("color-workspace-open", open);
+    $("openColorWorkspace").disabled = !state.session || state.busy;
+    if (open) {
+      $("inspectorTitle").textContent = "調色與濾鏡"; inspector.setAttribute("aria-label", "調色與濾鏡");
+      $("showPositionAnimation").classList.add("hidden");
+      $("closeSubtitleWorkspace").classList.remove("hidden");
+    } else if (!state.subtitleWorkspaceOpen) $("showPositionAnimation").classList.remove("hidden");
+    colorInspector.render({ open, selected: state.selectedKind === "color" ? selected || null : null, blocked: locked(), ready: state.colorReady, totalDuration: value ? totalDuration(value) : 0, canUseClip: Boolean(source), checking: state.colorChecking, error: state.colorError });
+    colorPreview.update(value || {}, state.playhead);
+  }
+  function colorSourceClip() {
+    const source = state.colorSourceSelection || { kind: state.selectedKind, id: state.selected }, value = project();
+    if (source.kind === "video") return value?.clips.find(item => item.id === source.id) || null;
+    if (source.kind === "overlay") return overlays(value || {}).find(item => item.id === source.id && item.kind === "video") || null;
+    return null;
+  }
+  function openColorWorkspace() {
+    if (!state.session || state.busy) return;
+    if (state.selectedKind === "video" || state.selectedKind === "overlay" && selectedClip()?.kind === "video") state.colorSourceSelection = { kind: state.selectedKind, id: state.selected };
+    state.subtitleWorkspaceOpen = false; state.colorWorkspaceOpen = true;
+    state.colorSelection = `${state.selectedKind}:${selectedClip()?.id || ""}`;
+    renderDisabled(); $("inspectorPanel").scrollTop = 0;
+  }
+  function selectColor(id, reposition = true) {
+    if (locked() || !colorMath.adjustments(project() || {}).some(item => item.id === id)) return;
+    pause(); state.session.group = null; state.selectedKind = "color"; state.selected = id;
+    state.subtitleWorkspaceOpen = false; state.colorWorkspaceOpen = true;
+    if (reposition) seek(Math.min(selectedClip().start, Math.max(0, totalDuration(project()) - 1 / project().fps)), false);
+    render();
+  }
+  function editColor(fields, group = null) {
+    if (locked() || state.selectedKind !== "color" || !state.colorReady) return;
+    if (!group) state.session.group = null;
+    pause(); edit(value => { const item = colorMath.adjustments(value).find(entry => entry.id === state.selected); if (item) Object.assign(item, fields); }, group, false);
+  }
+  function addColor(scope) {
+    if (locked() || !state.colorReady) return;
+    const value = project(), length = totalDuration(value), frame = 1 / value.fps;
+    if (length < frame - 1e-9) throw new Error("請先加入影片，再新增調色片段。");
+    let start = 0, end = length;
+    if (scope === "clip") {
+      const source = colorSourceClip(), selection = state.colorSourceSelection || { kind: state.selectedKind, id: state.selected };
+      if (!source) throw new Error("請先選取要調色的影片片段。");
+      start = selection.kind === "overlay" ? source.start : core.mainClipStart(value, source.id); end = Math.min(length, start + duration(source));
+    } else if (scope === "range") { start = Math.min(state.playhead, Math.max(0, length - frame)); end = Math.min(length, start + 3); }
+    const id = uid();
+    edit(next => { next.color_adjustments ||= []; next.color_adjustments.push({ id, start, end, ...colorMath.DEFAULTS }); }, null, false);
+    selectColor(id);
+  }
+  async function checkColorSupport() {
+    if (state.colorChecking || state.busy) return;
+    state.colorChecking = true; state.colorError = ""; renderColorControls();
+    try { const capabilities = await requireCapabilities(api); state.colorReady = capabilities.color_adjustments === true; }
+    catch (error) { state.colorError = `無法檢查調色功能：${error.message}`; }
+    finally { state.colorChecking = false; renderDisabled(); }
+  }
+  function renderColorTrack(value) {
+    const items = colorMath.adjustments(value), node = $("colorTrack"); node.classList.toggle("hidden", !items.length);
+    if (!items.length) { node.innerHTML = ""; node.style.height = "0px"; return 0; }
+    const result = root.H3EditorColorUI.timelineMarkup(value, { selectedId: state.selectedKind === "color" ? state.selected : null, zoom: state.zoom, escape, locked: locked() });
+    node.innerHTML = result.html; node.style.height = `${result.height}px`; return result.height;
+  }
+  function beginColorGesture(event) {
+    const node = event.target.closest("[data-color-id]");
+    if (!node || locked() || !state.colorReady || state.session.inFlight || event.button !== 0 || event.isPrimary === false) return;
+    const item = colorMath.adjustments(project()).find(entry => entry.id === node.dataset.colorId); if (!item) return;
+    event.preventDefault(); event.stopPropagation(); pause(); state.session.group = null;
+    const mode = event.target.closest("[data-color-edge]")?.dataset.colorEdge || "move", anchors = [0, state.playhead, totalDuration(project())];
+    let cursor = 0; for (const clip of project().clips) { anchors.push(cursor); cursor += duration(clip); anchors.push(cursor); }
+    for (const entry of colorMath.adjustments(project())) if (entry.id !== item.id) anchors.push(entry.start, entry.end);
+    const transaction = new root.H3EditorColorUI.AdjustmentTransaction(state.session, item.id, mode, { maxEnd: Math.min(600, Math.max(item.end, totalDuration(project()))), snap: anchors, snapTolerance: 6 / state.zoom });
+    state.selectedKind = "color"; state.selected = item.id; state.subtitleWorkspaceOpen = false; state.colorWorkspaceOpen = true;
+    state.colorDrag = { transaction, node, pointerId: event.pointerId, startX: event.clientX, lastX: event.clientX, scrollStart: $("timelineScroll").scrollLeft, zoom: state.zoom, frame: null, activated: false, invalid: false };
+    try { $("timelineCanvas").setPointerCapture(event.pointerId); } catch (error) { transaction.cancel(); state.colorDrag = null; throw error; }
+    for (const clip of $("colorTrack").querySelectorAll("[data-color-id]")) clip.classList.toggle("selected", clip === node);
+    renderInspector(); renderDisabled();
+  }
+  function renderColorGesture() {
+    const drag = state.colorDrag; if (!drag) return;
+    const item = colorMath.adjustments(drag.transaction.preview).find(entry => entry.id === state.selected);
+    if (item) {
+      drag.node.style.left = `${item.start * drag.zoom}px`; drag.node.style.width = `${(item.end - item.start) * drag.zoom}px`;
+      for (const handle of drag.node.querySelectorAll("[data-color-edge]")) handle.setAttribute("aria-valuenow", String(handle.dataset.colorEdge === "left" ? item.start : item.end));
+    }
+    drag.node.classList.toggle("invalid", Boolean(drag.invalid));
+    renderColorControls(); colorPreview.update(project(), state.playhead);
+  }
+  function flushColorGesture() {
+    const drag = state.colorDrag; if (!drag) return; drag.frame = null;
+    if (!drag.activated && Math.abs(drag.lastX - drag.startX) < 3) return;
+    drag.activated = true;
+    const scroll = $("timelineScroll"), rect = scroll.getBoundingClientRect(), before = scroll.scrollLeft;
+    if (drag.lastX < rect.left + 24) scroll.scrollLeft -= 12;
+    else if (drag.lastX > rect.right - 24) scroll.scrollLeft += 12;
+    try { drag.transaction.update((drag.lastX - drag.startX + scroll.scrollLeft - drag.scrollStart) / drag.zoom); drag.invalid = false; }
+    catch (error) { drag.invalid = error.message; }
+    renderColorGesture();
+    if (scroll.scrollLeft !== before) drag.frame = requestAnimationFrame(flushColorGesture);
+  }
+  function finishColorGesture(commit = true) {
+    const drag = state.colorDrag; if (!drag) return;
+    if (drag.frame !== null) { cancelAnimationFrame(drag.frame); drag.frame = null; }
+    if (commit) flushColorGesture();
+    if (drag.frame !== null) { cancelAnimationFrame(drag.frame); drag.frame = null; }
+    state.colorDrag = null;
+    try { if (commit && drag.activated && !drag.invalid) drag.transaction.commit(); else drag.transaction.cancel(); }
+    catch (error) { errorNotice(error); }
+    finally { if ($("timelineCanvas").hasPointerCapture(drag.pointerId)) $("timelineCanvas").releasePointerCapture(drag.pointerId); }
+    state.colorSuppressUntil = performance.now() + 180; render();
+    if (commit && drag.invalid) notify(drag.invalid);
+    if (commit && !drag.activated) seek(Math.min(selectedClip()?.start || 0, Math.max(0, totalDuration(project()) - 1 / project().fps)), false);
+  }
   const animationEditor = root.H3EditorAnimationUI.mountAnimationEditor($("animationEditor"), {
     onChoose: (type, tab) => { try { setSelectedAnimation(type, tab); } catch (error) { errorNotice(error); renderAnimationControls(); } },
     onDuration: (length, tab) => { try { setSelectedAnimationDuration(length, tab); } catch (error) { errorNotice(error); renderAnimationControls(); } },
+    onIdleChange: (field, value) => { try { setSelectedIdleValue(field, value); } catch (error) { errorNotice(error); renderAnimationControls(); } },
+    onApplyTrack: tab => { try { applySelectedTrackEffect(tab); } catch (error) { errorNotice(error); renderAnimationControls(); } },
     onPreview: tab => previewSelectedAnimation(tab).catch(errorNotice),
     onRecheck: () => checkAnimationSupport().catch(errorNotice),
   });
@@ -838,17 +1029,24 @@
     return { item: next.clip, length: next.length, cut: next.start, name: state.media.get(next.clip.media_id)?.name || "下一片段" };
   }
   function renderAnimationControls() {
-    const item = selectedClip(), visual = item && state.selectedKind !== "audio";
+    const item = selectedClip(), visual = item && !["audio", "color"].includes(state.selectedKind);
     animationEditor.render({ item: visual ? item : null, kind: state.selectedKind,
       length: visual ? state.selectedKind === "overlay" ? item.end - item.start : duration(item) : 0,
       next: visual ? animationNext(item) : null, disabled: locked(), supported: state.clipAnimationsReady,
-      transitionSupported: state.clipTransitionsReady, checking: state.animationChecking });
+      transitionSupported: state.clipTransitionsReady, effectsSupported: state.transitionEffectsReady, referenceSupported: state.referenceTransitionsReady, idleSupported: state.textIdleReady, checking: state.animationChecking });
   }
   function setSelectedAnimation(type, tab) {
-    if (locked() || !selectedClip() || state.selectedKind === "audio") return;
+    if (locked() || !selectedClip() || ["audio", "color"].includes(state.selectedKind)) return;
+    if (tab === "idle") {
+      if (state.selectedKind !== "overlay" || selectedClip().kind !== "text") return;
+      if (!state.textIdleReady) throw new Error("請重新檢查文字待機動畫功能，設定與草稿仍保留。");
+      pause(); edit(value => { const item = overlays(value).find(entry => entry.id === state.selected); if (type === "none") delete item.animation_idle; else item.animation_idle = { preset: type, speed: item.animation_idle?.speed ?? 1, amount: item.animation_idle?.amount ?? 1 }; }, null, false);
+      renderAnimationControls(); return;
+    }
     if (!(tab === "transition" ? state.clipTransitionsReady : state.clipAnimationsReady)) throw new Error("請先儲存並重新啟動 Studio，以載入動畫與轉場。");
     const next = tab === "transition" ? animationNext() : null;
     if (tab === "transition" && !next) throw new Error("轉場需要同軌相鄰的兩段影片。");
+    if (tab === "transition") requireSelectedTransitionSupport(type);
     const field = tab === "transition" ? "transition_out" : `animation_${tab}`;
     pause();
     edit(value => {
@@ -857,16 +1055,39 @@
       if (type === "none") delete item[field];
       else {
         const limit = tab === "transition" ? Math.min(5, length, next.length) : Math.min(5, length);
-        item[field] = { type, duration: Math.min(item[field]?.duration || 0.6, limit), ...(next ? { next_id: next.item.id } : {}) };
+        const defaultDuration = type === "radial_zoom" ? 1 : type === "horizontal_blur" ? 0.5 : 0.6;
+        item[field] = { type, duration: Math.min(item[field]?.duration || defaultDuration, limit), ...(next ? { next_id: next.item.id } : {}) };
         animationMath.clampAnimations(item, length);
       }
     }, null, false);
     renderAnimationControls();
   }
+  function setSelectedIdleValue(field, value) {
+    const item = selectedClip();
+    if (locked() || state.selectedKind !== "overlay" || item?.kind !== "text" || !item.animation_idle || !["speed", "amount"].includes(field)) return;
+    if (!state.textIdleReady) throw new Error("請重新檢查文字待機動畫功能，設定與草稿仍保留。");
+    if (!Number.isFinite(value) || value < (field === "speed" ? 0.25 : 0) || value > (field === "speed" ? 4 : 2)) throw new Error("待機速度請填 0.25～4 倍，強度請填 0～200%。");
+    pause(); edit(project => { const current = overlays(project).find(layer => layer.id === item.id); if (field === "amount" && value === 0) delete current.animation_idle; else current.animation_idle = { ...current.animation_idle, [field]: value }; }, null, false);
+    renderAnimationControls();
+  }
+  function requireSelectedTransitionSupport(type) {
+    if (isReferenceTransition(type) ? !state.referenceTransitionsReady : isTransitionEffect(type) && !state.transitionEffectsReady) throw new Error("請重新啟動新版 Studio 以啟用此轉場特效；目前設定與草稿仍保留。");
+  }
+  function applySelectedTrackEffect(tab) {
+    const item = selectedClip();
+    if (locked() || !item || state.selectedKind === "audio") return;
+    if (!(tab === "transition" ? state.clipTransitionsReady : tab === "idle" ? state.textIdleReady : state.clipAnimationsReady)) throw new Error("請先重新檢查動畫功能。");
+    if (tab === "transition") requireSelectedTransitionSupport(item.transition_out?.type || "none");
+    const result = batchEffects.applyTrackEffect(project(), { kind: state.selectedKind, itemId: item.id, tab });
+    if (!result.count) { notify("這個軌道的設定已一致，沒有需要更動的片段。"); return; }
+    pause(); edit(value => { value.clips = result.project.clips; value.overlays = result.project.overlays; }, null, false);
+    notify(`已套用 ${result.count} 處${result.clamped ? `；${result.clamped} 處依短片段縮短時長` : ""}${result.skipped ? `；略過 ${result.skipped} 處不相接或不適用的片段` : ""}。可按復原還原整次套用。`);
+  }
   function setSelectedAnimationDuration(seconds, tab) {
     if (!Number.isFinite(seconds) || seconds <= 0) throw new Error("動畫時長需大於 0 秒。");
     const item = selectedClip(), field = tab === "transition" ? "transition_out" : `animation_${tab}`;
     if (!item?.[field] || locked()) return;
+    if (tab === "transition") requireSelectedTransitionSupport(item[field].type);
     const length = state.selectedKind === "overlay" ? item.end - item.start : duration(item), next = animationNext(item);
     const other = tab === "in" ? item.animation_out?.duration || 0 : item.animation_in?.duration || 0;
     const limit = tab === "transition" ? Math.min(5, length, next?.length || 0) : Math.min(5, length - other);
@@ -877,11 +1098,13 @@
   async function previewSelectedAnimation(tab) {
     const item = selectedClip(), field = tab === "transition" ? "transition_out" : `animation_${tab}`;
     if (!item?.[field] || locked()) return;
+    if (tab === "transition") requireSelectedTransitionSupport(item[field].type);
     const session = state.session;
     const length = state.selectedKind === "overlay" ? item.end - item.start : duration(item), start = clipTimelineStart(project(), state.selectedKind, item.id);
     const next = animationNext(item), durationValue = item[field].duration;
-    const previewStart = tab === "transition" ? next.cut - durationValue / 2 : tab === "out" ? start + length - durationValue : start;
-    const previewEnd = tab === "transition" ? next.cut + durationValue / 2 : tab === "out" ? start + length : start + durationValue;
+    const previewStart = tab === "idle" ? start + (item.animation_in?.duration || 0) : tab === "transition" ? next.cut - durationValue / 2 : tab === "out" ? start + length - durationValue : start;
+    const previewEnd = tab === "idle" ? start + length - (item.animation_out?.duration || 0) : tab === "transition" ? next.cut + durationValue / 2 : tab === "out" ? start + length : start + durationValue;
+    if (tab === "idle" && (previewEnd <= previewStart || item[field].preset === "none" || item[field].amount === 0)) return;
     pause(); seek(previewStart, false);
     const playback = togglePlay(), request = state.playRequest;
     if (!await playback || state.session !== session || state.playRequest !== request || !state.playing) return;
@@ -890,19 +1113,20 @@
   async function checkAnimationSupport() {
     if (state.animationChecking) return;
     state.animationChecking = true; renderAnimationControls();
-    try { const capabilities = await requireCapabilities(api); state.clipAnimationsReady = capabilities.clip_animations === true; state.clipTransitionsReady = capabilities.clip_transitions === true; notify(state.clipAnimationsReady && state.clipTransitionsReady ? "入場、退場動畫與影片轉場已啟用。" : "目前仍是舊版 Studio，請儲存剪輯後關閉啟動視窗並重新啟動。"); }
+    try { const capabilities = await requireCapabilities(api); state.clipAnimationsReady = capabilities.clip_animations === true; state.clipTransitionsReady = capabilities.clip_transitions === true; state.transitionEffectsReady = capabilities.transition_effects === true; state.referenceTransitionsReady = capabilities.reference_transitions === true;
+    state.colorReady = capabilities.color_adjustments === true; state.textIdleReady = capabilities.text_idle_animations === true; notify(state.clipAnimationsReady && state.clipTransitionsReady ? state.referenceTransitionsReady && state.transitionEffectsReady ? "入場、退場動畫與全部影片轉場特效已啟用。" : "入場、退場動畫與影片轉場已啟用；尚未啟用的特效需重新啟動新版 Studio。" : "目前仍是舊版 Studio，請儲存剪輯後關閉啟動視窗並重新啟動。"); }
     finally { state.animationChecking = false; renderAnimationControls(); }
   }
   const previewViewport = root.H3EditorPreview.mountPreviewViewport({ stage: $("videoStage"), canvas: $("videoCanvas"),
     zoomSelect: $("previewZoom"), zoomIn: $("previewZoomIn"), zoomOut: $("previewZoomOut"), fitButton: $("previewFit"), handButton: $("previewHand") },
-    { window: root, document, isBlocked: () => !state.session || state.busy || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) });
+    { window: root, document, isBlocked: () => !state.session || state.busy || Boolean(state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) });
   const trackDragUI = root.H3EditorTrackDragUI.mountTrackDrag($("timelineCanvas"));
   const layoutController = root.H3EditorLayout.mountEditorLayout({ shell: $("editorShell"), viewer: $("previewPanel"), stage: $("videoStage"),
     timeline: $("timelinePanel"), library: $("libraryPanel"), inspector: $("inspectorPanel"),
     librarySeparator: $("layoutLibrarySeparator"), inspectorSeparator: $("layoutInspectorSeparator"), viewerSeparator: $("layoutViewerSeparator"),
     maximizeButton: $("previewMaximize"), resetButton: $("layoutReset") }, {
     window: root, document,
-    isBlocked: () => Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || previewViewport.isPanning),
+    isBlocked: () => Boolean(state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || previewViewport.isPanning),
     onDragState: active => { state.layoutDragging = active; renderDisabled(); },
     onResize: () => { previewViewport.cancelPan(); resizePreview(); },
   });
@@ -936,7 +1160,7 @@
       curveDuration: clip ? duration(clip) : 0, disabled: locked() && !state.speedDrag, supported: state.speedCurvesReady });
   }
   function seekSelectedSource(sourceTime) {
-    const clip = selectedSpeedVideo(); if (!clip || state.speedDrag || state.trimDrag || state.overlayDrag) return;
+    const clip = selectedSpeedVideo(); if (!clip || state.speedDrag || state.colorDrag || state.trimDrag || state.overlayDrag) return;
     pause(); seek(clipTimelineStart(project(), state.selectedKind, clip.id) + timelineAt(clip, clamp(sourceTime, clip.in, clip.out)), false);
   }
   function applySelectedSpeed(changes) {
@@ -990,7 +1214,7 @@
     ended() { nextPreviewClip(); },
     error(error, url) {
       const point = project() && locateTime(project(), state.playhead), cached = point && state.previews.get(point.clip.media_id);
-      if (cached?.url === url) { state.previews.set(point.clip.media_id, { ...cached, status: "failed", error: "預覽快取無法播放，已改用原始素材。" }); if (!state.trimDrag && !state.overlayDrag) seek(state.playhead, state.playing); renderCacheStatus(); return; }
+      if (cached?.url === url) { state.previews.set(point.clip.media_id, { ...cached, status: "failed", error: "預覽快取無法播放，已改用原始素材。" }); if (!state.colorDrag && !state.trimDrag && !state.overlayDrag) seek(state.playhead, state.playing); renderCacheStatus(); return; }
       pause(); errorNotice(error);
     },
   });
@@ -1010,13 +1234,15 @@
     pause(); errorNotice(error);
   } });
   function clearTransitionPreview() {
+    state.transitionPreviewFailure = null;
     transitionPreview.clear(); for (const item of state.transitionCanvases.values()) item.canvas.remove(); state.transitionCanvases.clear();
+    for (const item of state.rasterNodes.values()) item.node.style.visibility = "";
     videoElements.forEach(element => { element.style.visibility = ""; }); state.transitionBuffering = false;
   }
   function drawTransitionSource(canvas, element, clip, local, length, kind) {
     const context = canvas.getContext("2d"), width = canvas.width, height = canvas.height;
     context.clearRect(0, 0, width, height);
-    if (kind === "video") { context.fillStyle = "#000"; context.fillRect(0, 0, width, height); }
+    if (kind === "video") { context.fillStyle = project()?.background || "#000"; context.fillRect(0, 0, width, height); }
     if (!element?.videoWidth || !element.videoHeight || element.readyState < 2) return;
     const transform = animationMath.animationTransformAt(clip, local, length);
     const position = kind === "overlay" ? positionAt(clip, local) : { x: 0.5, y: 0.5 };
@@ -1029,6 +1255,8 @@
   }
   function syncTransitionPreview(playing) {
     const value = project(); if (!value) return true;
+    if (state.transitionPreviewFailure?.project === value && state.transitionPreviewFailure.time === state.playhead) return false;
+    state.transitionPreviewFailure = null;
     const pairs = animationMath.transitionPairs(value, duration), active = animationMath.transitionAt(value, state.playhead, duration);
     const ready = transitionPreview.sync(pairs, state.playhead, playing, value.fps), keep = new Set(active.map(pair => pair.id));
     for (const [id, item] of state.transitionCanvases) if (!keep.has(id)) { item.canvas.remove(); state.transitionCanvases.delete(id); }
@@ -1041,23 +1269,31 @@
         (pair.kind === "video" ? $("videoCanvas") : $("overlayCanvas")).append(canvas);
         item = { canvas, from: document.createElement("canvas"), to: document.createElement("canvas") }; state.transitionCanvases.set(pair.id, item);
       }
-      const width = Math.max(1, Math.min(value.width, 1280, Math.ceil($("videoCanvas").clientWidth * (root.devicePixelRatio || 1)))), height = Math.max(1, Math.round(width * value.height / value.width));
+      const effect = animationMath.TRANSITION_EFFECT_TYPES.includes(pair.type), multipleEffects = active.filter(item => animationMath.TRANSITION_EFFECT_TYPES.includes(item.type)).length > 1;
+      const effectLimit = pair.type === "horizontal_blur" ? multipleEffects ? 200 : 240 : pair.type === "radial_zoom" ? multipleEffects ? 300 : 360 : multipleEffects ? 640 : 960;
+      const aspect = value.width / value.height, pixelWidth = effect ? Math.sqrt(effectLimit ** 2 * 0.5625 * aspect) : Infinity;
+      const width = Math.max(1, Math.floor(Math.min(value.width, effect ? effectLimit : 1280, effect ? effectLimit * aspect : Infinity, pixelWidth, Math.ceil($("videoCanvas").clientWidth * (root.devicePixelRatio || 1))))), height = Math.max(1, Math.round(width / aspect));
       for (const canvas of [item.canvas, item.from, item.to]) if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
       if (pair.kind === "overlay") {
         const index = Math.min(overlays(value).indexOf(pair.from), overlays(value).indexOf(pair.to)); item.canvas.style.zIndex = index + 1;
         for (const id of [pair.from.id, pair.to.id]) { const node = state.rasterNodes.get(id)?.node; if (node) node.style.visibility = "hidden"; }
       }
       const elements = transitionPreview.get(pair.id); if (!elements) continue;
-      const drawKey = [state.playhead, width, height, elements.from.readyState, elements.from.currentTime, elements.from.seeking, elements.to.readyState, elements.to.currentTime, elements.to.seeking].join("|");
+      const drawKey = [state.playhead, pair.type, width, height, elements.from.readyState, elements.from.currentTime, elements.from.seeking, elements.to.readyState, elements.to.currentTime, elements.to.seeking].join("|");
       if (!playing && ready && item.lastDrawProject === value && item.lastDrawKey === drawKey) continue;
       drawTransitionSource(item.from, elements.from, pair.from, pair.fromLocal, pair.fromLength, pair.kind);
       drawTransitionSource(item.to, elements.to, pair.to, pair.toLocal, pair.toLength, pair.kind);
-      const context = item.canvas.getContext("2d"), visual = animationMath.transitionVisualAt(pair.type, pair.progress);
-      context.clearRect(0, 0, width, height);
-      for (const [role, source] of [["from", item.from], ["to", item.to]]) {
-        context.save(); context.beginPath(); context.rect(visual[role].left * width, 0, (visual[role].right - visual[role].left) * width, height); context.clip();
-        context.globalAlpha = visual[role].opacity; context.globalCompositeOperation = pair.type === "crossfade" && role === "to" ? "lighter" : "source-over";
-        context.drawImage(source, 0, 0); context.restore();
+      if (effect) {
+        try { root.H3EditorTransitionEffects.render(item.canvas, item.from, item.to, pair.type, pair.progress); }
+        catch (error) { clearTransitionPreview(); state.transitionPreviewFailure = { project: value, time: state.playhead }; pause(); errorNotice(new Error(`轉場特效預覽無法產生：${error.message || error}`)); return false; }
+      } else {
+        const context = item.canvas.getContext("2d"), visual = animationMath.transitionVisualAt(pair.type, pair.progress);
+        context.clearRect(0, 0, width, height);
+        for (const [role, source] of [["from", item.from], ["to", item.to]]) {
+          context.save(); context.beginPath(); context.rect(visual[role].left * width, 0, (visual[role].right - visual[role].left) * width, height); context.clip();
+          context.globalAlpha = visual[role].opacity; context.globalCompositeOperation = pair.type === "crossfade" && role === "to" ? "lighter" : "source-over";
+          context.drawImage(source, 0, 0); context.restore();
+        }
       }
       item.lastDrawProject = ready ? value : null; item.lastDrawKey = ready ? drawKey : null;
     }
@@ -1078,7 +1314,7 @@
     if (!response.ok) { const error = new Error(data.error || `請求未完成（${response.status}），請稍後再試。`); error.status = response.status; error.data = data; throw error; }
     return data;
   }
-  const json = (method, data = {}) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  const json = (method, data = {}) => {     if (Array.isArray(data.clips) && !state.backgroundReady && (data.canvas_duration || data.background && data.background.toLowerCase() !== "#000000")) throw new Error("主機尚未載入背景片長更新，請重新啟動 Studio 後再儲存；目前草稿仍保留。");     if (Array.isArray(data.overlays) && core.subtitleCount(data) > state.subtitleCapacity) throw new Error("主機尚未載入 5,000 句字幕更新，請重新啟動 Studio 後再儲存；目前字幕仍保留。");     return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) };   };
   const list = (data, key) => Array.isArray(data) ? data : (data[key] || data.items || []);
   function storageGet(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
   function storagePut(key, value) { try { value === null ? localStorage.removeItem(key) : localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; } }
@@ -1139,14 +1375,18 @@
     session.draftOwner = uid();
     session.autosaver = new ProjectAutoSaver(session, snapshot => {
       validateProject(snapshot, state.media);
+      requireColorSupport(snapshot, state.colorReady);
       requireTextStyleSupport(snapshot, state.textStyleReady);
+      requireTextFontSupport(snapshot, state.textFontsReady);
+      requireTextIdleSupport(snapshot, state.textIdleReady);
       requireAnimationSupport(snapshot, state.clipAnimationsReady && state.clipTransitionsReady);
+      requireTransitionEffectSupport(snapshot, state.transitionEffectsReady, state.referenceTransitionsReady);
       if (overlays(snapshot).some(layer => layer.kind === "text" ? !state.textOverlaysReady : layer.kind === "video" ? !state.videoOverlaysReady : !state.imageOverlaysReady)) throw new Error("Studio 後端尚未載入圖層更新，請重新啟動 Studio 後再儲存；目前圖層草稿仍保留。");
       if (!state.overlayTracksReady && overlays(snapshot).some(layer => Object.hasOwn(layer, "track_id"))) throw new Error("Studio 尚未載入同軌剪輯更新，請重新啟動 Studio；目前草稿仍保留。");
       if (!state.visualFadesReady && [...snapshot.clips, ...overlays(snapshot)].some(item => (item.fade_in ?? 0) > 0 || (item.fade_out ?? 0) > 0)) throw new Error("Studio 後端尚未載入淡入淡出更新，請重新啟動 Studio 後再儲存。");
       return api(`/api/editor/projects/${snapshot.id}`, json("PUT", { ...snapshot, name: snapshot.name.trim() || "未命名專案" }));
     }, {
-      canSave: () => state.session === session && !state.trimDrag && !state.overlayDrag && !state.speedDrag && !state.trackDrag && !state.busy,
+      canSave: () => state.session === session && !state.colorDrag && !state.trimDrag && !state.overlayDrag && !state.speedDrag && !state.trackDrag && !state.busy,
       onState: () => { if (state.session === session) renderStatus(); },
       onSaved: saved => { if (state.session === session) { state.projects = state.projects.map(item => item.id === saved.id ? saved : item); renderProjectList(); renderStatus(); } },
       onError: error => { if (state.session === session) { errorNotice(new Error(error.status === 409 ? "專案已在其他視窗更新。自動儲存已停止；你的剪輯仍在此頁，請另存新專案。" : `自動儲存未完成：${error.message} ${session.localDraftFailed ? "目前剪輯仍在此頁，但瀏覽器備份失敗；請保持頁面開啟並按「儲存」重試。" : "草稿仍保留，請按「儲存」重試。"}`)); } },
@@ -1154,7 +1394,8 @@
     session.onChange = () => sessionChanged(session);
     state.session = session;
     state.selected = value.clips[0]?.id || null; state.selectedKind = "video"; state.playhead = 0; state.previewIndex = -1;
-    state.loadedMedia = null; state.pendingSeek = null; state.exportJob = null;
+    state.loadedMedia = null; state.pendingSeek = null;
+    if (!exporting()) state.exportJob = null;
     closeExportDialog();
     clearTimeout(state.exportTimer);
     storagePut("h3-editor-last-project", value.id);
@@ -1182,8 +1423,11 @@
     renderRecovery();
     if (session.dirty) sessionChanged(session);
     render(); seek(0, false); videoHistoryUI.render();
+    refreshAutoCaptions().catch(error => { state.captionError = error.message; renderAutoCaptionControls(); });
     const savedExport = storageGet(`h3-editor-export:${value.id}`);
-    if (savedExport?.id) { state.exportJob = savedExport; renderExport(); if (exporting()) pollExport(); }
+    if (!exporting() && savedExport?.id) state.exportJob = { ...savedExport, project_id: value.id };
+    renderExport(); if (exporting()) pollExport();
+    loadExportHistory();
   }
   function renderStatus() {
     if (!state.session) return;
@@ -1206,59 +1450,124 @@
     previewViewport.render();
     layoutController.render();
     const noClips = !project() || totalDuration(project()) <= 0, selected = selectedClip(), index = project()?.clips.indexOf(selected) ?? -1;
-    const isOverlay = state.selectedKind === "overlay", tracks = project() ? core.overlayTrackGroups(project()) : [], layerIndex = selected && isOverlay ? tracks.findIndex(track => track.id === core.overlayTrackId(selected)) : -1;
+    const isOverlay = state.selectedKind === "overlay", isColor = state.selectedKind === "color", tracks = project() ? core.overlayTrackGroups(project()) : [], layerIndex = selected && isOverlay ? tracks.findIndex(track => track.id === core.overlayTrackId(selected)) : -1;
     ["uploadZone", "addAudio", "emptyAddMedia", "projectName", "outputSize", "outputFps", "saveCopy", "conflictSaveCopy", "reloadProject"].forEach(id => $(id).disabled = locked());
+    for (const id of ["canvasDuration", "canvasBackground"]) $(id).disabled = locked() || !state.backgroundReady;
+    for (const id of ["uploadZone", "addAudio", "addImageOverlay"]) if (state.uploadBatch) $(id).disabled = true;
     $("restoreDraft").disabled = locked() || !state.draft?.resolution.draftProject;
     ["discardDraft", "downloadDraft"].forEach(id => $(id).disabled = locked() || !state.draft);
     ["newProject", "projectSelect", "openProject"].forEach(id => $(id).disabled = !canSwitch());
     ["downloadProjectArchive", "openProjectArchive"].forEach(id => $(id).disabled = locked() || !state.archivesReady);
     document.querySelectorAll("[data-recovery-copy]").forEach(button => button.disabled = locked());
     $("saveProject").disabled = locked() || Boolean(state.session?.inFlight);
-    $("exportProject").disabled = !state.backendReady || state.busy || !state.session || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) || (noClips && !state.exportJob);
+    $("exportProject").disabled = !state.backendReady || state.busy || !state.session || Boolean(state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) || (noClips && !state.exportJob);
     $("exportProject").textContent = exporting() ? `匯出中 ${Math.round(state.exportJob.progress || 0)}%` : "匯出 MP4 ↗";
-    $("startExport").disabled = locked() || noClips || Boolean(state.session?.conflict);
+    $("startExport").disabled = locked() || exporting() || noClips || Boolean(state.session?.conflict);
     $("startExport").textContent = state.busy ? "正在準備匯出…" : exporting() ? "正在匯出…" : "匯出目前剪輯";
     $("autoDownloadExport").disabled = state.busy || exporting();
     $("undo").disabled = locked() || !state.session?.undoStack.length;
     $("redo").disabled = locked() || !state.session?.redoStack.length;
     ["duplicateClip", "deleteClip"].forEach(id => $(id).disabled = locked() || !selected);
-    $("resetTrim").disabled = locked() || !selected || isOverlay;
-    $("moveEarlier").disabled = locked() || !selected || (isOverlay ? layerIndex <= 0 : state.selectedKind === "audio" ? selected.start <= 0 : index <= 0);
-    $("moveLater").disabled = locked() || !selected || (isOverlay ? layerIndex >= tracks.length - 1 : state.selectedKind === "audio" ? selected.start >= 600 : index === project().clips.length - 1);
-    $("moveEarlier").title = isOverlay ? "圖層向下移" : "往前移"; $("moveLater").title = isOverlay ? "圖層向上移" : "往後移";
+    $("resetTrim").disabled = locked() || !selected || isOverlay || isColor;
+    const timedSelection = isOverlay || isColor || state.selectedKind === "audio";
+    $("moveEarlier").disabled = locked() || !selected || (timedSelection ? selected.start <= 0 : index <= 0);
+    $("moveLater").disabled = locked() || !selected || (timedSelection ? state.selectedKind === "audio" ? selected.start >= 600 : selected.end >= 600 : index === project().clips.length - 1);
+    for (const [id, arrow, label] of [["moveEarlier", "←", timedSelection ? "提早一影格" : "前移一段"], ["moveLater", "→", timedSelection ? "延後一影格" : "後移一段"]]) {
+      $(id).textContent = `${arrow} ${label}`; $(id).title = label; $(id).setAttribute("aria-label", label);
+    }
     $("splitClip").disabled = locked() || (state.selectedKind !== "video" ? !selected : !project()?.clips.length);
     $("detachAudio").disabled = locked() || !selected || state.selectedKind !== "video" || !state.media.get(selected.media_id)?.has_audio;
     $("muteOriginal").disabled = locked() || !selected || state.selectedKind !== "video";
-    $("clipFields").disabled = locked() || !selected || isOverlay;
+    $("clipFields").disabled = locked() || !selected || isOverlay || isColor;
     $("overlayFields").disabled = locked() || !selected || !isOverlay || !overlaySupported(selected.kind);
-    $("showPositionAnimation").disabled = locked();
+    $("showPositionAnimation").disabled = locked() || isColor;
     $("showSpeedCurve").disabled = locked() || !selectedSpeedVideo();
     $("checkPositionSupport").disabled = !state.backendReady || state.busy || state.positionChecking;
     $("checkTextStyleSupport").disabled = !state.backendReady || state.busy || state.textStyleChecking;
     renderTextStyleControls(isOverlay && selected?.kind === "text" ? selected : null);
+    renderTextFontControls(isOverlay && selected?.kind === "text" ? selected : null);
     for (const id of ["clipFadeIn", "clipFadeOut", "overlayFadeIn", "overlayFadeOut"]) $(id).disabled = locked() || !state.visualFadesReady;
     for (const id of ["moveToLayer", "copyToLayer"]) $(id).disabled = locked() || !selected || state.selectedKind !== "video" || !state.videoOverlaysReady;
-    $("addTextOverlay").disabled = locked() || !state.textOverlaysReady; $("addImageOverlay").disabled = locked() || !state.imageOverlaysReady;
+    $("addTextOverlay").disabled = locked() || !state.textOverlaysReady; $("addImageOverlay").disabled = locked() || !state.imageOverlaysReady || Boolean(state.uploadBatch);
+    renderSubtitleControls();
     $("layerDown").disabled = locked() || !isOverlay || layerIndex <= 0; $("layerUp").disabled = locked() || !isOverlay || layerIndex >= tracks.length - 1;
     if (isOverlay && selected) renderPositionControls(selected);
-    $("playPause").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging); $("jumpStart").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging); $("previewSeek").disabled = noClips || Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
-    $("timelineZoom").disabled = Boolean(state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
+    $("playPause").disabled = noClips || Boolean(state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging); $("jumpStart").disabled = noClips || Boolean(state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging); $("previewSeek").disabled = noClips || Boolean(state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
+    $("timelineZoom").disabled = Boolean(state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging);
     document.querySelectorAll("[data-add-media],[data-add-audio],[data-import-job]").forEach(button => button.disabled = locked());
     document.querySelectorAll("[data-add-video-layer]").forEach(button => button.disabled = locked() || !state.videoOverlaysReady);
+    document.querySelectorAll("[data-remove-media],[data-restore-media]").forEach(button => button.disabled = locked() || !state.mediaRemovalReady || state.mediaLibraryChecking);
+    $("checkMediaLibrary").disabled = state.busy || !state.backendReady || state.mediaLibraryChecking;
+    $("mediaLibraryStatus").textContent = state.mediaLibraryChecking ? "正在檢查素材庫功能…" : state.mediaLibraryError || (state.mediaRemovalReady ? "移除後可在下方「已移除素材」還原，原有剪輯會保留使用中的素材。" : "主機尚未載入素材移除更新，請更新後按「重新檢查素材庫功能」。");
+    $("checkMediaLibrary").classList.toggle("hidden", state.mediaRemovalReady && !state.mediaLibraryError);
     document.querySelectorAll(".audio-clip").forEach(button => button.draggable = !locked());
     document.querySelectorAll(".timeline-clip").forEach(button => button.draggable = false);
     document.querySelectorAll("[data-trim-edge]").forEach(handle => handle.setAttribute("aria-disabled", String(locked() || Boolean(state.session?.inFlight))));
+    document.querySelectorAll("[data-color-id]").forEach(button => button.disabled = locked());
+    const colorHandlesBlocked = locked() || !state.colorReady || Boolean(state.session?.inFlight);
+    document.querySelectorAll("[data-color-edge]").forEach(handle => {
+      handle.setAttribute("aria-disabled", String(colorHandlesBlocked));
+      handle.tabIndex = colorHandlesBlocked ? -1 : 0;
+    });
     renderSpeedControls();
     renderAnimationControls();
+    renderColorControls();
   }
   function overlaySupported(kind) { return kind === "text" ? state.textOverlaysReady : kind === "video" ? state.videoOverlaysReady : state.imageOverlaysReady; }
   function renderMedia() {
-    $("mediaCount").textContent = state.media.size;
-    $("mediaList").innerHTML = [...state.media.values()].reverse().map(media => {
+    const all = mediaLibrary.visibleMedia([...state.media.values()]);
+    const visible = mediaLibrary.filterMedia(all, project(), { query: $("mediaSearch").value, kind: $("mediaKind").value, used: $("mediaUsed").checked });
+    $("mediaCount").textContent = visible.length;
+    $("mediaFilterStatus").textContent = `顯示 ${visible.length} / ${all.length} 份素材`;
+    $("mediaList").innerHTML = visible.reverse().map(media => {
       const kind = mediaKind(media), icon = kind === "image" ? `<img class="media-thumb" src="/api/editor/media/${encodeURIComponent(media.id)}/thumbnail" alt="" loading="lazy" decoding="async">` : `<span class="media-icon" aria-hidden="true">${kind === "audio" ? "♫" : "▸"}</span>`;
-      return `<article class="media-card ${kind}">${icon}<div><strong title="${escape(media.name)}">${escape(media.name)}</strong><small>${kind === "image" ? `圖片 · ${media.width}×${media.height}` : `${formatTime(media.duration)} · ${kind === "audio" ? "音訊" : `${media.width}×${media.height}${media.has_audio ? " · 有原聲" : ""}`}`}</small></div><div class="media-actions"><button class="button ghost small" data-add-media="${escape(media.id)}">＋ ${kind === "audio" ? "加入音軌" : kind === "image" ? "加入圖片圖層" : "加入影片"}</button>${kind === "video" ? `<button class="button ghost small" data-add-video-layer="${escape(media.id)}">＋ 疊加影片</button>` : ""}${kind === "video" && media.has_audio ? `<button class="button ghost small" data-add-audio="${escape(media.id)}">僅加入原聲</button>` : ""}</div></article>`;
-    }).join("") || '<p class="empty-note">加入影片、音訊或圖片；素材可重複使用。</p>';
+      const used = mediaLibrary.mediaReferences(project(), media.id);
+      return `<article class="media-card ${kind}">${icon}<div><strong title="${escape(media.name)}">${escape(media.name)}</strong><small>${kind === "image" ? `圖片 · ${media.width}×${media.height}` : `${formatTime(media.duration)} · ${kind === "audio" ? "音訊" : `${media.width}×${media.height}${media.has_audio ? " · 有原聲" : ""}`}`}${used ? ` · 使用中 ${used} 次` : ""}</small></div><div class="media-actions"><button class="button secondary small" data-preview-media="${escape(media.id)}" aria-label="預覽素材：${escape(media.name)}">${kind === "audio" ? "試聽" : "預覽"}</button><button class="button ghost small" data-add-media="${escape(media.id)}">＋ ${kind === "audio" ? "加入音軌" : kind === "image" ? "加入圖片圖層" : "加入影片"}</button>${kind === "video" ? `<button class="button ghost small" data-add-video-layer="${escape(media.id)}">＋ 疊加影片</button>` : ""}${kind === "video" && media.has_audio ? `<button class="button ghost small" data-add-audio="${escape(media.id)}">僅加入原聲</button>` : ""}<button type="button" class="button ghost small media-remove-button" data-remove-media="${escape(media.id)}" aria-label="移除素材：${escape(media.name)}" title="從素材庫移除，可在「已移除素材」還原">移除</button></div></article>`;
+    }).join("") || `<p class="empty-note">${all.length ? "沒有符合條件的素材，請調整搜尋或篩選。" : "加入影片、音訊或圖片；素材可重複使用。"}</p>`;
+    const removed = mediaLibrary.removedMedia([...state.media.values()]);
+    $("removedMediaCount").textContent = removed.length;
+    $("removedMediaList").innerHTML = removed.map(media => `<article class="media-card"><span class="media-icon" aria-hidden="true">↶</span><div><strong title="${escape(media.name)}">${escape(media.name)}</strong><small>${mediaKind(media) === "video" ? "影片" : mediaKind(media) === "audio" ? "音訊" : "圖片"} · 可還原</small></div><button type="button" class="button secondary small" data-restore-media="${escape(media.id)}" aria-label="還原素材：${escape(media.name)}">還原</button></article>`).join("") || '<p class="subtle">目前沒有已移除素材。</p>';
     renderDisabled();
+  }
+  function closeMediaPreview() {
+    for (const id of ["mediaPreviewVideo", "mediaPreviewAudio"]) { const element = $(id); element.pause(); element.removeAttribute("src"); element.load(); }
+    $("mediaPreviewImage").removeAttribute("src");
+    if ($("mediaPreviewDialog").open) $("mediaPreviewDialog").close();
+  }
+  function openMediaPreview(id) {
+    const media = state.media.get(id); if (!media) return;
+    pause(); closeMediaPreview();
+    const kind = mediaKind(media), element = $(kind === "audio" ? "mediaPreviewAudio" : kind === "image" ? "mediaPreviewImage" : "mediaPreviewVideo");
+    for (const previewId of ["mediaPreviewVideo", "mediaPreviewAudio", "mediaPreviewImage"]) $(previewId).hidden = $(previewId) !== element;
+    $("mediaPreviewTitle").textContent = media.name;
+    $("mediaPreviewStatus").textContent = "預覽不會加入或更動時間軸。";
+    element.src = media.url || `/api/editor/media/${encodeURIComponent(id)}/file`;
+    $("mediaPreviewDialog").showModal();
+  }
+  async function checkMediaLibrarySupport() {
+    if (state.mediaLibraryChecking) return;
+    state.mediaLibraryChecking = true; state.mediaLibraryError = ""; renderDisabled();
+    try {
+      const response = await api("/api/editor/media-library/status");
+      state.mediaRemovalReady = response.available === true && response.reversible === true;
+    } catch (error) {
+      state.mediaRemovalReady = false;
+      if (error.status !== 404) state.mediaLibraryError = `素材庫連線失敗：${error.message}。可重新檢查重試。`;
+    } finally { state.mediaLibraryChecking = false; renderDisabled(); }
+  }
+  async function setMediaRemoved(id, removed) {
+    if (locked() || state.mediaLibraryChecking) return;
+    if (!state.mediaRemovalReady) throw new Error("目前 Studio 尚未載入素材移除功能，請更新主機後重新檢查。");
+    const item = state.media.get(id); if (!item) throw new Error("找不到這份素材，請重新整理素材庫。");
+    state.busy = true; renderDisabled();
+    try {
+      const response = await api(`/api/editor/media/${encodeURIComponent(id)}/${removed ? "remove" : "restore"}`, json("POST", {}));
+      const updated = mediaLibrary.validateVisibilityResponse(response, id, removed);
+      const retained = { ...item, ...updated };
+      if (!removed) delete retained.library_removed_at;
+      state.media.set(id, retained); renderMedia();
+      notify(removed ? "已從素材庫移除，可在「已移除素材」還原。現有時間軸與草稿會保留這份素材。" : "已還原素材，可再次加入時間軸。");
+    } finally { state.busy = false; renderDisabled(); }
   }
   function renderProjectList() {
     const current = project();
@@ -1273,8 +1582,8 @@
     return positionKeyframes(layer).filter(point => point.time >= 0 && point.time <= layer.end - layer.start).map(point => `<span class="position-diamond" role="button" tabindex="0" data-position-time="${point.time}" data-position-layer="${escape(layer.id)}" style="left:${point.time * state.zoom}px" aria-label="跳至位置關鍵幀 ${(layer.start + point.time).toFixed(2)} 秒" title="位置關鍵幀 ${(layer.start + point.time).toFixed(2)} 秒">◆</span>`).join("");
   }
   function animationMark(item) {
-    const settings = [item.animation_in ? "入" : "", item.animation_out ? "出" : ""].filter(Boolean);
-    return settings.length ? `<span class="clip-animation-mark" title="已套用${settings.map(label => label === "入" ? "入場" : "退場").join("／")}動畫"> ✦ ${settings.join("／")}</span>` : "";
+    const settings = [item.animation_in ? "入" : "", item.animation_out ? "出" : "", canonicalAnimations(item).animation_idle ? "待" : ""].filter(Boolean);
+    return settings.length ? `<span class="clip-animation-mark" title="已套用${settings.map(label => label === "入" ? "入場" : label === "待" ? "待機" : "退場").join("／")}動畫"> ✦ ${settings.join("／")}</span>` : "";
   }
   function transitionButtons(value, kind, trackId = "V1") {
     const track = animationMath.transitionTracks(value, duration).find(item => item.kind === kind && item.track_id === trackId); if (!track) return "";
@@ -1290,11 +1599,12 @@
   function renderTimeline() {
     const value = project(); if (!value) return;
     if (state.trackDrag) { renderTrackGesture(); return; }
+    if (state.colorDrag) { renderColorGesture(); return; }
     if (state.trimDrag) { renderTrimPreview(); return; }
     if (state.overlayDrag) { renderOverlayGesture(); return; }
     const total = totalDuration(value);
-    $("timelineSummary").textContent = `${value.clips.length} 影片 · ${audioClips(value).length} 音訊 · ${core.overlayTrackGroups(value).length} 圖層軌 · ${overlays(value).length} 疊層片段 · ${total.toFixed(2)} 秒`;
-    const visualEnd = Math.max(total, ...audioClips(value).map(clip => clip.start + duration(clip)), ...overlays(value).map(layer => layer.end), 0);
+    $("timelineSummary").textContent = `${value.clips.length} 影片 · ${audioClips(value).length} 音訊 · ${core.overlayTrackGroups(value).length} 圖層軌 · ${overlays(value).length} 疊層片段${colorMath.adjustments(value).length ? ` · ${colorMath.adjustments(value).length} 調色` : ""} · ${total.toFixed(2)} 秒`;
+    const visualEnd = Math.max(total, ...audioClips(value).map(clip => clip.start + duration(clip)), ...overlays(value).map(layer => layer.end), ...colorMath.adjustments(value).map(item => item.end), 0);
     $("timelineCanvas").style.width = Math.max(visualEnd * state.zoom + 25, $("timelineScroll").clientWidth) + "px";
     const step = state.zoom < 25 ? 10 : state.zoom < 65 ? 5 : 1;
     let marks = "";
@@ -1303,7 +1613,8 @@
     $("clipTrack").innerHTML = value.clips.map((clip, index) => `<button type="button" role="listitem" class="timeline-clip ${clip.id === state.selected && state.selectedKind === "video" ? "selected" : ""}" style="width:${duration(clip) * state.zoom}px" data-clip-id="${escape(clip.id)}" draggable="false" aria-label="片段 ${index + 1}：${escape(state.media.get(clip.media_id)?.name || "找不到素材")}，${duration(clip).toFixed(2)} 秒" aria-pressed="${clip.id === state.selected}"><strong>${index + 1} · ${escape(state.media.get(clip.media_id)?.name || "找不到素材")}</strong><small>${duration(clip).toFixed(2)}s · ${speedLabel(clip)} · ${Math.round(clip.volume * 100)}%</small><i class="fade-in" style="width:${(clip.fade_in || 0) * state.zoom}px"></i><i class="fade-out" style="width:${(clip.fade_out || 0) * state.zoom}px"></i>${trimHandles(clip, "video")}</button>`).join("");
     $("clipTrack").insertAdjacentHTML("beforeend", transitionButtons(value, "video"));
     for (const node of $("clipTrack").querySelectorAll("[data-clip-id]")) { const clip = value.clips.find(item => item.id === node.dataset.clipId); node.querySelector("small").insertAdjacentHTML("beforeend", animationMark(clip)); }
-    let labels = '<div style="height:31px"></div><div class="track-label track-drop-new-label" style="height:32px"><span>＋</span><small>新增上層</small></div>';
+    const colorRows = renderColorTrack(value);
+    let labels = '<div style="height:31px"></div>' + (colorRows ? `<div class="track-label color-label" style="height:${colorRows}px"><span>F1</span><small>調色／濾鏡</small></div>` : "") + '<div class="track-label track-drop-new-label" style="height:32px"><span>＋</span><small>新增上層</small></div>';
     $("overlayTracks").innerHTML = '<div id="trackDropNew" class="track-drop-new" data-track-drop="new"><span>＋ 拖曳片段至此新增上層</span></div>' + [...core.overlayTrackGroups(value)].reverse().map((track, index) => {
       const kind = track.clips.every(layer => layer.kind === track.clips[0].kind) ? track.clips[0].kind : "mixed";
       labels += `<div class="track-label overlay-label ${kind === "video" ? "video-layer" : ""}" style="height:38px" title="同軌 ${track.clips.length} 個片段"><span>L${core.overlayTrackGroups(value).length - index}</span><small>${kind === "text" ? "文字" : kind === "video" ? "影片" : kind === "image" ? "圖片" : "混合"}</small></div>`;
@@ -1319,7 +1630,7 @@
     document.querySelectorAll(".audio-clip").forEach(node => node.classList.toggle("at-timeline-start", parseFloat(node.style.left) < 9));
     $("timelineEmpty").classList.toggle("hidden", Boolean(totalDuration(value)));
     $("playhead").classList.toggle("hidden", !totalDuration(value));
-    $("timelineEmpty").style.top = `${85 + core.overlayTrackGroups(value).length * 38}px`;
+    $("timelineEmpty").style.top = `${85 + colorRows + core.overlayTrackGroups(value).length * 38}px`;
     updatePlayhead();
   }
   function beginTrackGesture(event) {
@@ -1327,6 +1638,7 @@
     const node = event.target.closest("[data-clip-id],[data-overlay-id]");
     if (!node || locked() || state.session.inFlight || event.button !== 0 || event.isPrimary === false) return;
     const from = { kind: node.dataset.clipId ? "video" : "overlay", id: node.dataset.clipId || node.dataset.overlayId };
+    state.colorWorkspaceOpen = false;
     const original = (from.kind === "video" ? project().clips : overlays(project())).find(item => item.id === from.id); if (!original) return;
     if (from.kind === "overlay" && !overlaySupported(original.kind)) return;
     event.preventDefault(); event.stopPropagation(); pause(); state.queuedSeek = null;
@@ -1580,10 +1892,12 @@
     }
     $("showPositionAnimation").textContent = "◇ 加入關鍵幀";
     $("showPositionAnimation").title = "在目前時間記錄文字或圖片的位置";
-    $("inspectorEmpty").classList.toggle("hidden", Boolean(clip)); $("clipFields").classList.toggle("hidden", !clip || isOverlay);
+    $("inspectorEmpty").classList.toggle("hidden", Boolean(clip)); $("clipFields").classList.toggle("hidden", !clip || isOverlay || state.selectedKind === "color");
     $("overlayFields").classList.toggle("hidden", !clip || !isOverlay);
     renderSpeedControls();
     renderAnimationControls();
+    renderTextFontControls(isOverlay ? clip : null);
+    if (state.selectedKind === "color") { renderColorControls(); return; }
     if (!clip) return;
     if (isOverlay) { renderOverlayInspector(clip); return; }
     $("selectedClipName").textContent = media?.name || "找不到來源素材";
@@ -1676,20 +1990,74 @@
     $("gradientColorPreview").style.background = `linear-gradient(${style.gradient_angle + 90}deg, ${style.gradient_start}, ${style.gradient_end})`;
     for (const [id, angle] of [["gradientHorizontal", 0], ["gradientVertical", 90]]) $(id).setAttribute("aria-pressed", String(style.gradient_angle === angle));
   }
+  function renderTextFontControls(layer) {
+    const isText = layer?.kind === "text", select = $("overlayFontFamily");
+    $("textFontControls").classList.toggle("hidden", !isText);
+    $("checkTextFontSupport").disabled = !state.backendReady || state.busy || state.fontCatalogBusy;
+    if (!isText) { select.disabled = true; return; }
+    const chosen = layer.font_family ?? "default", fonts = state.fonts || [];
+    select.replaceChildren();
+    for (const item of fonts) select.add(new Option(`${item.label}${item.cjk ? "" : " · 西文字型"}`, item.id));
+    if (!fonts.some(item => item.id === chosen)) { const option = new Option(chosen === "default" ? "預設字型" : `${chosen} · 目前字型清單未提供`, chosen); option.disabled = true; select.add(option); }
+    select.value = chosen;
+    select.disabled = locked() || !state.textFontsReady || !state.fontCatalogReady || state.fontCatalogBusy;
+    const font = fonts.find(item => item.id === chosen), hints = [];
+    if (font?.cjk === false) hints.push("這款字型以西文為主；中文可選支援中文字形的字型。");
+    if (layer.bold && font?.bold_available === false) hints.push("沒有獨立粗體字面，會沿用同系列一般字型。");
+    if (!font && state.fontCatalogReady) hints.push("此字型目前不可用，原設定仍保留；請選擇可用字型或回到預設。");
+    $("textFontNote").textContent = hints.join(" ");
+    $("textFontStatus").textContent = state.fontCatalogBusy ? "正在讀取電腦已安裝的字型…" : !state.textFontsReady ? "目前主機尚未啟用字型選擇；字型與草稿仍保留，可重新讀取。" : state.fontCatalogError ? `${state.fontCatalogError} 已保留目前字型與上次清單。` : state.fontCatalogReady ? `已讀取執行 Studio 的電腦已安裝字型，可選 ${fonts.length} 個選項；預覽與匯出使用相同字型。` : "尚未讀取電腦已安裝的字型；目前設定仍保留。";
+  }
+  async function loadTextFonts(refresh = false) {
+    const serial = ++state.fontCatalogSerial; state.fontCatalogBusy = true; state.fontCatalogError = ""; renderTextFontControls(selectedClip());
+    try {
+      const data = await api(`/api/editor/fonts${refresh ? "?refresh=1" : ""}`); if (serial !== state.fontCatalogSerial) return false;
+      const fonts = normalizeEditorFonts(data); if (!fonts.some(item => item.id === "default")) throw new Error("主機尚未提供完整的可用字型清單。");
+      state.fonts = fonts; state.fontCatalogReady = true;
+      if (refresh) invalidateTextFontRasters();
+      return true;
+    } catch (error) { if (serial === state.fontCatalogSerial) state.fontCatalogError = error.message || "暫時無法讀取字型。"; return false; }
+    finally { if (serial === state.fontCatalogSerial) { state.fontCatalogBusy = false; renderTextFontControls(selectedClip()); } }
+  }
+  function editTextFont(id) {
+    if (locked() || state.selectedKind !== "overlay" || selectedClip()?.kind !== "text") return;
+    try {
+      if (!state.textFontsReady || !state.fontCatalogReady) throw new Error("請先重新讀取字型；目前字型與草稿仍保留。");
+      if (!state.fonts.some(item => item.id === id)) throw new Error("請選擇目前可用的字型；原設定仍保留。");
+      overlayEdit(layer => { layer.font_family = id; });
+    } finally { renderTextFontControls(selectedClip()); renderDisabled(); }
+  }
+  function invalidateTextFontRasters() {
+    state.fontRasterGeneration = (state.fontRasterGeneration || 0) + 1;
+    for (const layer of overlays(project() || {})) {
+      if (layer.kind !== "text") continue;
+      const item = state.rasterNodes.get(layer.id); if (!item) continue;
+      clearTimeout(item.timer); item.timer = null; item.key = null; item.displayKey = null; item.error = null;
+      item.img.removeAttribute("src"); item.placeholder.textContent = "正在更新字型預覽…"; item.placeholder.hidden = false;
+      if (state.selected === layer.id) $("overlayRasterStatus").textContent = "";
+    }
+    for (const item of state.rasterCache.values()) if (item.url) URL.revokeObjectURL(item.url);
+    state.rasterCache.clear(); renderOverlayPreview();
+  }
   function textRaster(layer, value) {
     const key = overlayRasterKey(layer, value.width, value.height);
     const found = state.rasterCache.get(key); if (found) { state.rasterCache.delete(key); state.rasterCache.set(key, found); return found.promise; }
-    const entry = { url: null, promise: null };
+    const generation = state.fontRasterGeneration || 0, entry = { url: null, promise: null };
+    const current = () => generation === (state.fontRasterGeneration || 0) && state.rasterCache.get(key) === entry;
     entry.promise = state.rasterQueue.run(async () => {
       for (let attempt = 0; attempt < 3; attempt++) {
-        if (![...state.rasterNodes.values()].some(item => item.key === key)) throw new Error("此文字預覽已不再需要。");
-        const response = await fetch("/api/editor/text-preview", json("POST", { layer, width: value.width, height: value.height }));
+        if (!current() || ![...state.rasterNodes.values()].some(item => item.key === key)) throw new Error("此文字預覽已不再需要。");
+        const { animation_idle, ...rasterLayer } = layer;
+        const response = await fetch("/api/editor/text-preview", json("POST", { layer: rasterLayer, width: value.width, height: value.height }));
         if (response.status !== 409 || attempt === 2) return response;
         await new Promise(resolve => setTimeout(resolve, 350 * (attempt + 1)));
       }
     }).then(async response => {
+      if (!current()) throw new Error("字型清單已更新，正在重新產生文字預覽。");
       if (!response.ok) { const data = await response.json().catch(() => ({})); throw new Error(data.error || "文字預覽暫時無法產生，請檢查文字框寬度與行數。"); }
-      entry.url = URL.createObjectURL(await response.blob());
+      const blob = await response.blob();
+      if (!current()) throw new Error("字型清單已更新，正在重新產生文字預覽。");
+      entry.url = URL.createObjectURL(blob);
       pruneRasterCache(key);
       return entry.url;
     }).catch(error => { if (state.rasterCache.get(key) === entry) state.rasterCache.delete(key); throw error; });
@@ -1723,13 +2091,18 @@
       item.node.style.left = `${(position.x + effect.x) * 100}%`; item.node.style.top = `${(position.y + effect.y) * 100}%`; item.node.style.width = `${layer.width * effect.scale * 100}%`;
       item.node.style.transform = `translate(-50%, -50%) rotate(${layer.rotation}deg)`; item.node.style.opacity = layer.opacity * fadeEnvelope(layer, state.playhead - layer.start, layer.end - layer.start) * effect.opacity; item.node.style.zIndex = index + 1;
       item.node.classList.toggle("selected", state.selectedKind === "overlay" && state.selected === layer.id);
-      if (layer.kind === "video") { item.placeholder.hidden = true; if (!state.trimDrag && !state.overlayDrag) checkPreview(layer.media_id); return; }
+      if (layer.kind === "video") { item.placeholder.hidden = true; if (!state.colorDrag && !state.trimDrag && !state.overlayDrag) checkPreview(layer.media_id); return; }
       if (layer.kind === "image") {
         const url = state.media.get(layer.media_id)?.url;
         if (url && item.key !== url) { clearTimeout(item.timer); item.key = url; item.img.src = url; item.placeholder.hidden = true; item.error = null; }
         return;
       }
       if (!state.textOverlaysReady) { item.placeholder.textContent = "請重啟 Studio 載入文字圖層"; return; }
+      if (!state.textFontsReady && Object.keys(canonicalTextFont(layer)).length) {
+        clearTimeout(item.timer); item.timer = null; item.key = null; item.img.removeAttribute("src"); item.error = "此字型需新版 Studio 才能預覽；草稿仍保留。"; item.placeholder.textContent = "請重新讀取字型"; item.placeholder.hidden = false;
+        if (state.selected === layer.id) $("overlayRasterStatus").textContent = item.error;
+        return;
+      }
       if (!state.textStyleReady && Object.keys(canonicalTextStyle(layer)).length) {
         clearTimeout(item.timer); item.timer = null; item.key = null; item.img.removeAttribute("src");
         item.error = "這個文字樣式需重新啟動 Studio 後預覽；草稿仍保留。";
@@ -1737,18 +2110,18 @@
         if (state.selected === layer.id) $("overlayRasterStatus").textContent = item.error;
         return;
       }
-      const key = overlayRasterKey(layer, value.width, value.height);
+      const key = overlayRasterKey(layer, value.width, value.height), generation = state.fontRasterGeneration || 0;
       if (item.key === key) return;
       clearTimeout(item.timer); item.key = key; item.error = null; item.placeholder.hidden = Boolean(item.img.getAttribute("src"));
       // Several keystrokes share one request; a late raster can never replace newer text.
       item.timer = setTimeout(() => {
         item.timer = null;
         textRaster(clone(layer), { width: value.width, height: value.height }).then(url => {
-          if (state.rasterNodes.get(layer.id) !== item || item.key !== key) return;
+          if (state.rasterNodes.get(layer.id) !== item || item.key !== key || generation !== (state.fontRasterGeneration || 0)) return;
           item.img.src = url; item.displayKey = key; item.placeholder.hidden = true; item.error = null;
           if (state.selected === layer.id) $("overlayRasterStatus").textContent = "";
         }).catch(error => {
-          if (state.rasterNodes.get(layer.id) !== item || item.key !== key) return;
+          if (state.rasterNodes.get(layer.id) !== item || item.key !== key || generation !== (state.fontRasterGeneration || 0)) return;
           item.error = error.message; item.placeholder.textContent = "文字預覽需調整"; item.placeholder.hidden = Boolean(item.img.getAttribute("src"));
           if (state.selected === layer.id) $("overlayRasterStatus").textContent = error.message;
         });
@@ -1771,6 +2144,10 @@
     $("previewEmpty").classList.toggle("hidden", Boolean(totalDuration(project())));
     if (document.activeElement !== $("projectName")) $("projectName").value = project().name;
     syncOutputSize($("outputSize"), project().width, project().height); $("outputFps").value = String(project().fps);
+    if (document.activeElement !== $("canvasDuration")) $("canvasDuration").value = project().canvas_duration || 0;
+    if (document.activeElement !== $("canvasBackground")) $("canvasBackground").value = project().background || "#000000";
+    $("videoCanvas").style.backgroundColor = project().background || "#000000";
+    renderMedia();
     $("canvasBadge").textContent = `${project().width} × ${project().height}`;
     renderProjectList(); renderTimeline(); renderInspector(); renderStatus(); renderExport(); fitCanvas(); renderCacheStatus(); renderOverlayPreview();
   }
@@ -1780,6 +2157,7 @@
     $("timeDisplay").innerHTML = `${formatTime(state.playhead)} <span>/ ${formatTime(total)}</span>`;
     $("previewSeek").max = total; $("previewSeek").value = state.playhead;
     renderOverlayPreview();
+    colorPreview.update(project() || {}, state.playhead);
     if (state.selectedKind === "overlay" && selectedClip()) renderPositionControls(selectedClip());
     renderSpeedControls();
   }
@@ -1820,13 +2198,14 @@
     return preview?.status === "completed" && preview.url ? preview.url : state.media.get(mediaId)?.url || `/api/editor/media/${encodeURIComponent(mediaId)}/file`;
   }
   function preloadNext() {
-    if (state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return;
+    if (state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return;
     const value = project(); if (!value || state.previewIndex < 0 || state.previewIndex + 1 >= value.clips.length) return;
     const start = value.clips.slice(0, state.previewIndex + 1).reduce((sum, clip) => sum + duration(clip), 0), point = locateTime(value, start);
     checkPreview(point.clip.media_id); deck.preload(point, previewUrl(point.clip.media_id));
   }
   function seek(time, play = state.playing) {
-    if (state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return;
+    if (state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return;
+    state.transitionPreviewFailure = null;
     const value = project(); state.playhead = value ? clamp(Number(time) || 0, 0, totalDuration(value)) : 0;
     const point = value && locateTime(value, state.playhead);
     state.lastPlaybackTick = null; state.mixer?.seek(); videoLayers.seek(); transitionPreview.seek(); state.audioBuffering = false; state.layerBuffering = false; state.transitionBuffering = false;
@@ -1835,7 +2214,7 @@
     if (!point) {
       deck.clear(); videoElements.forEach(element => { element.hidden = true; element.style.opacity = 1; });
       state.previewIndex = -1; state.loadedMedia = null; state.buffering = false;
-      $("previewClipName").textContent = value && totalDuration(value) ? "圖層／黑底預覽" : "專案預覽";
+      $("previewClipName").textContent = value && totalDuration(value) ? "圖層／背景預覽" : "專案預覽";
       if (!value || !totalDuration(value)) pause(); renderPlaybackStatus(); renderCacheStatus(); return;
     }
     const media = state.media.get(point.clip.media_id);
@@ -1846,11 +2225,11 @@
     checkPreview(media.id); deck.hold(false); deck.request(point, previewUrl(media.id), play); renderCacheStatus();
   }
   async function togglePlay() {
-    if (!project() || !totalDuration(project()) || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return false;
+    if (!project() || !totalDuration(project()) || state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return false;
     if (state.playing) { pause(); return false; }
     const session = state.session, playhead = state.playhead, request = state.playRequest = (state.playRequest || 0) + 1;
     await prepareAudio();
-    if (state.session !== session || state.playRequest !== request || state.playhead !== playhead || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return false;
+    if (state.session !== session || state.playRequest !== request || state.playhead !== playhead || state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag) return false;
     const at = locateTime(project(), state.playhead);
     if (!state.audio && ((at?.clip.volume || 0) > 1 || audioClips(project()).length || overlays(project()).some(layer => layer.kind === "video" && layer.volume > 1))) throw new Error("這個瀏覽器無法預覽音訊混音。請使用 Chrome／Edge。");
     state.playing = true; $("playPause").textContent = "Ⅱ"; $("playPause").setAttribute("aria-label", "暫停");
@@ -1864,7 +2243,7 @@
     else seek(end, true);
   }
   function playbackTick(now) {
-    const value = project(), gesture = state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag;
+    const value = project(), gesture = state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag;
     if (value && !gesture) {
       const elapsed = state.lastPlaybackTick === null ? 0 : Math.min(0.1, (now - state.lastPlaybackTick) / 1000);
       state.lastPlaybackTick = now;
@@ -1926,7 +2305,7 @@
     const clipId = uid(), start = state.playhead, out = Math.min(600, Number(media.duration));
     edit(value => { const track = freeAudioTrack(value, start, out); (value.audio_clips ||= []).push({ id: clipId, media_id: id, in: 0, out, start, track, volume: 1, speed: 1, fade_in: 0, fade_out: 0 }); validateProject(value, state.media); }, null, false);
     state.selected = clipId; state.selectedKind = "audio"; render();
-    if (start + out > totalDuration(project())) notify("音訊已加入；超過影片尾端的部分不會匯出。");
+    if (start + out > totalDuration(project())) notify(totalDuration(project()) ? "音訊已加入；超過影片尾端的部分不會匯出。" : "音訊已加入。請在右側輸出設定填入「背景片長」，即可預覽並匯出配音影片。");
   }
   function addOverlay(kind, mediaId = null) {
     if (locked()) return;
@@ -1943,14 +2322,238 @@
     edit(value => { (value.overlays ||= []).push(layer); validateProject(value, state.media); }, null, false);
     state.selectedKind = "overlay"; state.selected = layer.id; render();
     if (kind === "video") { if (!project().clips.length) seek(state.playhead, false); notify("影片已加入上層；重疊原聲會混音，可在右側個別靜音。"); }
+    else if (!totalDuration(project())) notify("圖文已加入。請在右側輸出設定填入「背景片長」，即可播放與匯出純圖文影片。");
+  }
+  function renderSubtitleControls() {
+    const value = project(), tracks = subtitleMath.subtitleTracks(value || {}), select = $("subtitleTrack");
+    if (state.subtitleProject !== value?.id) { state.subtitleProject = value?.id; state.subtitleTrack = ""; state.subtitleSelection = ""; state.subtitleWorkspaceOpen = false; state.subtitleWorkspaceTab = "content"; }
+    const selected = selectedClip(), selectionKey = `${state.selectedKind}:${selected?.id || ""}`;
+    if (selectionKey !== state.subtitleSelection) {
+      state.subtitleSelection = selectionKey;
+      if (state.selectedKind === "overlay" && selected?.kind === "text" && subtitleMath.isSubtitleTrack(selected.track_id)) {
+        state.subtitleTrack = selected.track_id; state.subtitleWorkspaceOpen = true; state.subtitleWorkspaceTab = "content";
+      } else if (selected) state.subtitleWorkspaceOpen = false;
+    }
+    if (!tracks.some(track => track.id === state.subtitleTrack)) state.subtitleTrack = tracks[0]?.id || "";
+    const key = JSON.stringify(tracks.map(track => [track.id, track.count]));
+    if (select.dataset.tracks !== key) {
+      select.innerHTML = tracks.length ? tracks.map((track, index) => `<option value="${escape(track.id)}">字幕軌 ${index + 1} · ${track.count} 句</option>`).join("") : '<option value="">尚無字幕</option>';
+      select.dataset.tracks = key;
+    }
+    select.value = state.subtitleTrack;
+    const track = tracks.find(item => item.id === state.subtitleTrack), blocked = locked(), ready = state.textOverlaysReady && state.overlayTracksReady && state.textStyleReady;
+    $("subtitleCount").textContent = tracks.reduce((sum, item) => sum + item.count, 0);
+    $("addSubtitle").disabled = blocked || !ready || !value || totalDuration(value) <= 0 || subtitleCount(value) >= state.subtitleCapacity;
+    $("importSubtitles").disabled = blocked || !ready || state.subtitleImportBusy || !value || totalDuration(value) <= 0;
+    $("exportSubtitles").disabled = blocked || !track;
+    $("subtitleEncoding").disabled = blocked || state.subtitleImportBusy;
+    select.disabled = blocked || !tracks.length;
+    $("subtitlePreset").disabled = blocked;
+    $("applySubtitlePreset").disabled = blocked || !ready || !track;
+    $("copySubtitleStyle").disabled = blocked || !ready || !track || state.selectedKind !== "overlay" || selected?.kind !== "text";
+    $("subtitleStatus").textContent = !ready && state.backendReady ? "目前主機尚未載入文字樣式或同軌剪輯功能，請更新主機後重新整理。" : state.subtitleImportBusy ? "正在讀取字幕檔…" : `${track ? `${track.count} 句 · ` : ""}修改會自動儲存。SRT 包含文字與時間。`;
+    const list = $("subtitleList"), rows = track?.layers || [], listKey = JSON.stringify([blocked, state.selected, rows.map(layer => [layer.id, layer.start, layer.end, layer.text])]);
+    if (list.dataset.content !== listKey) {
+      const scroll = list.scrollTop;
+      list.innerHTML = rows.map((layer, index) => `<button type="button" class="subtitle-cue ${state.selectedKind === "overlay" && state.selected === layer.id ? "active" : ""}" data-subtitle-id="${escape(layer.id)}" aria-label="編輯第 ${index + 1} 句字幕" ${blocked ? "disabled" : ""}><small>${index + 1} · ${formatTime(layer.start)} → ${formatTime(layer.end)}</small><span>${escape(layer.text)}</span></button>`).join("") || '<p class="subtle">加入字幕後，每句會出現在這裡與時間軸上。</p>';
+      list.dataset.content = listKey; list.scrollTop = scroll;
+    }
+    const index = rows.findIndex(layer => state.selectedKind === "overlay" && layer.id === selected?.id);
+    subtitleWorkspace.render({ open: state.subtitleWorkspaceOpen, tab: state.subtitleWorkspaceTab, selected: index >= 0, index, count: rows.length, blocked, ready });
+    renderAutoCaptionControls();
+  }
+  function selectSubtitleCue(id, focus = true) {
+    if (locked()) return;
+    const layer = overlays(project()).find(item => item.id === id && item.kind === "text" && subtitleMath.isSubtitleTrack(item.track_id));
+    if (!layer) return;
+    pause(); state.session.group = null; state.selectedKind = "overlay"; state.selected = layer.id; state.subtitleTrack = layer.track_id;
+    state.subtitleWorkspaceOpen = true; state.subtitleWorkspaceTab = "content";
+    seek(layer.start, false); render();
+    if (focus) $("overlayText").focus({ preventScroll: true });
+  }
+  function openSubtitleWorkspace() {
+    state.colorWorkspaceOpen = false;
+    const tracks = subtitleMath.subtitleTracks(project() || {}), track = tracks.find(item => item.id === state.subtitleTrack) || tracks[0];
+    if (!locked() && track?.layers.length) {
+      const layer = track.layers.find(item => state.selectedKind === "overlay" && item.id === state.selected) || track.layers[0];
+      selectSubtitleCue(layer.id, false);
+    } else {
+      state.subtitleWorkspaceOpen = true; state.subtitleWorkspaceTab = tracks.length ? "content" : "create";
+      renderSubtitleControls();
+    }
+    $("inspectorPanel").scrollTop = 0;
+    renderDisabled();
+  }
+  function changeSubtitleTrack() {
+    if (locked()) return;
+    const track = subtitleMath.subtitleTracks(project() || {}).find(item => item.id === $("subtitleTrack").value);
+    if (!track) return;
+    const layer = track.layers.find(item => state.selectedKind === "overlay" && item.id === state.selected) || track.layers[0];
+    if (layer) selectSubtitleCue(layer.id, false);
+  }
+  function stepSubtitleCue(direction) {
+    if (locked()) return;
+    const track = subtitleMath.subtitleTracks(project() || {}).find(item => item.id === state.subtitleTrack);
+    const index = track?.layers.findIndex(item => state.selectedKind === "overlay" && item.id === state.selected) ?? -1;
+    const layer = index >= 0 && track.layers[index + direction];
+    if (layer) selectSubtitleCue(layer.id);
+  }
+  function renderAutoCaptionControls() {
+    const value = project(), job = state.captionJob, active = autoCaptions.ACTIVE.includes(job?.status), completed = job?.status === "completed" && job.cues?.length > 0;
+    const sameProject = job?.project_id === value?.id, blocked = locked(), matching = completed && sameProject && autoCaptions.resultMatches(job, value);
+    $("generateAutoCaptions").disabled = blocked || !state.captionReady || state.captionChecking || state.captionOtherActive || active || !value || totalDuration(value) <= 0;
+    for (const id of ["captionLanguage", "captionTraditional"]) $(id).disabled = blocked || active || state.captionChecking;
+    $("cancelAutoCaptions").classList.toggle("hidden", !active || !sameProject);
+    $("cancelAutoCaptions").disabled = state.captionChecking || job?.cancel_requested === true;
+    $("captionProgress").classList.toggle("hidden", !active);
+    if (active && job.stage === "transcribing") $("captionProgress").value = Math.max(0, Math.min(99, Number(job.progress) || 0)); else $("captionProgress").removeAttribute("value");
+    $("applyAutoCaptions").classList.toggle("hidden", !completed || !sameProject);
+    $("applyAutoCaptions").disabled = blocked || !matching || autoCaptions.jobAlreadyApplied(job, value) || !state.textStyleReady || !state.overlayTracksReady || (job?.cues?.length || 0) + subtitleCount(value || {}) > state.subtitleCapacity;
+    $("applyAutoCaptions").textContent = autoCaptions.jobAlreadyApplied(job, value) ? "已加入字幕軌" : "加入為新字幕軌";
+    $("downloadAutoCaptions").classList.toggle("hidden", !completed || !sameProject);
+    $("downloadAutoCaptions").disabled = !completed;
+    $("checkAutoCaptions").disabled = state.captionChecking || !state.backendReady || state.busy;
+    let message = state.captionChecking ? "正在檢查字幕工作…" : state.captionError || (!state.captionReady ? "目前 Studio 尚未載入語音字幕功能。更新主機後按「重新檢查字幕功能」。" : state.captionOtherActive ? "另一個剪輯專案正在辨識語音，完成後可開始此專案。" : autoCaptions.jobLabel(job));
+    if (completed && sameProject && !matching) message += " 影片或音訊已更動，請重新辨識；原結果仍可下載。";
+    if (completed && sameProject && matching && job.cues.length + subtitleCount(value) > state.subtitleCapacity) message += ` 目前可容納 ${Math.max(0, state.subtitleCapacity - subtitleCount(value))} 句，結果有 ${job.cues.length} 句；可先下載 SRT 或移除不需要的字幕。`;
+    $("captionStatus").textContent = message;
+  }
+  function rememberCaptionJob(job) {
+    state.captionJob = autoCaptions.validateJob(job);
+    storagePut(`h3-editor-caption:${job.project_id}`, { id: job.id, project_id: job.project_id });
+  }
+  function scheduleCaptionPoll(serial) {
+    clearTimeout(state.captionTimer);
+    if (!autoCaptions.ACTIVE.includes(state.captionJob?.status) && !state.captionOtherActive) return;
+    state.captionTimer = setTimeout(() => pollAutoCaptions(serial).catch(error => { if (serial !== state.captionSerial) return; state.captionError = `暫時無法讀取字幕進度：${error.message}。工作仍保留，可重新檢查。`; renderAutoCaptionControls(); scheduleCaptionPoll(serial); }), 2000);
+  }
+  async function refreshAutoCaptions() {
+    const serial = ++state.captionSerial, projectId = project()?.id;
+    clearTimeout(state.captionTimer); state.captionChecking = true; state.captionError = ""; state.captionOtherActive = false; state.captionJob = null; renderAutoCaptionControls();
+    try {
+      const status = await api("/api/editor/captions/status"); if (serial !== state.captionSerial || project()?.id !== projectId) return;
+      state.captionReady = status.available === true;
+      if (status.active_job) {
+        const active = autoCaptions.validateJob(status.active_job);
+        if (active.project_id === projectId) rememberCaptionJob(active); else state.captionOtherActive = true;
+      }
+      if (!state.captionJob) {
+        const reference = storageGet(`h3-editor-caption:${projectId}`);
+        if (reference?.project_id === projectId && /^[a-f0-9]{32}$/.test(reference.id || "")) {
+          try { const response = await api(`/api/editor/captions/${reference.id}`); if (serial !== state.captionSerial || project()?.id !== projectId) return; const job = autoCaptions.validateJob(response); if (job.project_id === projectId) rememberCaptionJob(job); }
+          catch (error) { if (error.status !== 404) throw error; }
+        }
+      }
+    } catch (error) {
+      if (serial !== state.captionSerial) return;
+      if (error.status === 404) state.captionReady = false; else state.captionError = `無法檢查語音字幕：${error.message}。可按重新檢查重試。`;
+    } finally { if (serial === state.captionSerial) { state.captionChecking = false; renderAutoCaptionControls(); scheduleCaptionPoll(serial); } }
+  }
+  async function pollAutoCaptions(serial = state.captionSerial) {
+    if (serial !== state.captionSerial) return;
+    if (state.captionOtherActive) { await refreshAutoCaptions(); return; }
+    const id = state.captionJob?.id; if (!id) return;
+    const response = await api(`/api/editor/captions/${id}`);
+    if (serial !== state.captionSerial || state.captionJob?.id !== id) return;
+    rememberCaptionJob(autoCaptions.validateJob(response)); state.captionError = ""; renderAutoCaptionControls(); scheduleCaptionPoll(serial);
+  }
+  async function generateAutoCaptions() {
+    if (locked() || !state.captionReady || state.captionChecking || autoCaptions.ACTIVE.includes(state.captionJob?.status) || state.captionOtherActive) return;
+    const session = state.session, language = $("captionLanguage").value, traditional = $("captionTraditional").checked;
+    state.busy = true; renderDisabled();
+    try {
+      await saveProject(); if (state.session !== session) throw new Error("專案已切換，請在目前專案重新產生字幕。");
+      const response = await api(`/api/editor/projects/${session.project.id}/captions`, json("POST", { language, traditional }));
+      rememberCaptionJob(autoCaptions.validateJob(response)); state.captionError = ""; state.captionChecking = false; ++state.captionSerial; state.subtitleWorkspaceOpen = true; state.subtitleWorkspaceTab = "create";
+      scheduleCaptionPoll(state.captionSerial);
+    } finally { state.busy = false; renderDisabled(); }
+  }
+  async function cancelAutoCaptions() {
+    const job = state.captionJob; if (!job || job.project_id !== project()?.id || !autoCaptions.ACTIVE.includes(job.status)) return;
+    const response = await api(`/api/editor/captions/${job.id}/cancel`, json("POST", {}));
+    if (state.captionJob?.id !== job.id) return;
+    rememberCaptionJob(autoCaptions.validateJob(response)); renderAutoCaptionControls(); scheduleCaptionPoll(state.captionSerial);
+  }
+  function applyAutoCaptions() {
+    const job = state.captionJob; if (locked() || !job || autoCaptions.jobAlreadyApplied(job, project())) return;
+    const result = autoCaptions.captionLayers(job, project(), { totalDuration: totalDuration(project()), makeId: uid, style: subtitleMath.TEXT_PRESETS[$("subtitlePreset").value] });
+    requireTextStyleSupport({ overlays: result.layers }, state.textStyleReady);
+    edit(value => insertSubtitleLayers(value, result.layers), null, false);
+    state.subtitleTrack = result.trackId; state.selectedKind = "overlay"; state.selected = result.layers[0].id;
+    pause(); render(); seek(result.layers[0].start, false); notify(`已加入 ${result.layers.length} 句語音字幕，請校對人名與聽不清楚的句子。可按復原還原整次加入。`);
+  }
+  function downloadAutoCaptions() {
+    const job = state.captionJob; if (job?.status !== "completed" || !job.cues?.length) return;
+    const blob = new Blob([subtitleMath.stringifySRT(job.cues)], { type: "application/x-subrip;charset=utf-8" }), url = URL.createObjectURL(blob), link = document.createElement("a");
+    link.href = url; link.download = `${String(project()?.name || "語音字幕").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")}.auto.srt`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function insertSubtitleLayers(value, layers) {
+    (value.overlays ||= []).push(...layers);
+    value.overlays = core.overlayTrackGroups(value).flatMap(track => [...track.clips].sort((a, b) => a.start - b.start));
+    validateProject(value, state.media);
+  }
+  function subtitleStyleOf(layer) {
+    return Object.fromEntries(subtitleMath.STYLE_FIELDS.map(field => [field, layer[field] ?? (field === "font_family" ? "default" : TEXT_STYLE_DEFAULTS[field] ?? subtitleMath.DEFAULT_STYLE[field])]));
+  }
+  function addSubtitle() {
+    if (locked()) return;
+    const value = project(), length = totalDuration(value), frame = 1 / value.fps;
+    if (length < frame) throw new Error("請先加入影片，再建立字幕。");
+    const track = subtitleMath.subtitleTracks(value).find(item => item.id === state.subtitleTrack), start = Math.min(state.playhead, length - frame);
+    if (track?.layers.some(layer => layer.start <= start && start < layer.end)) throw new Error("此位置已有字幕；點選現有句子修改，或把播放游標移到字幕間的空白處。");
+    const nextStart = Math.min(length, ...(track?.layers || []).filter(layer => layer.start > start).map(layer => layer.start));
+    const result = subtitleMath.createSubtitleLayers([{ start, end: Math.min(start + 3, nextStart), text: "輸入字幕" }], { fps: value.fps, totalDuration: length, existingCount: subtitleCount(value), makeId: uid, style: track?.layers[0] ? subtitleStyleOf(track.layers[0]) : subtitleMath.TEXT_PRESETS[$("subtitlePreset").value] });
+    if (track) result.layers.forEach(layer => { layer.track_id = track.id; });
+    const probe = { overlays: result.layers }; requireTextStyleSupport(probe, state.textStyleReady); requireTextFontSupport(probe, state.textFontsReady);
+    edit(current => insertSubtitleLayers(current, result.layers), null, false);
+    state.subtitleTrack = track?.id || result.trackId; state.selectedKind = "overlay"; state.selected = result.layers[0].id;
+    state.subtitleWorkspaceOpen = true; state.subtitleWorkspaceTab = "content"; pause(); render(); seek(start, false);
+  }
+  async function importSubtitles(file) {
+    if (!file || locked() || state.subtitleImportBusy) return;
+    if (!/\.srt$/i.test(file.name)) throw new Error("請選擇 .srt 字幕檔。");
+    if (file.size > 1024 * 1024) throw new Error("字幕檔上限為 1 MiB。");
+    const session = state.session, encoding = $("subtitleEncoding").value;
+    state.subtitleImportBusy = true; renderDisabled();
+    try {
+      const text = subtitleMath.decodeSubtitleBuffer(await file.arrayBuffer(), encoding), cues = subtitleMath.parseSRT(text);
+      if (state.session !== session || locked()) throw new Error("讀取字幕期間專案已切換或開始其他工作；請在目前專案重新匯入。");
+      const value = project(), result = subtitleMath.createSubtitleLayers(cues, { fps: value.fps, totalDuration: totalDuration(value), existingCount: subtitleCount(value), makeId: uid, style: subtitleMath.TEXT_PRESETS[$("subtitlePreset").value] });
+      requireTextStyleSupport({ overlays: result.layers }, state.textStyleReady);
+      edit(current => insertSubtitleLayers(current, result.layers), null, false);
+      state.subtitleTrack = result.trackId; state.selectedKind = "overlay"; state.selected = result.layers[0].id;
+      state.subtitleWorkspaceOpen = true; state.subtitleWorkspaceTab = "content"; pause(); render(); seek(result.layers[0].start, false);
+      notify(`已匯入 ${result.layers.length} 句字幕為新字幕軌。可按復原還原整次匯入。`);
+    } finally { state.subtitleImportBusy = false; $("subtitleFileInput").value = ""; renderDisabled(); }
+  }
+  function exportSubtitles() {
+    if (locked()) return;
+    const track = subtitleMath.subtitleTracks(project()).find(item => item.id === state.subtitleTrack);
+    if (!track) throw new Error("請先建立或匯入字幕。");
+    const blob = new Blob([subtitleMath.stringifySRT(track.layers)], { type: "application/x-subrip;charset=utf-8" }), url = URL.createObjectURL(blob), link = document.createElement("a");
+    link.href = url; link.download = `${String(project().name || "字幕").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")}.srt`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    notify(`已匯出此軌 ${track.count} 句字幕，包含文字與時間。`);
+  }
+  function applySubtitleStyle(copySelected = false) {
+    if (locked()) return;
+    const selected = selectedClip();
+    if (copySelected && (state.selectedKind !== "overlay" || selected?.kind !== "text")) throw new Error("請先在時間軸選取要使用樣式的文字。");
+    const style = copySelected ? subtitleStyleOf(selected) : subtitleMath.TEXT_PRESETS[$("subtitlePreset").value], result = subtitleMath.applySubtitleStyle(project(), state.subtitleTrack, style);
+    requireTextStyleSupport(result, state.textStyleReady); requireTextFontSupport(result, state.textFontsReady);
+    pause(); edit(value => { value.overlays = result.overlays; }, null, false);
+    notify("已套用此字幕軌的樣式，保留每句文字、時間與動畫。可按復原還原整次套用。");
   }
   async function saveProject() {
     const session = state.session;
     if (!session) return;
     if (!session.project.name.trim()) session.change(p => { p.name = "未命名專案"; });
     validateProject(session.project, state.media);
+    requireColorSupport(session.project, state.colorReady);
     requireTextStyleSupport(session.project, state.textStyleReady);
+    requireTextFontSupport(session.project, state.textFontsReady);
+    requireTextIdleSupport(session.project, state.textIdleReady);
     requireAnimationSupport(session.project, state.clipAnimationsReady && state.clipTransitionsReady);
+    requireTransitionEffectSupport(session.project, state.transitionEffectsReady, state.referenceTransitionsReady);
     try {
       const saved = await (session.autosaver ? session.autosaver.flush() : session.save(snapshot => api(`/api/editor/projects/${snapshot.id}`, json("PUT", snapshot))));
       if (state.session === session) { state.projects = state.projects.map(item => item.id === saved.id ? saved : item); renderProjectList(); renderStatus(); }
@@ -1971,10 +2574,15 @@
       if (!copy) await saveProject();
       else { rememberDraft(); state.session.autosaver?.cancel(); }
       const payload = copy ? { ...editableContent(previous), name: `${previous.name} 副本`.slice(0, 200) } : { name: "未命名專案" };
+      requireColorSupport(payload, state.colorReady);
       requireTextStyleSupport(payload, state.textStyleReady);
+      requireTextFontSupport(payload, state.textFontsReady);
+      requireTextIdleSupport(payload, state.textIdleReady);
       requireAnimationSupport(payload, state.clipAnimationsReady && state.clipTransitionsReady);
+      requireTransitionEffectSupport(payload, state.transitionEffectsReady, state.referenceTransitionsReady);
       const response = await api("/api/editor/projects", json("POST", payload));
       const value = response.project || response;
+      requireSavedColor(payload, value);
       state.projects.unshift(value); installProject(value);
       render();
     } finally { state.busy = false; renderDisabled(); }
@@ -1992,10 +2600,15 @@
     state.busy = true; renderDisabled();
     try {
       if (!state.session.conflict) await saveProject(); else rememberDraft();
+      requireColorSupport(draft, state.colorReady);
       requireTextStyleSupport(draft, state.textStyleReady);
+      requireTextFontSupport(draft, state.textFontsReady);
+      requireTextIdleSupport(draft, state.textIdleReady);
       requireAnimationSupport(draft, state.clipAnimationsReady && state.clipTransitionsReady);
+      requireTransitionEffectSupport(draft, state.transitionEffectsReady, state.referenceTransitionsReady);
       const response = await api("/api/editor/projects", json("POST", { ...editableContent(draft), name: `${draft.name || "草稿"} 恢復副本`.slice(0, 200) }));
       const saved = response.project || response;
+      requireSavedColor(draft, saved);
       if (item.key) storagePut(item.key, { ...item, dismissed: true });
       state.projects.unshift(saved); installProject(saved); notify("草稿已另存為新專案，原專案保持原樣。");
     } finally { state.busy = false; renderDisabled(); }
@@ -2021,30 +2634,44 @@
     } finally { state.busy = false; $("archiveStatus").textContent = ""; $("projectArchiveInput").value = ""; renderDisabled(); }
   }
   async function importFiles(files) {
-    if (locked()) return;
-    const supported = [...files].filter(file => /\.(mp4|webm|mp3|wav|m4a|aac|flac|ogg|opus|png|jpe?g|webp)$/i.test(file.name));
-    if (!supported.length || supported.length !== files.length) throw new Error("請選擇影片、音訊，或 PNG／JPEG／WebP 圖片。");
-    if (!state.imageOverlaysReady && files.some(file => /\.(png|jpe?g|webp)$/i.test(file.name))) throw new Error("Studio 尚未載入圖片圖層更新，請重新啟動 Studio 後重新整理。");
-    state.busy = true; renderDisabled();
+    if (locked() || !files.length) return;
+    if (state.uploadBatch) { notify("目前已有素材正在匯入，可先取消或等待這批完成。"); return; }
+    const batch = { controller: new AbortController(), items: [...files].map(file => ({ file, status: "等待中" })) };
+    state.uploadBatch = batch; renderDisabled(); $("cancelUpload").classList.remove("hidden"); $("cancelUpload").disabled = false;
     const importedMedia = [];
     try {
-      for (let index = 0; index < supported.length; index++) {
-        const file = supported[index]; $("uploadStatus").textContent = `匯入 ${index + 1}/${supported.length}：${file.name}`;
-        const response = await uploadFile(file, percent => { $("uploadStatus").textContent = `${index + 1}/${supported.length} · ${file.name} · ${percent < 100 ? `上傳 ${percent}%` : "正在確認素材…"}`; }); const media = response.media || response;
-        state.media.set(media.id, media); renderMedia();
-        importedMedia.push(media);
+      for (const item of batch.items) {
+        const { file } = item;
+        if (batch.controller.signal.aborted) { item.status = "已取消"; continue; }
+        if (!/\.(mp4|webm|mp3|wav|m4a|aac|flac|ogg|opus|png|jpe?g|webp)$/i.test(file.name)) { item.status = "失敗：不支援的檔案類型"; continue; }
+        if (!state.imageOverlaysReady && /\.(png|jpe?g|webp)$/i.test(file.name)) { item.status = "失敗：請重新啟動 Studio 載入圖片功能"; continue; }
+        try {
+          item.status = "準備上傳"; renderUploadResults(batch);
+          const response = await uploadFile(file, percent => { item.status = percent < 100 ? `上傳 ${percent}%` : "正在確認素材…"; renderUploadResults(batch); }, "/api/editor/upload", batch.controller.signal);
+          const media = response.media || response;
+          state.media.set(media.id, media); importedMedia.push(media); item.status = "完成"; renderMedia();
+        } catch (error) { item.status = batch.controller.signal.aborted ? "已取消" : `失敗：${error.message}`; }
+        renderUploadResults(batch);
       }
-      notify("素材已加入，可加入影片軌或音訊軌。");
-    } finally { state.busy = false; $("uploadStatus").textContent = ""; $("uploadInput").value = ""; $("audioUploadInput").value = ""; $("imageUploadInput").value = ""; renderDisabled(); }
+      renderUploadResults(batch); notify(`匯入完成 ${importedMedia.length} / ${batch.items.length} 份；各檔結果保留在素材庫。`);
+    } finally { state.uploadBatch = null; $("cancelUpload").classList.add("hidden"); $("uploadInput").value = ""; $("audioUploadInput").value = ""; $("imageUploadInput").value = ""; renderDisabled(); }
     return importedMedia;
   }
-  function uploadFile(file, progress, path = "/api/editor/upload") {
+  function renderUploadResults(batch) {
+    $("uploadStatus").innerHTML = batch.items.map(item => `<div class="upload-result"><span>${escape(item.file.name)}</span><small>${escape(item.status)}</small></div>`).join("");
+  }
+  function uploadFile(file, progress, path = "/api/editor/upload", signal = null) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest(), form = new FormData(); form.append("file", file);
-      xhr.open("POST", path); xhr.responseType = "json";
+      const abort = () => xhr.abort(), finish = (callback, value) => { signal?.removeEventListener("abort", abort); callback(value); };
+      xhr.open("POST", path); xhr.responseType = "json"; xhr.timeout = 600000;
       xhr.upload.onprogress = event => { if (event.lengthComputable) progress(Math.round(event.loaded * 100 / event.total)); };
-      xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve(xhr.response) : reject(new Error(xhr.response?.error || `素材上傳未完成（${xhr.status}）。`));
-      xhr.onerror = () => reject(new Error("素材上傳連線中斷，請重試。")); xhr.onabort = () => reject(new Error("上傳已取消。")); xhr.send(form);
+      xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? finish(resolve, xhr.response) : finish(reject, new Error(xhr.response?.error || `素材上傳未完成（${xhr.status}）。`));
+      xhr.onerror = () => finish(reject, new Error("素材上傳連線中斷，請重試。"));
+      xhr.ontimeout = () => finish(reject, new Error("上傳超過 10 分鐘，已結束等待；可重新選擇此檔重試。"));
+      xhr.onabort = () => finish(reject, new Error("上傳已取消。"));
+      if (signal?.aborted) { finish(reject, new Error("上傳已取消。")); return; }
+      signal?.addEventListener("abort", abort, { once: true }); xhr.send(form);
     });
   }
   async function checkPreview(mediaId, force = false) {
@@ -2053,7 +2680,7 @@
     try {
       const value = await api(`/api/editor/media/${encodeURIComponent(mediaId)}/preview`); state.previews.set(mediaId, value);
       if (["queued", "running"].includes(value.status)) { clearTimeout(state.previewTimers.get(mediaId)); state.previewTimers.set(mediaId, setTimeout(() => checkPreview(mediaId, true), 1200)); }
-      if (value.status === "completed" && !state.trimDrag && !state.overlayDrag) { if (!state.playing && project()?.clips[state.previewIndex]?.media_id === mediaId) seek(state.playhead, false); else preloadNext(); }
+      if (value.status === "completed" && !state.colorDrag && !state.trimDrag && !state.overlayDrag) { if (!state.playing && project()?.clips[state.previewIndex]?.media_id === mediaId) seek(state.playhead, false); else preloadNext(); }
     } catch { state.previews.set(mediaId, { status: "missing" }); }
     finally { state.previewRequests.delete(mediaId); renderCacheStatus(); }
   }
@@ -2120,7 +2747,8 @@
     if (exporting()) $("autoDownloadExport").checked = job.auto_download === true;
     $("downloadExport").classList.toggle("hidden", job.status !== "completed");
     $("downloadExport").href = `/api/editor/exports/${encodeURIComponent(job.id)}/file?download=1`;
-    $("exportDetail").textContent = job.error || (job.status === "completed" ? "這是上次匯出的檔案；重新匯出會使用目前的剪輯。" : "使用已儲存的剪輯與輸出設定。");
+    const source = job.source;
+    $("exportDetail").textContent = job.error || (source ? `成品來源：${source.name || "剪輯專案"} · ${source.width} × ${source.height} · ${source.fps} fps · ${source.updated_at ? new Date(source.updated_at).toLocaleString("zh-TW") : "已儲存版本"}。` : "使用送出時已儲存的剪輯快照。") + (exporting() ? " 可關閉視窗繼續編輯或切換專案，後續修改不會改變這次成品。" : " 可從下方紀錄再次下載。");
     renderDisabled();
   }
   function closeExportDialog() { if ($("exportDialog").open) $("exportDialog").close(); }
@@ -2129,12 +2757,28 @@
     pause(); renderExport();
     if (!$('exportDialog').open) $("exportDialog").showModal();
     if (state.exportJob) pollExport();
+    loadExportHistory();
+  }
+  async function loadExportHistory() {
+    const projectId = project()?.id, serial = ++state.exportHistorySerial;
+    if (!projectId || !state.exportHistoryReady) { $("exportHistory").textContent = "主機更新後可查看本專案的全部匯出紀錄。"; return; }
+    $("exportHistory").textContent = "正在讀取主機匯出紀錄…";
+    try {
+      const jobs = await api(`/api/editor/projects/${encodeURIComponent(projectId)}/exports`);
+      if (serial !== state.exportHistorySerial || project()?.id !== projectId) return;
+      state.exportHistory = list(jobs, "exports");
+      $("exportHistory").innerHTML = state.exportHistory.map(job => {
+        const source = job.source || {}, labels = { queued: "等待中", running: "匯出中", completed: "完成", failed: "失敗", cancelled: "已取消" };
+        return `<article class="export-history-item"><div><strong>${escape(source.name || "剪輯影片")}</strong><small>${escape(new Date(job.created_at).toLocaleString("zh-TW"))} · ${escape(source.width || "")} × ${escape(source.height || "")} · ${escape(source.fps || "")} fps · ${labels[job.status] || "確認中"}</small><small>來源版本：${escape(source.updated_at ? new Date(source.updated_at).toLocaleString("zh-TW") : "未記錄")}</small></div>${job.status === "completed" ? `<a class="button secondary small" href="/api/editor/exports/${encodeURIComponent(job.id)}/file?download=1" download>下載 MP4</a>` : ""}</article>`;
+      }).join("") || '<p class="subtle">此專案尚無匯出紀錄。</p>';
+      if (!state.exportJob && state.exportHistory.length) { state.exportJob = state.exportHistory[0]; renderExport(); if (exporting()) pollExport(); }
+    } catch (error) { if (serial === state.exportHistorySerial) $("exportHistory").textContent = `匯出紀錄暫時無法讀取：${error.message}。可按重新整理重試。`; }
   }
   function downloadExport(manual = false) {
     const job = state.exportJob;
     if (job?.status !== "completed" || (!manual && job.download_requested)) return;
     job.download_requested = true;
-    storagePut(`h3-editor-export:${project().id}`, job);
+    storagePut(`h3-editor-export:${job.project_id}`, job);
     if (!manual) {
       const link = document.createElement("a");
       link.href = $("downloadExport").href; link.download = ""; link.hidden = true;
@@ -2144,18 +2788,18 @@
     notify("已送出 MP4 下載；可從右上「匯出 MP4」再次下載。");
   }
   async function pollExport() {
-    const id = state.exportJob?.id, projectId = project()?.id; if (!id || !projectId) return;
+    const id = state.exportJob?.id, projectId = state.exportJob?.project_id; if (!id || !projectId) return;
     clearTimeout(state.exportTimer); state.exportTimer = null;
     try {
       const response = await api(`/api/editor/exports/${encodeURIComponent(id)}`);
-      if (state.exportJob?.id !== id || project()?.id !== projectId) return;
+      if (state.exportJob?.id !== id) return;
       const previous = state.exportJob;
       state.exportJob = { ...(response.export || response), auto_download: previous.auto_download === true, download_requested: previous.download_requested === true };
       storagePut(`h3-editor-export:${projectId}`, state.exportJob); renderExport();
       if (state.exportJob.status === "completed" && state.exportJob.auto_download && !state.exportJob.download_requested) downloadExport();
-      if (!exporting()) return;
+      if (!exporting()) { loadExportHistory(); return; }
     } catch (error) {
-      if (state.exportJob?.id !== id || project()?.id !== projectId) return;
+      if (state.exportJob?.id !== id) return;
       if (error.status === 404) {
         state.exportJob = { ...state.exportJob, status: "failed", error: "上次匯出的檔案已無法取得，請重新匯出目前的剪輯。" };
         storagePut(`h3-editor-export:${projectId}`, state.exportJob); renderExport(); return;
@@ -2165,7 +2809,7 @@
     clearTimeout(state.exportTimer); state.exportTimer = setTimeout(pollExport, 1200);
   }
   async function startExport() {
-    if (locked() || !totalDuration(project())) return;
+    if (locked() || exporting() || !totalDuration(project())) return;
     const session = state.session, projectId = project().id, autoDownload = $("autoDownloadExport").checked;
     pause(); state.busy = true; renderDisabled();
     try {
@@ -2181,14 +2825,19 @@
   async function boot() {
     renderDisabled();
     const capabilities = await requireCapabilities(api); state.backendReady = true; state.archivesReady = capabilities.project_archives === true;
+    state.subtitleCapacity = Number(capabilities.subtitle_capacity) || 50; state.backgroundReady = capabilities.project_background === true; state.exportHistoryReady = capabilities.export_history === true;
+    state.colorReady = capabilities.color_adjustments === true;
     state.clipAnimationsReady = capabilities.clip_animations === true; state.clipTransitionsReady = capabilities.clip_transitions === true;
+    state.transitionEffectsReady = capabilities.transition_effects === true;
+    state.referenceTransitionsReady = capabilities.reference_transitions === true;
     state.overlayTracksReady = capabilities.overlay_tracks === true;
     state.textOverlaysReady = capabilities.text_overlays === true; state.imageOverlaysReady = capabilities.image_overlays === true; state.videoOverlaysReady = capabilities.video_overlays === true; state.visualFadesReady = capabilities.visual_fades === true; state.positionKeyframesReady = capabilities.position_keyframes === true; state.speedCurvesReady = capabilities.speed_curves === true;
     applyMotionCapability(capabilities);
     applyTextStyleCapability(capabilities);
+    state.textFontsReady = capabilities.text_fonts === true; state.textIdleReady = capabilities.text_idle_animations === true;
     $("overlaySupport").textContent = state.textOverlaysReady && state.imageOverlaysReady ? state.videoOverlaysReady && state.visualFadesReady ? state.overlayTracksReady ? "按住片段拖到軌道中央可放入同一軌；上下邊緣可新增層級。影片最多同時 3 個上層。" : "同軌拖曳更新需重新啟動 Studio；原有圖層仍可編輯。" : "影片分層與淡入淡出更新需重新啟動 Studio；文字／圖片仍可編輯。" : "文字／圖片圖層需重新啟動 Studio 後重新整理，現有剪輯仍可使用。";
     $("archiveStatus").textContent = state.archivesReady ? "" : "完整備份需重新啟動 Studio 載入更新；一般儲存與開啟仍可使用。";
-    const data = await Promise.all([api("/api/editor/media"), api("/api/editor/projects")]);
+    const data = await Promise.all([api("/api/editor/media"), api("/api/editor/projects"), loadTextFonts(), checkMediaLibrarySupport()]);
     state.media = new Map(list(data[0], "media").map(item => [item.id, item])); state.projects = list(data[1], "projects");
     renderMedia();
     const url = new URL(location.href), requested = url.searchParams.get("project"), last = storageGet("h3-editor-last-project");
@@ -2249,19 +2898,70 @@
   $("projectName").onblur = () => { if (state.session) state.session.group = null; };
   $("outputSize").onchange = action(() => { const [width, height] = $("outputSize").value.split("x").map(Number); edit(p => { p.width = width; p.height = height; }, null, false); });
   $("outputFps").onchange = action(() => edit(p => { p.fps = Number($("outputFps").value); }, null, false));
+  $("canvasDuration").onchange = action(() => edit(p => { p.canvas_duration = Number($("canvasDuration").value); validateProject(p, state.media); }));
+  $("canvasBackground").onchange = action(() => edit(p => { p.background = $("canvasBackground").value; }, null, false));
+  $("cancelUpload").onclick = () => { if (state.uploadBatch) { state.uploadBatch.controller.abort(); $("cancelUpload").disabled = true; } };
+  for (const id of ["mediaSearch", "mediaKind", "mediaUsed"]) $(id).addEventListener(id === "mediaSearch" ? "input" : "change", renderMedia);
+  $("closeMediaPreview").onclick = closeMediaPreview;
+  $("mediaPreviewDialog").addEventListener("close", () => { if (!$("mediaPreviewDialog").open) closeMediaPreview(); });
+  for (const id of ["mediaPreviewVideo", "mediaPreviewAudio", "mediaPreviewImage"]) $(id).addEventListener("error", () => { if ($("mediaPreviewDialog").open) $("mediaPreviewStatus").textContent = "這份素材暫時無法預覽，請確認主機連線或重新選擇素材。時間軸內容仍保留。"; });
   ["uploadZone", "emptyAddMedia"].forEach(id => $(id).onclick = () => { if (!locked()) $("uploadInput").click(); });
   $("addAudio").onclick = () => { if (!locked()) $("audioUploadInput").click(); };
   $("uploadInput").onchange = action(event => importFiles([...event.target.files]));
   $("audioUploadInput").onchange = action(event => importFiles([...event.target.files]));
   $("addTextOverlay").onclick = action(() => addOverlay("text"));
+  $("addSubtitle").onclick = action(addSubtitle);
+  $("generateAutoCaptions").onclick = action(generateAutoCaptions);
+  $("cancelAutoCaptions").onclick = action(cancelAutoCaptions);
+  $("applyAutoCaptions").onclick = action(applyAutoCaptions);
+  $("downloadAutoCaptions").onclick = action(downloadAutoCaptions);
+  $("checkAutoCaptions").onclick = action(() => { if (!state.busy && !state.captionChecking) return refreshAutoCaptions(); });
+  $("importSubtitles").onclick = () => { if (!$("importSubtitles").disabled) $("subtitleFileInput").click(); };
+  $("subtitleFileInput").onchange = action(event => importSubtitles(event.target.files[0]));
+  $("exportSubtitles").onclick = action(exportSubtitles);
+  $("subtitleTrack").onchange = action(changeSubtitleTrack);
+  $("openSubtitleWorkspace").onclick = action(openSubtitleWorkspace);
+  $("closeSubtitleWorkspace").onclick = () => {
+    if (state.colorWorkspaceOpen && state.selectedKind === "color") { state.selectedKind = "video"; state.selected = project()?.clips[0]?.id || null; }
+    state.colorWorkspaceOpen = false; state.subtitleWorkspaceOpen = false; render(); $("inspectorPanel").scrollTop = 0;
+  };
+  $("openColorWorkspace").onclick = action(openColorWorkspace);
+  $("previousSubtitle").onclick = action(() => stepSubtitleCue(-1));
+  $("nextSubtitle").onclick = action(() => stepSubtitleCue(1));
+  // Let native buttons/details handle Space and Enter instead of starting playback.
+  const subtitleControlKeys = event => {
+    if ((event.code === "Space" || event.key === "Enter") && event.target.closest("button,summary")) event.stopPropagation();
+  };
+  $("subtitlePanel").addEventListener("keydown", subtitleControlKeys);
+  $("openSubtitleWorkspace").addEventListener("keydown", subtitleControlKeys);
+  $("closeSubtitleWorkspace").addEventListener("keydown", subtitleControlKeys);
+  $("colorPanel").addEventListener("keydown", subtitleControlKeys);
+  $("openColorWorkspace").addEventListener("keydown", subtitleControlKeys);
+  for (const tab of ["content", "style", "create"]) {
+    const button = $(`subtitleTab-${tab}`);
+    button.onclick = () => { state.subtitleWorkspaceTab = tab; renderSubtitleControls(); $("inspectorPanel").scrollTop = 0; };
+    button.onkeydown = event => {
+      const tabs = ["content", "style", "create"], index = tabs.indexOf(tab);
+      const next = event.key === "ArrowRight" ? (index + 1) % 3 : event.key === "ArrowLeft" ? (index + 2) % 3 : event.key === "Home" ? 0 : event.key === "End" ? 2 : -1;
+      if (next >= 0) { event.preventDefault(); event.stopPropagation(); $(`subtitleTab-${tabs[next]}`).click(); $(`subtitleTab-${tabs[next]}`).focus({ preventScroll: true }); }
+    };
+  }
+  $("applySubtitlePreset").onclick = action(() => applySubtitleStyle(false));
+  $("copySubtitleStyle").onclick = action(() => applySubtitleStyle(true));
+  $("subtitleList").onclick = action(event => {
+    const button = event.target.closest("[data-subtitle-id]"); if (!button || locked()) return;
+    selectSubtitleCue(button.dataset.subtitleId);
+  });
   $("addImageOverlay").onclick = () => { if (!locked() && state.imageOverlaysReady) $("imageUploadInput").click(); };
-  $("imageUploadInput").onchange = action(async event => { const media = await importFiles([...event.target.files]); for (const item of media || []) addOverlay("image", item.id); });
+  $("imageUploadInput").onchange = action(async event => { const session = state.session, media = await importFiles([...event.target.files]); if (state.session !== session) { if (media?.length) notify("圖片已加入共用素材庫；專案已切換，請自行選擇要加入的圖片。"); return; } for (const item of media || []) addOverlay("image", item.id); });
   let dragDepth = 0;
   document.addEventListener("dragenter", event => { if ([...event.dataTransfer.types].includes("Files")) { event.preventDefault(); dragDepth++; document.body.classList.add("dragging-file"); } });
   document.addEventListener("dragover", event => { if ([...event.dataTransfer.types].includes("Files")) event.preventDefault(); });
   document.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove("dragging-file"); } });
   document.addEventListener("drop", action(async event => { if (!event.dataTransfer.files.length) return; event.preventDefault(); dragDepth = 0; document.body.classList.remove("dragging-file"); await importFiles([...event.dataTransfer.files]); }));
-  $("mediaList").onclick = action(event => { const layer = event.target.closest("[data-add-video-layer]"), audio = event.target.closest("[data-add-audio]"), button = event.target.closest("[data-add-media]"); if (locked()) return; if (layer) addOverlay("video", layer.dataset.addVideoLayer); else if (audio) addAudioMedia(audio.dataset.addAudio); else if (button) addMedia(button.dataset.addMedia); });
+  $("mediaList").onclick = action(event => { const preview = event.target.closest("[data-preview-media]"); if (preview) return openMediaPreview(preview.dataset.previewMedia); const remove = event.target.closest("[data-remove-media]"), layer = event.target.closest("[data-add-video-layer]"), audio = event.target.closest("[data-add-audio]"), button = event.target.closest("[data-add-media]"); if (locked()) return; if (remove) return setMediaRemoved(remove.dataset.removeMedia, true); if (layer) addOverlay("video", layer.dataset.addVideoLayer); else if (audio) addAudioMedia(audio.dataset.addAudio); else if (button) addMedia(button.dataset.addMedia); });
+  $("removedMediaList").onclick = action(event => { const button = event.target.closest("[data-restore-media]"); if (button && !locked()) return setMediaRemoved(button.dataset.restoreMedia, false); });
+  $("checkMediaLibrary").onclick = action(() => { if (!state.busy) return checkMediaLibrarySupport(); });
   $("jobList").onclick = action(event => { const button = event.target.closest("[data-import-job]"); if (button && !locked()) return importJob(button.dataset.importJob); });
   const videoHistoryUI = createEditorVideoHistory({ elements: {
     list: $("videoHistoryList"), status: $("videoHistoryStatus"), filter: $("videoHistoryScope"), refresh: $("refreshVideoHistory"),
@@ -2403,6 +3103,13 @@
   }));
   $("overlayText").oninput = action(() => overlayEdit(layer => { layer.text = $("overlayText").value; }, `overlay-text:${state.selected}`));
   $("overlayText").onchange = () => { if (state.session) state.session.group = null; };
+  $("overlayFontFamily").onchange = action(() => editTextFont($("overlayFontFamily").value));
+  $("checkTextFontSupport").onclick = action(async () => {
+    if (state.fontCatalogBusy) return;
+    const capabilities = await requireCapabilities(api); state.textFontsReady = capabilities.text_fonts === true; state.textIdleReady = capabilities.text_idle_animations === true;
+    const refreshed = await loadTextFonts(true); renderAnimationControls(); renderDisabled();
+    notify(!refreshed ? "字型清單更新失敗；已保留目前字型與上次清單。" : state.textFontsReady && state.fontCatalogReady ? "已重新讀取電腦安裝的字型，預覽與匯出會使用同一字型。" : "目前字型功能尚未就緒；字型與草稿仍保留，請更新主機後再讀取。");
+  });
   function editTextStyle(update) {
     if (locked() || state.selectedKind !== "overlay" || selectedClip()?.kind !== "text") return;
     if (!state.textStyleReady) throw new Error("請先儲存專案並重新啟動 Studio，以載入文字描邊與漸層功能。");
@@ -2441,20 +3148,29 @@
   $("muteOriginal").onclick = action(() => selectedEdit(clip => { clip.volume = clip.volume ? 0 : 1; }, false));
   $("detachAudio").onclick = action(() => { let id; edit(p => { id = detachAudio(p, state.selected); validateProject(p, state.media); }, null, false); state.selected = id; state.selectedKind = "audio"; render(); notify("原聲已分離到音訊軌，原影片已靜音。"); });
   $("resetTrim").onclick = action(() => selectedEdit(clip => { clip.in = 0; clip.out = Number(state.media.get(clip.media_id).duration); }));
-  function doSplit() { if (state.selectedKind === "overlay" && !state.overlayTracksReady) throw new Error("請重新啟動 Studio，以在同一軌道分割片段。"); let selected; edit(p => { selected = state.selectedKind === "overlay" ? splitOverlayAt(p, state.selected, state.playhead) : state.selectedKind === "audio" ? splitAudioAt(p, state.selected, state.playhead) : splitAt(p, state.playhead); }, null, state.selectedKind !== "overlay"); if (selected) { state.selected = selected; render(); } }
+  function doSplit() {
+    if (state.selectedKind === "color") {
+      if (!state.colorReady) return;
+      const item = selectedClip(), time = state.playhead, frame = 1 / project().fps;
+      if (!item || time - item.start < frame - 1e-9 || item.end - time < frame - 1e-9) throw new Error("請把播放游標放在調色片段內，兩邊各保留至少一個影格。");
+      const id = uid(); edit(value => { const items = colorMath.adjustments(value), index = items.findIndex(entry => entry.id === item.id); items.splice(index + 1, 0, { ...items[index], id, start: time }); items[index].end = time; }, null, false);
+      state.selected = id; render(); return;
+    }
+    if (state.selectedKind === "overlay" && !state.overlayTracksReady) throw new Error("請重新啟動 Studio，以在同一軌道分割片段。"); let selected; edit(p => { selected = state.selectedKind === "overlay" ? splitOverlayAt(p, state.selected, state.playhead) : state.selectedKind === "audio" ? splitAudioAt(p, state.selected, state.playhead) : splitAt(p, state.playhead); }, null, state.selectedKind !== "overlay"); if (selected) { state.selected = selected; render(); }
+  }
   $("splitClip").onclick = action(doSplit);
-  $("duplicateClip").onclick = action(() => { let next; edit(p => { const clips = state.selectedKind === "overlay" ? overlays(p) : state.selectedKind === "audio" ? audioClips(p) : p.clips, index = clips.findIndex(c => c.id === state.selected); if (index >= 0) { next = uid(); const copied = { ...clips[index], id: next }; if (state.selectedKind === "audio") { copied.start += duration(copied); copied.track = freeAudioTrack(p, copied.start, duration(copied)); } if (state.selectedKind === "overlay") { delete copied.transition_out; delete copied.track_id; copied.x = clamp(copied.x + 0.025, 0, 1); copied.y = clamp(copied.y + 0.025, 0, 1); let after = index; while (after + 1 < clips.length && core.overlayTrackId(clips[after + 1]) === core.overlayTrackId(clips[index])) after++; clips.splice(after + 1, 0, copied); } else clips.splice(index + 1, 0, copied); } }, null, state.selectedKind !== "overlay"); if (next) { state.selected = next; render(); } });
-  function deleteSelected() { edit(p => { const clips = state.selectedKind === "overlay" ? overlays(p) : state.selectedKind === "audio" ? audioClips(p) : p.clips, index = clips.findIndex(c => c.id === state.selected); if (index >= 0) clips.splice(index, 1); }, null, state.selectedKind !== "overlay"); }
+  $("duplicateClip").onclick = action(() => { let next; edit(p => { const clips = state.selectedKind === "color" ? colorMath.adjustments(p) : state.selectedKind === "overlay" ? overlays(p) : state.selectedKind === "audio" ? audioClips(p) : p.clips, index = clips.findIndex(c => c.id === state.selected); if (index >= 0) { next = uid(); const copied = { ...clone(clips[index]), id: next }; if (state.selectedKind === "color") { const length = copied.end - copied.start; copied.start = copied.end; copied.end += length; if (copied.end > 600) throw new Error("複製後的調色範圍超過 10 分鐘，請先縮短片段。"); } if (state.selectedKind === "audio") { copied.start += duration(copied); copied.track = freeAudioTrack(p, copied.start, duration(copied)); } if (state.selectedKind === "overlay") { delete copied.transition_out; copied.track_id = isSubtitleLayer(copied) ? `subtitle_${next}` : undefined; if (copied.track_id === undefined) delete copied.track_id; copied.x = clamp(copied.x + 0.025, 0, 1); copied.y = clamp(copied.y + 0.025, 0, 1); let after = index; while (after + 1 < clips.length && core.overlayTrackId(clips[after + 1]) === core.overlayTrackId(clips[index])) after++; clips.splice(after + 1, 0, copied); } else clips.splice(index + 1, 0, copied); } }, null, !["overlay", "color"].includes(state.selectedKind)); if (next) { state.selected = next; render(); } });
+  function deleteSelected() { edit(p => { const clips = state.selectedKind === "color" ? colorMath.adjustments(p) : state.selectedKind === "overlay" ? overlays(p) : state.selectedKind === "audio" ? audioClips(p) : p.clips, index = clips.findIndex(c => c.id === state.selected); if (index >= 0) clips.splice(index, 1); }, null, !["overlay", "color"].includes(state.selectedKind)); }
   $("deleteClip").onclick = action(deleteSelected);
-  function moveSelected(delta) { edit(p => { if (state.selectedKind === "audio") { const clip = audioClips(p).find(item => item.id === state.selected); if (clip) clip.start = clamp(clip.start + delta, 0, 600); } else if (state.selectedKind === "overlay") { core.moveOverlayTrack(p, state.selected, delta); } else { const clips = p.clips, index = clips.findIndex(c => c.id === state.selected), target = index + delta; if (index >= 0 && target >= 0 && target < clips.length) { const [clip] = clips.splice(index, 1); clips.splice(target, 0, clip); } } }, null, state.selectedKind !== "overlay"); }
+  function moveSelected(direction) { edit(p => { const delta = direction / p.fps; if (state.selectedKind === "color") { const item = colorMath.adjustments(p).find(entry => entry.id === state.selected); if (item) { const length = item.end - item.start; item.start = clamp(item.start + delta, 0, 600 - length); item.end = item.start + length; } } else if (state.selectedKind === "audio") { const clip = audioClips(p).find(item => item.id === state.selected); if (clip) clip.start = clamp(clip.start + delta, 0, 600); } else if (state.selectedKind === "overlay") { p.overlays = shiftOverlayTime(p, state.selected, "move", delta, state.media).project.overlays; } else { const clips = p.clips, index = clips.findIndex(c => c.id === state.selected), target = index + direction; if (index >= 0 && target >= 0 && target < clips.length) { const [clip] = clips.splice(index, 1); clips.splice(target, 0, clip); } } }, null, !["overlay", "color"].includes(state.selectedKind)); }
   $("moveEarlier").onclick = action(() => moveSelected(-1)); $("moveLater").onclick = action(() => moveSelected(1));
-  $("layerDown").onclick = action(() => moveSelected(-1)); $("layerUp").onclick = action(() => moveSelected(1));
-  function transportSignature(value) { return JSON.stringify({ clips: value.clips.map(clip => [clip.id, clip.media_id, clip.in, clip.out, speedOf(clip), canonicalSpeedCurve(clip)]), audio: audioClips(value), layers: overlays(value).filter(layer => layer.kind === "video").map(layer => [layer.id, layer.media_id, layer.in, layer.out, layer.start, speedOf(layer), canonicalSpeedCurve(layer)]).sort((a, b) => a[0].localeCompare(b[0])) }); }
+  $("layerDown").onclick = action(() => edit(p => core.moveOverlayTrack(p, state.selected, -1), null, false)); $("layerUp").onclick = action(() => edit(p => core.moveOverlayTrack(p, state.selected, 1), null, false));
+  function transportSignature(value) { return JSON.stringify({ canvas_duration: value.canvas_duration || 0, clips: value.clips.map(clip => [clip.id, clip.media_id, clip.in, clip.out, speedOf(clip), canonicalSpeedCurve(clip)]), audio: audioClips(value), layers: overlays(value).filter(layer => layer.kind === "video").map(layer => [layer.id, layer.media_id, layer.in, layer.out, layer.start, speedOf(layer), canonicalSpeedCurve(layer)]).sort((a, b) => a[0].localeCompare(b[0])) }); }
   function travel(undo) {
     if (locked()) return;
     const before = transportSignature(project()); state.session.travel(undo);
     if (!selectedClip()) {
-      const groups = [["video", project().clips], ["overlay", overlays(project())], ["audio", audioClips(project())]];
+      const groups = [["color", colorMath.adjustments(project())], ["video", project().clips], ["overlay", overlays(project())], ["audio", audioClips(project())]];
       const same = groups.find(([, items]) => items.some(item => item.id === state.selected));
       if (same) state.selectedKind = same[0];
       else { const available = groups.find(([, items]) => items.length); state.selectedKind = available?.[0] || "video"; state.selected = available?.[1][0].id || null; }
@@ -2463,6 +3179,18 @@
   }
   $("undo").onclick = () => travel(true); $("redo").onclick = () => travel(false);
   $("timelineZoom").oninput = () => { state.zoom = Number($("timelineZoom").value); renderTimeline(); };
+  $("colorTrack").onclick = action(event => { const node = event.target.closest("[data-color-id]"); if (node && performance.now() >= state.colorSuppressUntil) selectColor(node.dataset.colorId); });
+  $("timelineCanvas").addEventListener("pointerdown", action(beginColorGesture));
+  $("timelineCanvas").addEventListener("pointermove", event => {
+    const drag = state.colorDrag; if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault(); drag.lastX = event.clientX;
+    if (drag.frame === null) drag.frame = requestAnimationFrame(flushColorGesture);
+  });
+  $("timelineCanvas").addEventListener("pointerup", event => {
+    const drag = state.colorDrag; if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault(); event.stopPropagation(); drag.lastX = event.clientX; finishColorGesture(true);
+  });
+  for (const name of ["pointercancel", "lostpointercapture"]) $("timelineCanvas").addEventListener(name, event => { if (state.colorDrag?.pointerId === event.pointerId) finishColorGesture(false); });
   $("timelineCanvas").addEventListener("pointerdown", action(beginTrim));
   $("timelineCanvas").addEventListener("pointerdown", action(beginTrackGesture));
   $("timelineCanvas").addEventListener("pointermove", event => {
@@ -2496,7 +3224,8 @@
   }, true);
   $("timelineCanvas").addEventListener("dragstart", event => { if (state.trimDrag || event.target.closest("[data-trim-edge]")) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
   $("timelineCanvas").onclick = event => {
-    if (!project() || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) return;
+    if (event.target.closest("[data-color-id]")) return;
+    if (!project() || state.colorDrag || state.trimDrag || state.overlayDrag || state.speedDrag || state.trackDrag || state.layoutDragging) return;
     const transition = event.target.closest("[data-transition-for]");
     if (transition) {
       event.preventDefault(); state.selected = transition.dataset.transitionFor; state.selectedKind = transition.dataset.transitionKind;
@@ -2514,19 +3243,37 @@
   $("clipTrack").ondragstart = event => event.preventDefault();
   $("exportProject").onclick = openExportDialog;
   $("startExport").onclick = action(startExport);
+  $("refreshExportHistory").onclick = action(loadExportHistory);
   $("closeExportDialog").onclick = closeExportDialog;
   $("downloadExport").onclick = () => downloadExport(true);
   $("cancelExport").onclick = action(async () => { if (!exporting()) return; $("cancelExport").disabled = true; try { await api(`/api/editor/exports/${state.exportJob.id}/cancel`, json("POST")); await pollExport(); } finally { $("cancelExport").disabled = false; } });
   document.addEventListener("keydown", action(async event => {
     if ($("videoHistoryDialog")?.open) return;
+    if (event.isComposing || $("mediaPreviewDialog")?.open) return;
     if (event.defaultPrevented) return;
     if ($("exportDialog").open) return;
+    if (state.colorDrag) { if (event.key === "Escape") finishColorGesture(false); event.preventDefault(); return; }
     if (state.layoutDragging) { event.preventDefault(); return; }
     if (state.trackDrag) { if (event.key === "Escape") finishTrackGesture(false); event.preventDefault(); return; }
     if (state.speedDrag) { event.preventDefault(); return; }
     if (state.overlayDrag) { if (event.key === "Escape") finishOverlayGesture(false); event.preventDefault(); return; }
     if (state.trimDrag) { if (event.key === "Escape") finishTrim(false); event.preventDefault(); return; }
     if (event.target.closest("[data-position-time]") && (event.key === "Enter" || event.code === "Space")) { jumpPositionKeyframe(event); return; }
+    const colorNode = event.target.closest("[data-color-id]");
+    if (colorNode && !event.ctrlKey && !event.metaKey && !event.altKey && ["ArrowLeft", "ArrowRight", "Enter", " ", "Delete", "Backspace"].includes(event.key)) {
+      event.preventDefault(); if (locked()) return;
+      const id = colorNode.dataset.colorId;
+      state.selectedKind = "color"; state.selected = id;
+      if (["ArrowLeft", "ArrowRight"].includes(event.key)) {
+        pause(); const item = selectedClip(), mode = event.target.closest("[data-color-edge]")?.dataset.colorEdge || "move";
+        const tx = new root.H3EditorColorUI.AdjustmentTransaction(state.session, id, mode, { maxEnd: Math.min(600, Math.max(item.end, totalDuration(project()))) });
+        tx.update((event.key === "ArrowRight" ? 1 : -1) / project().fps); tx.commit(); render();
+        const replacement = [...$("colorTrack").querySelectorAll("[data-color-id]")].find(node => node.dataset.colorId === id);
+        (mode === "move" ? replacement : replacement?.querySelector(`[data-color-edge="${mode}"]`))?.focus({ preventScroll: true });
+      } else if (["Delete", "Backspace"].includes(event.key)) deleteSelected();
+      else selectColor(id);
+      return;
+    }
     const overlayNode = event.target.closest("[data-overlay-id]");
     if (overlayNode && (event.key === "Enter" || event.code === "Space") && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); if (locked() || event.repeat) return;
@@ -2553,19 +3300,20 @@
     }
     const handle = event.target.closest("[data-trim-edge]");
     if (handle && ["ArrowLeft", "ArrowRight"].includes(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); keyboardTrim(handle, event.key === "ArrowLeft" ? -1 : 1); return; }
-    const writing = event.target.closest("input,textarea,select,[contenteditable=true]");
+    const writing = event.target.closest("input,textarea,select,[contenteditable]:not([contenteditable=false])");
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); if (!locked()) await saveProject(); return; }
     if (event.target.closest("#speedEditor") && !((event.ctrlKey || event.metaKey) && ["z", "y"].includes(event.key.toLowerCase()))) return;
     if (writing || event.altKey) return;
+    if (event.target.closest("button,a,summary,[role=button],[role=link],[role=tab],[role=slider],[role=separator]") && !event.target.closest("[data-overlay-id],[data-color-id],[data-trim-edge],.timeline-clip,.audio-clip")) return;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") { event.preventDefault(); travel(!event.shiftKey); }
     else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") { event.preventDefault(); travel(false); }
     else if (event.code === "Space") { event.preventDefault(); if (!event.repeat) await togglePlay(); }
     else if (!event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "s" && !locked()) { event.preventDefault(); doSplit(); }
     else if (["Delete", "Backspace"].includes(event.key) && !locked()) { event.preventDefault(); deleteSelected(); }
   }));
-  root.addEventListener("blur", () => { finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); });
-  document.addEventListener("visibilitychange", () => { if (document.hidden) { pause(); finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); } });
-  root.addEventListener("beforeunload", event => { finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); if (state.session?.dirty || state.session?.inFlight) { rememberDraft(); event.preventDefault(); event.returnValue = ""; } });
+  root.addEventListener("blur", () => { finishColorGesture(false); finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) { pause(); finishColorGesture(false); finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); } });
+  root.addEventListener("beforeunload", event => { finishColorGesture(false); finishTrim(false); finishOverlayGesture(false); speedEditor.cancelGesture(); finishTrackGesture(false); if (state.session?.dirty || state.session?.inFlight) { rememberDraft(); event.preventDefault(); event.returnValue = ""; } });
   root.addEventListener("resize", () => { previewViewport.cancelPan(); resizePreview(); renderTimeline(); });
   if (root.ResizeObserver) new ResizeObserver(() => { previewViewport.cancelPan(); resizePreview(); }).observe($("videoStage"));
   requestAnimationFrame(playbackTick);

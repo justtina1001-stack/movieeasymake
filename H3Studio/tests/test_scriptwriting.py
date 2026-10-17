@@ -27,6 +27,45 @@ STORYBOARD = {
                            "camera": "tracking", "shot_size": "medium"}]}],
 }
 
+TIMED_SCREENPLAY = (
+    "# 回家的路\n全片風格：自然明亮。\n聲音規則：零 BGM。\n"
+    "1. 0.0–5.0s｜抵達月台\n鏡頭／景別：24mm 廣角。\n地點：車站月台。\n"
+    "角色／位置：阿青在畫面左側。\n動作／表情：提著行李走近候車線。\n"
+    "運鏡：由左向右跟拍。\nVFX：無。\n聲音：腳步聲。\n對白：無。\n"
+    "2. 5.0–10.0s｜確認方向\n鏡頭／景別：50mm 中景。\n地點：車門前。\n"
+    "角色／位置：阿青面向列車。\n動作／表情：抬頭確認方向，露出安心表情。\n"
+    "運鏡：固定。\nVFX：無。\n聲音：列車鳴笛。\n對白：我們回家吧。\n"
+    "3. 10.0–15.0s｜出發\n鏡頭／景別：50mm 中景。\n地點：列車窗邊。\n"
+    "角色／位置：阿青坐在窗邊。\n動作／表情：向窗外揮手。\n運鏡：緩慢拉遠。\n"
+    "VFX：無。\n聲音：列車行駛聲。\n對白：無。\n收尾：15.0 秒切黑。"
+)
+
+
+def dict_screenplay():
+    """Synthetic reproduction of the observed Python-dict screenplay shape."""
+    return {
+        "title": "回家的路", "genre": "劇情", "style": "自然明亮", "voice": "零 BGM，保留腳步聲與列車聲。",
+        "character_references": [{"name": "阿青", "type": "character", "reference": "角色參考圖1", "appearance": "藍色外套"}],
+        "scene_references": {"車站": "場景參考圖2"},
+        "scenes": [
+            {"start": "0.0", "end": "5.0", "shot_spec": "24mm 廣角，車站月台，低機位。",
+             "characters": [{"name": "阿青", "position": "畫面左側", "action": "提著行李走近候車線", "expression": "期待"}],
+             "camera_movement": "由左向右跟拍", "vfx": "無", "sound": "腳步聲", "dialogue": "無"},
+            {"start": "5.0", "end": "10.0", "shot_spec": "50mm 中景，列車門前，平視。",
+             "characters": [{"name": "阿青", "position": "面向列車", "action": "抬頭確認方向", "expression": "安心"}],
+             "camera_movement": "固定", "vfx": "無", "sound": "列車鳴笛", "dialogue": "我們回家吧。"},
+            {"start": "10.0", "end": "15.0", "shot_spec": "50mm 中景，列車窗邊，平視。",
+             "characters": [{"name": "阿青", "position": "坐在窗邊", "action": "向窗外揮手", "expression": "微笑"}],
+             "camera_movement": "緩慢拉遠", "vfx": "無", "sound": "列車行駛聲", "dialogue": "無", "ending": "切黑"},
+        ],
+    }
+
+
+def stored_record(view):
+    """Detail-only presentation fields are computed, never archive mutations."""
+    return {key: value for key, value in view.items()
+            if key not in {"readable_content", "readable_content_source", "readable_content_note"}}
+
 
 class ScriptValidationTests(unittest.TestCase):
     def test_local_origin_rejects_remote_credentials_and_paths(self):
@@ -105,7 +144,7 @@ class ScriptAPITests(unittest.IsolatedAsyncioTestCase):
         self.tags = [{"name": DEFAULT_SETTINGS["model"], "size": 18_000_000_000}]
         self.show = {"capabilities": ["completion", "thinking"],
                      "model_info": {"general.architecture": "qwen3", "qwen3.context_length": 40_960}}
-        self.reply = "第 1 場 外景 車站 日\n阿青：我們回家吧。"
+        self.reply = TIMED_SCREENPLAY
         self.chat_requests = []
         self.unloads = []
         self.started = asyncio.Event()
@@ -239,6 +278,21 @@ class ScriptAPITests(unittest.IsolatedAsyncioTestCase):
         loaded = ScriptwritingManager(web.Application(), self.root)
         self.assertEqual(loaded.get_project(project["id"]), value)
         self.assertFalse(list(self.manager.directory.glob("*.tmp")))
+
+    async def test_untimed_handwritten_manuscript_remains_saveable_and_exportable(self):
+        manuscript = "第 1 場 外景 車站 日\n阿青：我們回家吧。"
+        project = await self.create(content=manuscript)
+        response = await self.client.put(f"/api/scripts/projects/{project['id']}",
+                                         json={"revision": project["revision"], "content": manuscript + "\n列車鳴笛。"})
+        self.assertEqual(response.status, 200)
+        saved = await response.json()
+        self.assertEqual(saved["content"], manuscript + "\n列車鳴笛。")
+        export = await self.client.get(f"/api/scripts/projects/{project['id']}/export?format=txt")
+        self.assertEqual(export.status, 200)
+        self.assertIn(saved["content"], await export.text())
+        self.assertEqual(self.chat_requests, [])
+        persisted = ScriptwritingManager(web.Application(), self.root)
+        self.assertEqual(persisted.get_project(project["id"])["content"], saved["content"])
 
     async def test_page_settings_status_and_fragmented_inventory(self):
         self.assertEqual((await self.client.get("/scripts")).status, 200)
@@ -408,6 +462,57 @@ class ScriptAPITests(unittest.IsolatedAsyncioTestCase):
                 result = await self.complete(await self.submit(project, action=action))
                 self.assertEqual(result["status"], "completed", result)
                 self.assertEqual(result["content"], self.reply)
+
+    async def test_known_python_dict_and_json_screenplays_are_readable_and_preserve_raw_output(self):
+        original = "手寫原稿：阿青在月台等待。"
+        project = await self.create(duration=15, content=original)
+        for action, reply in (("screenplay", repr(dict_screenplay())),
+                              ("rewrite", json.dumps(dict_screenplay(), ensure_ascii=False))):
+            with self.subTest(action=action):
+                self.reply = reply
+                result = await self.complete(await self.submit(project, action=action))
+                self.assertEqual(result["status"], "completed", result)
+                self.assertEqual(result["raw_content"], reply)
+                self.assertEqual(result["content_format"], "performance-script-v1")
+                self.assertFalse(result["content"].lstrip().startswith("{"))
+                self.assertIn("0.0–5.0s", result["content"])
+                self.assertIn("5.0–10.0s", result["content"])
+                self.assertIn("10.0–15.0s", result["content"])
+                for value in ("阿青", "藍色外套", "角色參考圖1", "場景參考圖2", "我們回家吧。", "列車鳴笛", "向窗外揮手"):
+                    self.assertIn(value, result["content"])
+                self.assertEqual(self.manager.get_project(project["id"])["content"], original)
+                persisted = ScriptwritingManager(web.Application(), self.root).get_job(result["id"])
+                self.assertEqual(persisted["raw_content"], reply)
+                self.assertEqual(persisted["content"], result["content"])
+
+    async def test_generated_unknown_json_and_untimed_summary_are_retained_but_not_completed(self):
+        project = await self.create(duration=15, content="保持這段手寫原稿。")
+        replies = (json.dumps({"title": "回家的路", "summary": "阿青搭列車回家。"}, ensure_ascii=False),
+                   "一句話梗概：阿青搭列車回家。",
+                   '{"summary":"未知資料格式"}\n0.0–15.0s｜這行時間碼不能使結構資料變成完整劇本')
+        for action in ("screenplay", "rewrite"):
+            for reply in replies:
+                with self.subTest(action=action, reply=reply):
+                    self.reply = reply
+                    result = await self.complete(await self.submit(project, action=action))
+                    self.assertEqual(result["status"], "failed", result)
+                    self.assertIn("時間碼", result["error"])
+                    self.assertEqual(result["content"], reply)
+                    self.assertFalse(result["truncated"])
+                    self.assertNotIn("content_format", result)
+                    self.assertEqual(self.manager.get_project(project["id"])["content"], project["content"])
+
+    async def test_known_dict_with_overrun_still_fails_after_readable_conversion(self):
+        draft = dict_screenplay()
+        draft["scenes"][-1]["end"] = "16.0"
+        self.reply = repr(draft)
+        project = await self.create(duration=15, content="保持這段手寫原稿。")
+        result = await self.complete(await self.submit(project))
+        self.assertEqual(result["status"], "failed", result)
+        self.assertEqual(result["raw_content"], self.reply)
+        self.assertIn("16.0s", result["content"])
+        self.assertIn("15", result["error"])
+        self.assertEqual(self.manager.get_project(project["id"])["content"], project["content"])
 
     async def test_output_limit_does_not_publish_even_parseable_storyboard_or_outline(self):
         self.mode = "length"

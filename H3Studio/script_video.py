@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from custom_loras import validate_loras_for_family
+from custom_loras import validate_loras_for_family, validate_lora_requirements
 from script_video_format import normalize_video_settings, video_dimensions
 
 
@@ -110,6 +110,7 @@ class ScriptVideoManager:
         try:
             normalize_video_settings(snapshot.get("video_settings"))
             snapshot["custom_loras"] = validate_loras_for_family(snapshot.get("custom_loras", []), "ref2va")
+            validate_lora_requirements(snapshot["custom_loras"], "ref2va")
         except ValueError as error:
             raise ScriptVideoError(str(error)) from error
         duration = snapshot.get("duration")

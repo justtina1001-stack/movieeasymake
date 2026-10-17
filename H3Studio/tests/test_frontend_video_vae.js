@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+const ShortFilmPersistence = require("../static/shortfilm_persistence.js");
 
 const source = fs.readFileSync(path.join(__dirname, "../static/app.js"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8");
@@ -11,9 +12,10 @@ const html = fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8
 function fixture() {
   const elements = new Map();
   const storage = new Map();
+  const serverRevisions = new Map();
   const element = selector => {
     if (!elements.has(selector)) elements.set(selector, {
-      value: "", checked: false, disabled: false, textContent: "", listeners: {},
+      value: "", checked: false, disabled: false, textContent: "", listeners: {}, dataset: {},
       classList: { add() {}, remove() {}, toggle() {} }, scrollIntoView() {},
       addEventListener(name, handler) { this.listeners[name] = handler; },
     });
@@ -22,18 +24,22 @@ function fixture() {
   const context = vm.createContext({
     $: element, structuredClone, keyframePrepareVersion: 0, engineModelInventory: {},
     shortFilmProjects: [], activeShortFilmId: "", shortFilmSaveTimer: null, clearTimeout,
-    localStorage: { setItem(key, value) { storage.set(key, value); } },
+    shortFilmSaveCoordinator: null, shortFilmRecoveries: new Map(), ShortFilmPersistence,
+    localStorage: { getItem(key) { return storage.get(key) ?? null; }, setItem(key, value) { storage.set(key, value); }, removeItem(key) { storage.delete(key); } },
     activeReferences: () => [], escapeHtml: value => value, uid: () => "id",
     updateSummary() {}, toast() {}, renderLoraPanels() {}, renderReplacement() {},
     renderKeyframePreview() {}, renderSymbolLoop() {}, renderContinuation() {},
     renderMgAnimation() {}, renderReferences() {}, renderStoryboards() {},
     renderShortFilmAssets() {}, renderShortFilmScenes() {}, renderShortFilmSummary() {},
-    scheduleShortFilmSave() {}, async loadShortFilmJobs() {},
+    async loadShortFilmJobs() {},
     setMode(mode) { context.state.mode = mode; },
     async loadJobRecipe() { return context.recipe; },
     async api(url, options) {
       context.savedProject = JSON.parse(options.body);
-      return structuredClone(context.savedProject);
+      const project = context.savedProject, revision = serverRevisions.get(project.id) ?? 0;
+      assert.equal(project.revision, revision, "The real save coordinator submits the current server revision");
+      serverRevisions.set(project.id, revision + 1);
+      return { ...structuredClone(project), revision: revision + 1 };
     },
   });
   const start = source.indexOf("const defaultState =");
@@ -42,6 +48,7 @@ function fixture() {
   for (const name of [
     "currentSettings", "persistForm", "restoreForm", "saveState", "collectPayload", "recipeAsset", "originalGenerationRequest", "applyJobRecipe",
     "videoVaeBackendIsStale", "videoVaeHint", "syncVideoVaeHints", "activeShortFilmProject", "renderShortFilmWorkspace", "saveShortFilmProject",
+    "scheduleShortFilmSave", "getShortFilmSaveCoordinator", "renderShortFilmSaveStatus",
     "shortFilmFlatten", "shortFilmAliasMentioned", "shortFilmShotAssetSelection", "shortFilmAssetShotIds", "invalidateShortFilmRenders", "updateShortFilmGenerationField",
   ]) {
     const index = source.search(new RegExp(`(?:async )?function ${name}\\(`));

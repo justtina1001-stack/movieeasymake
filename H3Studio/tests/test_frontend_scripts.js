@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { normalizeScriptLoras, scriptLoraSourceUrl, scriptLoraSelectionError, scriptLoraSaveConfirmed } = require('../static/scripts.js');
+const { scriptPreviewData } = require('../static/scripts.js');
 const { normalizeScriptVideoSettings, scriptVideoDimensions, scriptPipelineVideoFormat, scriptVideoFormatLabel } = require('../static/scripts.js');
 const loraHelpSource = fs.readFileSync(path.join(__dirname, '../static/lora-help.js'), 'utf8');
 const { normalizeScriptProject, normalizeScriptReferences, createNewScriptProject, createMonkeyScriptExample, scriptProjectSignature, scriptSaveOutcome, scriptDraftCandidates, scriptJobPresentation, scriptCanDeleteJob, scriptAppearanceApplyTarget, scriptPipelinePresentation, scriptPipelineVideoUrl, scriptVideoReferencesError, scriptLocalEndpoint, normalizeScriptSkills, scriptSkillSourceUrl, scriptRecommendedWritingSkill, scriptVideoHistoryRecord, scriptVideoHistoryDownloadUrl } = require('../static/scripts.js');
@@ -14,8 +15,21 @@ function skillCatalog() {
   return ['cinematic-story', 'suspense-horror', 'comedy-reaction', 'emotional-drama', 'fantasy-adventure', 'action-chase', 'product-commercial', 'product-demo', 'educational-explainer', 'documentary-lifestyle', 'game-trailer'].map((id, index) => ({ id, name: ['通用電影敘事', '懸疑／恐怖', '喜劇／角色反應', '情感／人物劇情', '奇幻／探險', '動作／追逐', '商品／品牌廣告', '產品／操作展示', '知識／教學解說', '紀錄／生活風格', '遊戲／角色宣傳'][index], category: '短片', description: `適合 ${id} 的短片方法`, recommended_for: ['角色短片'], guide: ['確定角色目的', '寫出可見轉折'], sources: [{ name: '開放創作方法', url: 'https://example.com/skill', license: 'MIT', license_url: 'https://example.com/license' }] }));
 }
 
+function h3SkillCatalog() {
+  return [...skillCatalog(), ...[
+    ['h3-official-storyboard', 'H3 官方分鏡'], ['h3-3d-animation', 'H3 3D 動畫'],
+    ['h3-performance-beats', 'H3 表演節拍'], ['h3-director-continuity', 'H3 導演與鏡頭銜接'], ['h3-reference-planning', 'H3 參考素材規劃'],
+  ].map(([id, name], index) => ({
+    id, name, category: 'H3', description: `${name}的本機改編方法`, version: '20261006-h3', recommended_for: ['H3 短片'], guide: ['保留原片長', '保留原台詞'],
+    sources: [{ name: index < 2 ? '官方 H3 文件' : '社群 Skill', url: 'https://example.com/source', license: index < 2 ? '文件授權' : 'MIT', license_url: 'https://example.com/license',
+      repo_url: 'https://github.com/example/source-repository', repository_stars: [9584, 9584, 175, 1139, 65][index], repository_forks: [709, 709, 4, 19, 6][index],
+      checked_at: '2026-10-06', provenance: index < 2 ? 'official' : 'community', commit: 'a'.repeat(40), version: 'reviewed-source',
+    }],
+  }))];
+}
+
 function fixture(handler, { confirm = () => true, referencesSupported = true, referencesSupportKnown = true, skillsSupported = true, skillsSupportKnown = true, skillsCatalogReady = true, lorasSupported = true, lorasSupportKnown = true } = {}) {
-  const elements = new Map(), stored = new Map(), calls = [], downloads = [];
+  const elements = new Map(), stored = new Map(), calls = [], downloads = [], clipboard = [];
   class Option { constructor(text, value) { this.textContent = text; this.value = value; } }
   class Element {
     constructor(tagName = '') {
@@ -52,6 +66,7 @@ function fixture(handler, { confirm = () => true, referencesSupported = true, re
     window: { confirm, location: { search: '' }, addEventListener() {} },
     localStorage: { get length() { return stored.size; }, key: i => Array.from(stored.keys())[i], getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) },
     crypto: { randomUUID: () => uuids++ === 0 ? 'this-tab' : `${String(uuids).padStart(8, '0')}-0000-4000-8000-000000000000` }, Option, URL: TestURL, URLSearchParams, FormData: TestFormData, Blob, setTimeout, clearTimeout, setInterval() {},
+    navigator: { clipboard: { async writeText(value) { clipboard.push(value); } } },
     async fetch(url, options) { calls.push({ url, options }); return handler ? handler(url, options) : response({}); },
   });
   const exposed = source.replace('start().catch(error => message(error.message, true));', 'globalThis.scriptTest = { state, message, writeProject, readProject, markDirty, saveProject, switchProject, applyMonkeyExample, loadJobs, renderHistory, renderPreview, selectJob, deleteJob, changeHistoryScope, openJobProject, applyResult, restoreDraft, offerDraft, generate, crossTabChanged, saveSettings, addReference, removeReference, uploadReferenceImage, renderReferences, exportDraft, refreshEngine, renderPipelines, selectPipeline, loadPipelines, startVideoPipeline, cancelPipeline, resumePipeline, selectedVideoSourceJob, bindEvents, renderWritingSkills, renderWritingSkillDetails, applyWritingSkillRecommendation, loadWritingSkills, receiveVideoHistory, renderVideoHistory, selectHistoryVideo, changeVideoHistoryScope, refreshVideoHistory }; writeProject(state.project);');
@@ -62,7 +77,7 @@ function fixture(handler, { confirm = () => true, referencesSupported = true, re
   context.scriptTest.state.referencesSupportKnown = referencesSupportKnown;
   Object.assign(context.scriptTest.state, { skillsSupported, skillsSupportKnown, skillsCatalogReady, writingSkills: skillsCatalogReady ? skillCatalog() : [] });
   context.scriptTest.renderWritingSkills(); context.scriptTest.renderPreview();
-  return { ui: context.scriptTest, elements, stored, calls, actions, downloads };
+  return { ui: context.scriptTest, elements, stored, calls, actions, downloads, clipboard };
 }
 
 function response(data, status = 200) { return { ok: status >= 200 && status < 300, status, async json() { return data; } }; }
@@ -282,6 +297,123 @@ test('AI results use literal text and do not update the manuscript until explici
   ui.applyResult();
   assert.equal(elements.get('scriptContent').value, malicious);
   assert.equal(ui.state.dirty, true);
+  assert.doesNotMatch(source, /\.innerHTML\s*=/);
+});
+
+test('a completed storyboard defaults to the backend performance script and copies the chosen view without changing import data', async () => {
+  const raw = '{"title":"原始分鏡","scenes":[]}';
+  const readable = '1. 0.0–2.0s｜迎戰\n鏡頭／景別：24mm 中景\n動作／表情：抬眼→握緊兵器→重心前移\n2. 2.0–4.0s｜交鋒\n對白：原台詞';
+  const job = { id: 'readable-storyboard', project_id: 'project-a', action: 'storyboard', status: 'completed', content: raw,
+    readable_content: readable, readable_content_source: 'storyboard', readable_content_note: '只整理已提供欄位。',
+    storyboard: { storyboard_normalization: { source_cuts: [{ cuts: [{ action: '[Shot 2] At 00:02.000, original action', duration: 2 }] }] } } };
+  const original = JSON.stringify(job);
+  const { ui, elements, calls, clipboard } = fixture(async () => response({ shortfilm_id: 'shortfilm-a' }));
+  ui.bindEvents(); ui.writeProject(project()); ui.state.job = job; ui.state.selectedJobId = job.id; ui.renderPreview();
+  assert.equal(elements.get('scriptPreviewViews').classes.has('hidden'), false);
+  assert.equal(elements.get('scriptPreviewReadable').attributes['aria-pressed'], 'true');
+  assert.equal(elements.get('scriptPreviewContent').textContent, readable);
+  assert.equal(elements.get('scriptPreviewFormatNote').textContent, '只整理已提供欄位。');
+  assert.equal(elements.get('applyScriptResult').classes.has('hidden'), true);
+  assert.equal(elements.get('importScriptStoryboard').disabled, false);
+  await elements.get('copyScriptResult').click(); assert.equal(clipboard.at(-1), readable);
+  await elements.get('scriptPreviewRaw').click();
+  assert.equal(elements.get('scriptPreviewContent').textContent, raw);
+  assert.equal(elements.get('scriptPreviewRaw').attributes['aria-pressed'], 'true');
+  await elements.get('copyScriptResult').click(); assert.equal(clipboard.at(-1), raw);
+  await elements.get('scriptPreviewReadable').click();
+  await ui.importStoryboard();
+  assert.equal(calls[0].url, '/api/scripts/jobs/readable-storyboard/shortfilm');
+  assert.equal(calls[0].options.body, '{}');
+  assert.equal(elements.get('scriptContent').value, '原始編輯稿');
+  // Import adds only its existing shortfilm pointer; the displayed data remain intact.
+  const after = { ...job }; delete after.shortfilm_id;
+  assert.equal(JSON.stringify(after), original);
+});
+
+test('preview selection survives polling of the same job and a different job resets to readable', async () => {
+  let job = { id: 'first-job', project_id: 'project-a', action: 'storyboard', status: 'completed', content: '{"version":1}', readable_content: '第一份表演腳本' };
+  const { ui, elements } = fixture(async url => url === '/api/scripts/jobs' ? response(historyData([job])) : response(job));
+  ui.bindEvents(); ui.writeProject(project()); await ui.loadJobs();
+  await elements.get('scriptPreviewRaw').click();
+  job = { ...job, content: '{"version":2}', readable_content: '更新的表演腳本' };
+  await ui.loadJobs();
+  assert.equal(elements.get('scriptPreviewContent').textContent, job.content);
+  assert.equal(elements.get('scriptPreviewRaw').attributes['aria-pressed'], 'true');
+  job = { ...job, id: 'second-job', readable_content: '第二份表演腳本' };
+  ui.state.jobs = [job]; await ui.selectJob(job.id);
+  assert.equal(elements.get('scriptPreviewContent').textContent, '第二份表演腳本');
+  assert.equal(elements.get('scriptPreviewReadable').attributes['aria-pressed'], 'true');
+});
+
+test('original performance scripts are identified as storyboard sources rather than translations of compiled data', () => {
+  const { ui, elements } = fixture(); ui.writeProject(project());
+  ui.state.job = { id: 'source-storyboard', project_id: 'project-a', action: 'storyboard', status: 'completed', content: '{"action":"English engine description"}',
+    readable_content: '1. 0.0–2.0s｜原稿\nVFX：原稿未提供。', readable_content_source: 'screenplay', readable_content_note: '本稿是生成分鏡時的原表演腳本。' };
+  ui.renderPreview();
+  assert.equal(elements.get('scriptPreviewReadable').textContent, '原表演腳本（分鏡來源）');
+  assert.equal(elements.get('scriptPreviewFormatNote').textContent, '本稿是生成分鏡時的原表演腳本。');
+  assert.equal(elements.get('scriptPreviewContent').textContent, ui.state.job.readable_content);
+});
+
+test('screenplays and rewrites display editable content while raw views and copying retain original structured responses', async () => {
+  for (const action of ['screenplay', 'rewrite']) {
+    const editable = '1. 0.0–2.0s｜開始\n動作／表情：抬頭→轉身→停步';
+    const original = '{"shots":[{"action":"original"}]}';
+    const job = { id: `${action}-job`, project_id: 'project-a', action, status: 'completed', content: original, raw_content: original, readable_content: editable };
+    const { ui, elements, clipboard } = fixture(); ui.bindEvents(); ui.writeProject(project({ content: '' })); ui.state.job = job; ui.renderPreview();
+    assert.equal(elements.get('scriptPreviewContent').textContent, editable);
+    await elements.get('scriptPreviewRaw').click(); await elements.get('copyScriptResult').click();
+    assert.equal(clipboard.at(-1), job.raw_content);
+    assert.equal(elements.get('scriptPreviewContent').textContent, job.raw_content);
+    assert.equal(ui.selectedVideoSourceJob(), job);
+    ui.applyResult();
+    assert.equal(elements.get('scriptContent').value, editable);
+    assert.equal(job.raw_content, original);
+    assert.equal(job.content, original);
+  }
+});
+
+test('unknown structured legacy screenplays cannot masquerade as readable scripts and their backend explanation remains visible', () => {
+  for (const content of ['  {"shots":[]}', "\n {'shots': []}", '  [ {"action":"legacy"} ]', '\n```json\n{"shots":[]}\n```', '```python\n{\'shots\': []}\n```']) {
+    const job = { id: 'legacy-structured', project_id: 'project-a', action: 'screenplay', status: 'completed', content, readable_content_note: '舊紀錄尚未提供可讀文字，原資料已保留。' };
+    const result = scriptPreviewData(job);
+    assert.equal(result.readableReady, false); assert.equal(result.view, 'raw'); assert.equal(result.text, content);
+    const { ui, elements } = fixture(); ui.writeProject(project()); ui.state.job = job; ui.renderPreview();
+    assert.equal(elements.get('scriptPreviewReadable').disabled, true);
+    assert.equal(elements.get('scriptPreviewContent').textContent, content);
+    assert.match(elements.get('scriptPreviewFormatNote').textContent, /舊紀錄尚未提供可讀文字，原資料已保留/);
+  }
+  const plain = scriptPreviewData({ action: 'rewrite', status: 'completed', content: '1. 0.0–2.0s｜純文字稿\n動作／表情：抬頭→轉身' });
+  assert.equal(plain.readableReady, true); assert.equal(plain.view, 'readable');
+});
+
+test('partial or legacy storyboard data remain raw and unavailable readable fields cannot invent performance details', () => {
+  const raw = '{"action":"Only supplied action"}';
+  for (const changes of [{}, { status: 'running', readable_content: '未驗證稿' }, { status: 'failed', readable_content: '未完成稿' }, { truncated: true, readable_content: '截斷稿' }, { readable_content: {} }, { readable_content: '   ' }]) {
+    const job = { id: 'legacy-storyboard', action: 'storyboard', status: 'completed', content: raw, ...changes };
+    const result = scriptPreviewData(job);
+    assert.equal(result.text, raw); assert.equal(result.readableReady, false); assert.equal(result.view, 'raw');
+  }
+  assert.equal(scriptPreviewData({ action: 'screenplay', status: 'completed', content: '純文字完整劇本' }).text, '純文字完整劇本');
+  assert.equal(scriptPreviewData({ action: 'outline', content: '故事大綱' }).supported, false);
+  assert.equal(scriptPreviewData(null).text, '');
+  const { ui, elements } = fixture(); ui.writeProject(project()); ui.state.job = { id: 'legacy', project_id: 'project-a', action: 'storyboard', status: 'completed', content: raw };
+  ui.renderPreview();
+  assert.equal(elements.get('scriptPreviewReadable').disabled, true);
+  assert.match(elements.get('scriptPreviewFormatNote').textContent, /尚未提供可讀表演腳本/);
+  assert.equal(elements.get('scriptPreviewContent').textContent, raw);
+});
+
+test('readable previews and backend notes are literal text and new defaults request the six-beat editable script format', () => {
+  const readable = '<img src=x onerror=alert(1)>\n1. 0.0–2.0s｜段名';
+  const { ui, elements } = fixture(); ui.writeProject(project());
+  ui.state.job = { id: 'safe-readable', project_id: 'project-a', action: 'storyboard', status: 'completed', content: '{}', readable_content: readable, readable_content_note: '<b>來源說明</b>' };
+  ui.renderPreview();
+  assert.equal(elements.get('scriptPreviewContent').textContent, readable);
+  assert.equal(elements.get('scriptPreviewFormatNote').textContent, '<b>來源說明</b>');
+  const fresh = createNewScriptProject();
+  for (const phrase of ['不輸出 JSON 或 Python 字典', '1. 0.0–2.0s｜段名', '上述八個欄位分行', '2～4 個可見變化', '0–2、2–4、4–6.5、6.5–9、9–12、12–15 秒六段', '指定時間優先']) assert.ok(fresh.instructions.includes(phrase));
+  assert.equal(normalizeScriptProject({ instructions: '沿用我的原格式' }).instructions, '沿用我的原格式');
   assert.doesNotMatch(source, /\.innerHTML\s*=/);
 });
 
@@ -852,21 +984,98 @@ test('history defaults to every project and displays all records without a 50-re
   assert.equal(elements.get('scriptJobHistory').children[1].children[0].children[0].children[1].textContent.startsWith('另一部劇本'), true);
 });
 
-test('a new unsaved project still sees prior project history and current scope clearly explains other records', async () => {
+test('a new unsaved project keeps all history without automatically previewing another project', async () => {
   const old = historyJob({ project_id: 'old-project', project_title: '舊劇本' });
   const { ui, elements } = fixture(async url => url === '/api/scripts/jobs' ? response(historyData([old])) : response(old));
   await ui.loadJobs();
   assert.equal(ui.state.project.id, null);
   assert.equal(elements.get('scriptJobHistory').children[0].dataset.jobId, old.id);
-  assert.equal(elements.get('scriptPreviewContent').textContent, old.content);
+  assert.equal(ui.state.selectedJobId, null); assert.equal(ui.state.job, null);
+  assert.notEqual(elements.get('scriptPreviewContent').textContent, old.content);
   assert.equal(elements.get('applyScriptResult').disabled, true);
   await ui.changeHistoryScope('current');
   assert.equal(ui.state.jobs.length, 1);
   assert.match(elements.get('scriptJobHistory').children[0].textContent, /全部劇本.*其他劇本/);
   assert.equal(ui.state.job, null);
   await ui.changeHistoryScope('all');
+  assert.equal(ui.state.selectedJobId, null); assert.equal(ui.state.job, null);
+  await ui.selectJob(old.id);
   assert.equal(ui.state.selectedJobId, old.id);
   assert.equal(elements.get('copyScriptResult').disabled, false);
+  assert.equal(elements.get('scriptPreviewTitle').textContent, '歷史生成預覽 · 舊劇本');
+  assert.match(elements.get('scriptJobBadge').textContent, /其他劇本/);
+});
+
+test('automatic preview uses only the current project while explicit historical selection survives polling', async () => {
+  const other = historyJob({ id: 'other-job', project_id: 'project-b', project_title: '大叔對抗雷霸龍' });
+  const own = historyJob({ id: 'own-job', project_title: '武打測試', content: '妲己與姜子牙的分鏡' });
+  let jobs = [other];
+  const { ui, elements, calls } = fixture(async url => url === '/api/scripts/jobs' ? response(historyData(jobs)) : response(jobs.find(job => url.endsWith(job.id))));
+  ui.writeProject(project({ title: '武打測試', idea: '妲己與姜子牙', content: '' }));
+  await ui.loadJobs();
+  assert.equal(ui.state.selectedJobId, null); assert.equal(ui.state.job, null);
+  assert.equal(calls.length, 1);
+  assert.equal(elements.get('scriptContent').value, '');
+  jobs = [other, own]; await ui.loadJobs();
+  assert.equal(ui.state.selectedJobId, own.id);
+  assert.equal(elements.get('scriptPreviewContent').textContent, own.content);
+  assert.equal(elements.get('scriptPreviewTitle').textContent, '生成預覽');
+  await ui.selectJob(other.id); await ui.loadJobs();
+  assert.equal(ui.state.selectedJobId, other.id);
+  assert.equal(elements.get('scriptPreviewTitle').textContent, '歷史生成預覽 · 大叔對抗雷霸龍');
+  assert.match(elements.get('scriptPreviewContext').textContent, /不是目前劇本的結果/);
+  assert.equal(elements.get('scriptContent').value, '');
+});
+
+test('switching to a project with no records never falls back to all-project history', async () => {
+  const other = historyJob({ project_title: '舊劇本' });
+  const next = project({ id: 'project-b', title: '新故事', idea: '妲己與姜子牙', content: '' });
+  const { ui, elements } = fixture(async url => url.includes('/projects/') ? response(next) : url === '/api/scripts/jobs' ? response(historyData([other])) : response(other));
+  ui.writeProject(project()); ui.state.jobs = [other]; ui.state.job = other; ui.state.selectedJobId = other.id;
+  assert.equal(await ui.switchProject(next.id), true);
+  assert.equal(ui.state.selectedJobId, null); assert.equal(ui.state.job, null);
+  assert.equal(elements.get('scriptJobHistory').children.length, 1);
+  assert.equal(elements.get('scriptPreviewTitle').textContent, '生成預覽');
+  assert.notEqual(elements.get('scriptPreviewContent').textContent, other.content);
+  assert.equal(elements.get('scriptContent').value, '');
+});
+
+test('an unsuccessful request is marked as unconfirmed and a successful retry replaces the historical preview', async () => {
+  const old = historyJob({ content: '10月5日已保存的舊結果' });
+  const fresh = historyJob({ id: 'fresh-job', status: 'queued', content: '', input: { project: project({ idea: '妲己與姜子牙', content: '' }) } });
+  let refused = true;
+  const { ui, elements, calls } = fixture(async () => refused ? response({ error: '請先分析外型' }, 400) : response(fresh));
+  ui.writeProject(project({ idea: '妲己與姜子牙', content: '' })); ui.state.ready = true;
+  ui.state.job = old; ui.state.selectedJobId = old.id; ui.state.jobs = [old];
+  await ui.generate('screenplay');
+  assert.equal(ui.state.job.id, old.id); assert.equal(ui.state.job.status, 'completed');
+  assert.equal(elements.get('scriptPreviewContent').textContent, old.content);
+  assert.match(elements.get('scriptPreviewContext').textContent, /本次尚未確認新的生成工作.*已保存歷史結果.*重新整理生成紀錄確認/);
+  assert.match(elements.get('scriptJobBadge').textContent, /本次尚未確認.*歷史結果/);
+  assert.match(elements.get('scriptPreviewTitle').textContent, /歷史生成預覽/);
+  assert.equal(elements.get('scriptPreviewContext').classes.has('hidden'), false);
+  assert.match(elements.get('scriptMessage').textContent, /請先分析外型/);
+  assert.equal(elements.get('applyScriptResult').disabled, false);
+  assert.equal(elements.get('scriptContent').value, '');
+  assert.deepEqual(JSON.parse(calls[0].options.body), { project_id: 'project-a', action: 'screenplay', instructions: '' });
+  refused = false; await ui.generate('screenplay');
+  assert.equal(ui.state.job.id, fresh.id);
+  assert.equal(ui.state.previewRequestFailed, false);
+  assert.equal(elements.get('scriptPreviewContext').classes.has('hidden'), true);
+});
+
+test('a generation blocked by a failed save also distinguishes old preview content from the new request', async () => {
+  const old = historyJob();
+  const { ui, elements, calls } = fixture(async () => response({ error: '主機無法保存' }, 503));
+  ui.writeProject(project({ idea: '妲己與姜子牙', content: '' })); ui.markDirty(); ui.state.ready = true;
+  ui.state.job = old; ui.state.selectedJobId = old.id;
+  await ui.generate('storyboard');
+  assert.ok(calls.every(call => call.url !== '/api/scripts/jobs'));
+  assert.match(elements.get('scriptPreviewContext').textContent, /本次尚未確認新的生成工作.*重新整理生成紀錄確認/);
+  assert.equal(ui.state.job.id, old.id);
+  assert.equal(elements.get('scriptIdea').value, '妲己與姜子牙');
+  assert.equal(elements.get('scriptContent').value, '');
+  assert.equal(ui.state.dirty, true);
 });
 
 test('other-project history is previewable and copyable while manuscripts and storyboard imports remain protected', async () => {
@@ -1234,6 +1443,77 @@ test('skill catalogs display all methods, recommendations and licensed links as 
   assert.equal(sources[1].children[1].tagName, 'span');
   for (const url of ['javascript:alert(1)', 'file:///C:/secret', 'data:text/html,x', 'https://user:pass@example.com/', '/relative']) assert.equal(scriptSkillSourceUrl(url), '');
   assert.doesNotMatch(source, /\.innerHTML\s*=/);
+});
+
+test('H3 sources retain reviewed provenance and repository counts without presenting a profile rating', async () => {
+  const catalog = h3SkillCatalog();
+  const { ui, elements } = fixture(async url => response(url === '/api/scripts/skills' ? { items: catalog, version: '20261006-h3' } : skillStatus()), { skillsSupported: false, skillsSupportKnown: false, skillsCatalogReady: false });
+  ui.writeProject(project({ writing_skill: 'h3-official-storyboard' }));
+  await ui.refreshEngine();
+  assert.equal(elements.get('scriptWritingSkill').options.length, 17);
+  assert.equal(ui.readProject().writing_skill, 'h3-official-storyboard');
+  const record = ui.state.writingSkills.find(item => item.id === 'h3-official-storyboard');
+  assert.equal(record.version, '20261006-h3');
+  assert.equal(record.sources[0].commit, 'a'.repeat(40));
+  assert.equal(record.sources[0].version, 'reviewed-source');
+  assert.equal(record.sources[0].repository_stars, 9584);
+  assert.equal(record.sources[0].repository_forks, 709);
+  const rendered = elements.get('scriptSkillSources').children[0];
+  const note = rendered.children[2];
+  assert.match(note.textContent, /官方來源.*倉庫 ⭐ 9,584.*Forks 709.*查核 2026-10-06.*來源版本 aaaaaaaa/);
+  assert.equal(note.title, 'a'.repeat(40));
+  assert.equal(rendered.children[3].href, 'https://github.com/example/source-repository');
+  assert.equal(rendered.children[3].rel, 'noopener noreferrer');
+  assert.equal(elements.get('scriptSkillVersion').textContent, '方法版本：20261006-h3');
+  assert.match(html, /Stars 為倉庫關注度，並非成片品質評分/);
+  assert.match(html, /scripts\.js\?v=20261012-video-format/);
+  elements.get('scriptWritingSkill').value = 'h3-performance-beats'; ui.renderWritingSkillDetails();
+  assert.match(elements.get('scriptSkillSources').children[0].children[2].textContent, /社群來源.*倉庫 ⭐ 175.*Forks 4/);
+});
+
+test('source metadata treats unverified counts as absent and renders untrusted metadata as literal text', async () => {
+  const catalog = h3SkillCatalog(), upstream = catalog.at(-1).sources[0];
+  upstream.repository_stars = '9584'; upstream.repository_forks = -1;
+  upstream.provenance = '<b>official</b>'; upstream.checked_at = '<img src=x onerror=alert(1)>';
+  upstream.repo_url = 'javascript:alert(1)'; upstream.commit = '<script>source</script>';
+  const normalized = normalizeScriptSkills(catalog).at(-1).sources[0];
+  assert.equal(normalized.repository_stars, null); assert.equal(normalized.repository_forks, null); assert.equal(normalized.provenance, '');
+  const { ui, elements } = fixture(async () => response({ items: catalog }));
+  ui.writeProject(project({ writing_skill: 'h3-reference-planning' })); await ui.loadWritingSkills();
+  const rendered = elements.get('scriptSkillSources').children[0];
+  assert.equal(rendered.children.length, 3);
+  assert.doesNotMatch(rendered.children[2].textContent, /⭐|Forks|官方來源/);
+  assert.match(rendered.children[2].textContent, /<img src=x onerror=alert\(1\)>/);
+  assert.equal(rendered.children[2].title, '<script>source</script>');
+  for (const value of [NaN, Infinity, -1, 2.5, Number.MAX_SAFE_INTEGER + 1, true, null]) {
+    const invalid = h3SkillCatalog(); invalid.at(-1).sources[0].repository_stars = value;
+    assert.equal(normalizeScriptSkills(invalid).at(-1).sources[0].repository_stars, null);
+  }
+  const zero = h3SkillCatalog(); zero.at(-1).sources[0].repository_stars = 0;
+  assert.equal(normalizeScriptSkills(zero).at(-1).sources[0].repository_stars, 0);
+  const legacy = normalizeScriptSkills(skillCatalog())[0];
+  assert.equal(legacy.version, ''); assert.equal(legacy.sources[0].commit, ''); assert.equal(legacy.sources[0].repository_stars, null);
+});
+
+test('explicit H3 and animation recommendations only apply after a click and preserve existing selections', async () => {
+  const catalog = h3SkillCatalog();
+  for (const [idea, id] of [
+    ['H3 官方分鏡', 'h3-official-storyboard'], ['精緻 3D 動畫故事', 'h3-3d-animation'],
+    ['H3 動作表演節拍', 'h3-performance-beats'], ['導演規劃鏡頭銜接與軸線', 'h3-director-continuity'],
+    ['H3 多模態參考圖規劃', 'h3-reference-planning'], ['H3 3D 動畫', 'h3-3d-animation'],
+  ]) assert.equal(scriptRecommendedWritingSkill({ idea }, catalog).id, id);
+  assert.equal(scriptRecommendedWritingSkill({ idea: '家人重逢', style: '3D 動畫', instructions: '使用 H3' }, catalog).id, 'emotional-drama');
+  assert.equal(scriptRecommendedWritingSkill({ idea: 'H3 官方分鏡' }, skillCatalog()).id, 'cinematic-story');
+  const { ui, elements } = fixture(async () => response({ items: catalog })); ui.bindEvents();
+  const original = project({ idea: '3D 動畫故事', writing_skill: 'suspense-horror', style: '我的獨立風格', instructions: '保留我的台詞', character_references: [reference()] });
+  ui.writeProject(original); await ui.loadWritingSkills();
+  assert.equal(ui.readProject().writing_skill, 'suspense-horror');
+  assert.match(elements.get('scriptSkillRecommendation').textContent, /H3 3D 動畫/);
+  await elements.get('applyScriptSkillRecommendation').click();
+  assert.equal(ui.readProject().writing_skill, 'h3-3d-animation'); assert.equal(ui.state.dirty, true);
+  for (const field of ['style', 'instructions', 'content', 'characters', 'idea']) assert.equal(ui.readProject()[field], original[field]);
+  assert.deepEqual(JSON.parse(JSON.stringify(ui.readProject().character_references)), original.character_references);
+  assert.equal(createNewScriptProject().writing_skill, 'cinematic-story');
 });
 
 test('genre and idea recommendations require an explicit click and never replace custom creative fields or references', async () => {
@@ -1680,6 +1960,98 @@ test('resuming and importing validate frozen LoRA snapshots independently of the
   ui.state.job = { id: 'frozen-job', project_id: 'project-a', action: 'storyboard', status: 'completed', content: '{}', input: { project: project({ custom_loras: [lora()] }) } }; await ui.importStoryboard();
   assert.ok(calls.some(call => call.url.endsWith('/shortfilm'))); assert.equal(ui.readProject().custom_loras[0].family, 'fl2va');
 });
+
+function loraRecommendations(installed = []) {
+  const candidates = [
+    { name: 'h3studio_custom/camera.safetensors', title: 'Camera Motion', family: null, default_strength: 0.8, trigger: 'camera motion', trigger_required: true, trigger_placement: 'prefix' },
+    { name: 'h3studio_custom/physics.safetensors', title: 'Spatial Physics', family: null, default_strength: 0.3 },
+    { name: 'h3studio_custom/minimax_h3_flf2v_lora_v1.safetensors', title: '360 Orbit', family: 'fl2va', default_strength: 1 },
+    { name: 'h3studio_custom/h3_character_swap_pro4500_1000.safetensors', title: 'Character Swap', family: 'ref2va', default_strength: 1, requires_source_video: true },
+    { name: 'h3studio_custom/realism.safetensors', title: 'Realism People', family: 'both', default_strength: 0.8 },
+    { name: 'h3studio_custom/3d.safetensors', title: '3D Animation', family: null, default_strength: 0.4, availability: 'gated' },
+  ].map(item => ({ known: true, purpose: `用途：${item.title}`, usage: '可自由調整強度', limits: '尚未在本機推論驗證', source_url: `https://example.com/${item.name.split('/').pop()}`, availability: 'missing', ...item, installed: installed.includes(item.name), manual_selectable: installed.includes(item.name) }));
+  const base = loraCatalog();
+  return { ...base, names: [...base.names, ...installed], items: [...base.items, ...candidates.filter(item => item.installed).map(item => ({ ...item, availability: 'installed' }))], recommended_items: [...base.items.slice(0, 1).map(item => ({ ...item, installed: true, availability: 'installed', manual_selectable: true })), ...candidates.map(item => item.installed ? { ...item, availability: 'installed' } : item)] };
+}
+
+test('scripts show every recommendation and protected source even with no selected LoRAs without editing the project', async () => {
+  const catalog = loraRecommendations(); catalog.recommended_items[1].title = '<iframe>Camera Motion';
+  const { ui, elements, stored } = fixture(async () => response(catalog)); const before = scriptProjectSignature(ui.readProject());
+  await ui.loadScriptLoras();
+  assert.equal(scriptProjectSignature(ui.readProject()), before); assert.equal(ui.state.dirty, false); assert.equal(stored.size, 0); assert.deepEqual(JSON.parse(JSON.stringify(ui.readProject().custom_loras)), []);
+  const list = elements.get('scriptLoraRecommendationList'), text = flatText(list);
+  for (const title of ['<iframe>Camera Motion', 'Spatial Physics', '360 Orbit', 'Character Swap', 'Realism People', '3D Animation']) assert.ok(text.includes(title));
+  assert.match(text, /尚未安裝/); assert.match(text, /受限下載/); assert.match(text, /作者未明確區分 FL2VA／Ref2VA/);
+  const links = allNodes(list).filter(node => node.tagName === 'a'); assert.equal(links.length, 7); for (const link of links) { assert.match(link.href, /^https:\/\//); assert.equal(link.rel, 'noopener noreferrer'); }
+  assert.equal(elements.get('scriptLoraRecommendations').classes.has('hidden'), false); assert.doesNotMatch(source, /\.innerHTML\s*=/);
+});
+
+test('scripts disable missing gated FL-only and source-video options and reject programmatic attempts without dirtying rows', async () => {
+  const orbit = 'h3studio_custom/minimax_h3_flf2v_lora_v1.safetensors', swap = 'h3studio_custom/h3_character_swap_pro4500_1000.safetensors';
+  const { ui, elements } = fixture(async () => response(loraRecommendations([orbit, swap]))); await ui.loadScriptLoras(); ui.addScriptLora(); ui.state.dirty = false;
+  const controls = ui.state.loraControls[0], original = JSON.stringify(ui.readProject().custom_loras);
+  for (const name of ['h3studio_custom/camera.safetensors', orbit, swap, 'h3studio_custom/3d.safetensors']) {
+    assert.equal(controls.select.options.find(option => option.value === name).disabled, true);
+    controls.select.value = name; await controls.select.dispatch('change'); assert.equal(JSON.stringify(ui.readProject().custom_loras), original); assert.equal(ui.state.dirty, false);
+  }
+  assert.match(elements.get('scriptMessage').textContent, /受限下載/);
+  assert.match(controls.select.options.find(option => option.value === swap).textContent, /需來源影片，請到影片工作室→角色替換/);
+});
+
+test('new script selections use candidate strengths and require manual family confirmation when the author did not specify it', async () => {
+  const names = ['h3studio_custom/camera.safetensors', 'h3studio_custom/physics.safetensors', 'h3studio_custom/realism.safetensors'];
+  const { ui, elements, stored } = fixture(async () => response(loraRecommendations(names))); await ui.loadScriptLoras(); ui.addScriptLora();
+  for (const [index, strength] of [[0, 0.8], [1, 0.3], [2, 0.8]]) {
+    ui.state.loraControls[0].select.value = names[index]; await ui.state.loraControls[0].select.dispatch('change');
+    assert.equal(ui.readProject().custom_loras[0].strength, strength); assert.equal(ui.readProject().custom_loras[0].enabled, false);
+    assert.equal(ui.readProject().custom_loras[0].family, index === 2 ? 'both' : '');
+    assert.equal(ui.state.loraControls[0].family.disabled, false);
+    if (index < 2) { assert.match(elements.get('scriptLoraCompatibility').textContent, /明確選擇/); ui.state.loraControls[0].family.value = 'ref2va'; await ui.state.loraControls[0].family.dispatch('change'); }
+  }
+  const controls = ui.state.loraControls[0]; controls.strength.value = '0.65'; await controls.strength.dispatch('input'); controls.enabled.checked = true; await controls.enabled.dispatch('change');
+  await ui.loadScriptLoras(); assert.equal(ui.readProject().custom_loras[0].strength, 0.65); assert.equal(ui.readProject().custom_loras[0].enabled, true);
+  assert.equal(JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))[ui.state.newDraftId].project.custom_loras[0].strength, 0.65);
+});
+
+test('unavailable saved choices remain editable and saveable but cannot start script video until explicitly disabled', async () => {
+  const name = 'h3studio_custom/h3_character_swap_pro4500_1000.safetensors', catalog = loraRecommendations([name]), row = lora({ name, strength: 0.7 });
+  assert.match(scriptLoraSelectionError([row], { video: true, catalog }), /需來源影片/);
+  assert.equal(scriptLoraSelectionError([row], { catalog }), '');
+  for (const change of [{ enabled: false }, { strength: 0 }]) assert.equal(scriptLoraSelectionError([{ ...row, ...change }], { video: true, catalog }), '');
+  const { ui, elements, calls } = fixture(async () => response(catalog)); ui.writeProject(project({ custom_loras: [row], character_references: [reference()] })); await ui.loadScriptLoras();
+  const before = JSON.stringify(ui.readProject().custom_loras); Object.assign(ui.state, { ready: true, videoReady: true, videoPipelinesSupported: true });
+  await ui.startVideoPipeline(); assert.equal(calls.length, 1); assert.equal(JSON.stringify(ui.readProject().custom_loras), before); assert.match(elements.get('scriptMessage').textContent, /需來源影片/);
+  ui.state.loraControls[0].enabled.checked = false; await ui.state.loraControls[0].enabled.dispatch('change'); assert.equal(ui.readProject().custom_loras[0].enabled, false);
+  const missing = lora({ name: 'h3studio_custom/camera.safetensors' }); assert.match(scriptLoraSelectionError([missing], { video: true, catalog }), /尚未安裝/); assert.equal(scriptLoraSelectionError([missing], { catalog }), '');
+});
+
+test('malformed recommendation records cannot inject links or imply installation while legacy inventories remain selectable', async () => {
+  const catalog = loraRecommendations(); catalog.recommended_items.push(null, {}, '<img>'); Object.assign(catalog.recommended_items[1], { installed: 'true', default_strength: '0.8', family: 'anything', source_url: 'javascript:evil()' });
+  const { ui, elements } = fixture(async () => response(catalog)); await ui.loadScriptLoras(); ui.addScriptLora();
+  const metadata = ui.state.loraCatalog.recommended_items.find(item => item.name === 'h3studio_custom/camera.safetensors'); assert.equal(metadata.installed, false); assert.equal(metadata.default_strength, 0.5); assert.equal(metadata.family, null);
+  assert.ok(allNodes(elements.get('scriptLoraRecommendationList')).filter(node => node.tagName === 'a').every(link => !link.href.startsWith('javascript:')));
+  const legacy = fixture(async () => response({ names: ['legacy.safetensors'] })); await legacy.ui.loadScriptLoras(); legacy.ui.addScriptLora();
+  assert.equal(legacy.ui.state.loraControls[0].select.options.find(option => option.value === 'legacy.safetensors').disabled, false);
+  legacy.ui.state.loraControls[0].select.value = 'legacy.safetensors'; await legacy.ui.state.loraControls[0].select.dispatch('change'); assert.equal(legacy.ui.readProject().custom_loras[0].strength, 0.5); assert.equal(legacy.ui.readProject().custom_loras[0].family, '');
+});
+
+test('save acknowledgement permits only the precise known Swap and Orbit family canonicalizations', () => {
+  for (const [name, family] of [['H3STUDIO_CUSTOM/H3_CHARACTER_SWAP_PRO4500_1000.SAFETENSORS', 'ref2va'], ['h3studio_custom/minimax_h3_flf2v_lora_v1.safetensors', 'fl2va']]) {
+    assert.equal(scriptLoraSaveConfirmed([lora({ name, family: 'both' })], [lora({ name, family })]), true);
+    for (const change of [{ family: family === 'ref2va' ? 'fl2va' : 'ref2va' }, { strength: 0.9 }, { enabled: false }, { name: 'unknown.safetensors' }]) assert.equal(scriptLoraSaveConfirmed([lora({ name, family: 'both' })], [lora({ name, family, ...change })]), false);
+  }
+  assert.equal(scriptLoraSaveConfirmed([lora({ name: 'unknown.safetensors', family: 'both' })], [lora({ name: 'unknown.safetensors', family: 'fl2va' })]), false);
+});
+
+test('Orbit family canonicalization acknowledges a save while preserving stronger edits made during the request', async () => {
+  const name = 'h3studio_custom/minimax_h3_flf2v_lora_v1.safetensors', pending = deferred();
+  const { ui, stored } = fixture(async () => pending.promise); ui.writeProject(project({ custom_loras: [lora({ name, family: 'both', enabled: false })] })); ui.markDirty(); const saving = ui.saveProject();
+  ui.state.loraControls[0].strength.value = '0.85'; await ui.state.loraControls[0].strength.dispatch('input');
+  pending.resolve(response(project({ custom_loras: [lora({ name, family: 'fl2va', enabled: false })], revision: 4 })));
+  assert.equal(await saving, false); assert.equal(ui.readProject().custom_loras[0].family, 'fl2va'); assert.equal(ui.readProject().custom_loras[0].strength, 0.85); assert.equal(ui.state.dirty, true); assert.equal(ui.state.lorasSupported, true);
+  assert.equal(JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))['project-a'].project.custom_loras[0].strength, 0.85);
+});
+
 test('video settings default for legacy projects and valid selections are deep copied signature fields', () => {
   const defaults = { aspect_ratio: '16:9', megapixels: 0.4, output_resolution: 'native' };
   for (const value of [undefined, null, [], false, { aspect_ratio: 'invalid', megapixels: '0.7', output_resolution: '4k' }]) assert.deepEqual(normalizeScriptVideoSettings(value), defaults);

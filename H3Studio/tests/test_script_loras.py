@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from custom_loras import normalize_loras
-from domain import compile_request, build_workflow
+from domain import compile_request, build_workflow, RequestError
 from scriptwriting import ScriptwritingError, ScriptwritingManager, normalize_project
 from tests import test_scriptwriting as scripts
 from tests import test_script_video as videos
@@ -50,7 +50,7 @@ class PromptTriggerTests(unittest.TestCase):
             self.assertIn("[Shot 1] wushu_action,", result)
             self.assertEqual(result.count("wushu_action"), 2)
 
-    def test_existing_cue_not_duplicated_and_disabled_or_wrong_mode_have_no_cue(self):
+    def test_existing_cue_not_duplicated_inactive_has_no_cue_and_wrong_mode_rejected(self):
         raw = self.payload()
         raw["prompt"] = "[Shot 1] wushu_action, Alice moves."
         self.assertEqual(compile_request(raw).prompt.count("wushu_action"), 1)
@@ -58,7 +58,8 @@ class PromptTriggerTests(unittest.TestCase):
             raw = self.payload()
             raw["custom_loras"][0].update(change)
             self.assertNotIn("wushu_action", compile_request(raw).prompt)
-        self.assertNotIn("wushu_action", compile_request(dict(mode="t2v", prompt="A person moves.", custom_loras=choices())).prompt)
+        with self.assertRaisesRegex(RequestError, "不適用 FL2VA"):
+            compile_request(dict(mode="t2v", prompt="A person moves.", custom_loras=choices()))
 
 
 class ScriptLoraPersistenceTests(unittest.IsolatedAsyncioTestCase):
@@ -150,6 +151,15 @@ class AutomaticLoraTests(unittest.IsolatedAsyncioTestCase):
         project = await self.project(custom_loras=[dict(name="fl.safetensors", family="fl2va", strength=0.4)])
         response = await self.client.post("/api/scripts/video-pipelines", json={"project_id": project["id"]})
         self.assertEqual(response.status, 400, await response.text())
+        self.assertFalse(self.pipeline_manager.pipelines)
+        self.assertFalse(self.manager.jobs)
+
+    async def test_swap_requires_source_video_before_pipeline_or_writer_queue(self):
+        project = await self.project(custom_loras=[dict(name="h3studio_custom/h3_character_swap_pro4500_1000.safetensors",
+                                                       family="ref2va", strength=1.0)])
+        response = await self.client.post("/api/scripts/video-pipelines", json={"project_id": project["id"]})
+        self.assertEqual(response.status, 400, await response.text())
+        self.assertIn("來源影片", (await response.json())["error"])
         self.assertFalse(self.pipeline_manager.pipelines)
         self.assertFalse(self.manager.jobs)
 

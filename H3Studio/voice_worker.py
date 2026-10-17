@@ -23,10 +23,10 @@ def probe() -> None:
     }, ensure_ascii=False))
 
 
-def download(repo: str, model_dir: Path) -> None:
+def download(repo: str, model_dir: Path, revision: str | None = None) -> None:
     from huggingface_hub import snapshot_download
 
-    snapshot_download(repo_id=repo, local_dir=str(model_dir))
+    snapshot_download(repo_id=repo, local_dir=str(model_dir), revision=revision)
     print(json.dumps({"repo": repo, "model_dir": str(model_dir)}, ensure_ascii=False))
 
 
@@ -44,13 +44,18 @@ def generate(request_path: Path, output_path: Path) -> None:
         request["model_dir"],
         device_map="cuda:0",
         dtype=torch.bfloat16,
+        attn_implementation="sdpa",
     )
     mode = request["mode"]
     common = {"text": request["text"], "language": request["language"]}
     if mode == "custom":
+        custom_args = {"speaker": request["speaker"]}
+        model_id = request.get("model_id", "custom")
+        if model_id == "custom_1_7b" and str(request.get("instruct") or "").strip():
+            custom_args["instruct"] = request["instruct"]
         wavs, sample_rate = model.generate_custom_voice(
             **common,
-            speaker=request["speaker"],
+            **custom_args,
         )
     elif mode == "design":
         wavs, sample_rate = model.generate_voice_design(
@@ -78,6 +83,7 @@ def main() -> None:
     download_parser = subparsers.add_parser("download")
     download_parser.add_argument("--repo", required=True)
     download_parser.add_argument("--model-dir", type=Path, required=True)
+    download_parser.add_argument("--revision")
     generate_parser = subparsers.add_parser("generate")
     generate_parser.add_argument("--request", type=Path, required=True)
     generate_parser.add_argument("--output", type=Path, required=True)
@@ -85,7 +91,7 @@ def main() -> None:
     if args.command == "probe":
         probe()
     elif args.command == "download":
-        download(args.repo, args.model_dir)
+        download(args.repo, args.model_dir, args.revision)
     else:
         generate(args.request, args.output)
 

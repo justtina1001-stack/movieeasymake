@@ -5,7 +5,8 @@
   <title>圖片工作室 · MiniMax H3 Studio</title>
   <link rel="stylesheet" href="/static/styles.css?v=20260921-qwen-image">
   <link rel="stylesheet" href="/static/images.css?v=20261005-lora-help">
-  <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-help">
+  <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-recommendations">
+  <link rel="stylesheet" href="/static/workspace_ui.css?v=20261017-ux">
 </head>
 <body>
   <header class="topbar"><a class="brand" href="/"><span class="brand-mark">H3</span><span><strong>MiniMax H3 Studio</strong><small>IMAGE WORKSPACE</small></span></a><a class="button ghost small" href="/">返回影片工作室</a></header>
@@ -17,6 +18,8 @@
       <form id="imageForm" class="image-panel">
         <div class="image-section-heading"><span class="eyebrow">01 / CREATE</span><h2>圖片設定</h2></div>
         <label>生成方式<select id="imageMode"><option value="generate">文字生圖</option><option value="edit">參考圖編輯</option></select></label>
+        <label>生成模型<select id="imageModel"><option value="standard">原版 · 精細生成</option><option value="turbo">官方 Turbo · 快速 8 步</option></select></label>
+        <p id="imageModelStatus" class="image-hint" role="status">正在檢查所選模型…</p>
         <label>工作名稱<input id="imageName" maxlength="80" placeholder="例如：角色三視圖、透明道具"></label>
         <div id="referenceSection" class="hidden">
           <label id="referenceDrop" class="image-upload">① 上傳或拖入圖片 · 最多 10 張<input id="referenceFiles" type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp"></label>
@@ -30,7 +33,7 @@
         <label class="image-check"><input id="imageTransparent" type="checkbox">生成透明背景 PNG</label>
         <p class="image-hint">透明背景由模型生成，可能仍需清理邊緣。16 GB 顯卡建議從 1024、單張參考開始。</p>
         <details class="image-advanced"><summary>LoRA · 角色／風格擴充</summary><label>目前引擎的 Qwen-Image-2.1 LoRA<select id="imageLora"><option value="">不使用 LoRA</option></select></label><label>LoRA 強度<input id="imageLoraStrength" type="number" min="0" max="1.5" step="0.05" value="1" disabled></label><p id="loraStatus" class="image-hint" role="status">正在檢查…</p><div id="imageLoraHelp"></div><div id="imageLoraCatalog"></div><p class="image-hint">僅適用以 Qwen-Image-2.1 訓練、相容 ComfyUI 的 LoRA。請主機管理者放入 ComfyUI/models/loras/qwen_image_2_1，再按「重新檢查」。資料夾分類不代表已驗證相容；舊版 Qwen、FLUX、H3 LoRA 請勿混用。若作者提供觸發詞，請自行加入描述。強度 0 表示停用。</p></details>
-        <details class="image-advanced"><summary>採樣與 Seed</summary><label>採樣步數<input id="imageSteps" type="number" min="1" max="50" value="25" required></label><label class="image-check"><input id="imageSeedAuto" type="checkbox" checked>AUTO · 每次生成使用新 Seed</label><label>固定 Seed<input id="imageSeed" type="number" min="0" max="9007199254740991" value="42" disabled></label><p class="image-hint">預設 25 步供比較；官方完整品質範例使用 40 步。增加步數會延長生成時間。</p></details>
+        <details class="image-advanced"><summary>採樣與 Seed</summary><label>採樣步數<input id="imageSteps" type="number" min="1" max="50" value="25" required></label><label class="image-check"><input id="imageSeedAuto" type="checkbox" checked>AUTO · 每次生成使用新 Seed</label><label>固定 Seed<input id="imageSeed" type="number" min="0" max="9007199254740991" value="42" disabled></label><p id="imageStepsHint" class="image-hint">原版預設 25 步供比較；官方完整品質範例使用 40 步。增加步數會延長生成時間。</p></details>
         <button id="generateImage" type="submit" class="button primary" disabled>加入生成佇列 →</button>
         <p id="formMessage" class="image-hint" role="status" aria-live="polite"></p>
       </form>
@@ -52,7 +55,8 @@
     <p class="image-hint">另存新圖片並保留透明通道，與影片共用生成佇列。每邊最多 4096 像素。模型可能平滑細節，不能保證修正錯誤的五官或文字。2 倍使用模型的 4 倍結果縮小輸出。</p>
     <p id="upscaleError" role="alert"></p><div class="image-card-actions"><button id="cancelUpscale" type="button" class="button ghost">取消</button><button id="submitUpscale" type="button" class="button primary" disabled>加入放大佇列</button></div>
   </dialog>
-  <script src="/static/lora-help.js?v=20261005-lora-help"></script>
-  <script src="/static/images.js?v=20261005-lora-help"></script>
+  <script src="/static/lora-help.js?v=20261005-lora-recommendations"></script>
+  <script src="/static/images.js?v=20261012-official-turbo"></script>
+  <script src="/static/workspace_ui.js?v=20261017-ux"></script>
 </body>
 </html>

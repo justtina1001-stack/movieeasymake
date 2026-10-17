@@ -3,11 +3,20 @@
   "use strict";
   const speedMath = typeof module !== "undefined" && module.exports ? require("./editor_speed.js") : root.H3EditorSpeed;
   const ANIMATION_TYPES = Object.freeze(["none", "fade", "slide_left", "slide_right", "slide_up", "slide_down", "zoom_in", "zoom_out"]);
-  const TRANSITION_TYPES = Object.freeze(["none", "crossfade", "wipe_left", "wipe_right"]);
+  const IDLE_TYPES = Object.freeze(["none", "pulse", "float", "shake", "blink"]);
+  const REFERENCE_TRANSITION_TYPES = Object.freeze(["radial_zoom", "horizontal_blur"]);
+  const TRANSITION_EFFECT_TYPES = Object.freeze(["white_flash", "blur_dissolve", "wave_distort", "rgb_glitch", ...REFERENCE_TRANSITION_TYPES]);
+  const TRANSITION_TYPES = Object.freeze(["none", "crossfade", "wipe_left", "wipe_right", ...TRANSITION_EFFECT_TYPES]);
   const MAX_ANIMATION_DURATION = 5;
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
   const smoothstep = value => { const ratio = clamp(value, 0, 1); return ratio * ratio * (3 - 2 * ratio); };
   const active = value => value && value.type !== "none" && value.duration > 0;
+  const idleValue = (value, key, fallback) => value[key] === undefined ? fallback : value[key];
+  const activeIdle = value => value && IDLE_TYPES.includes(value.preset) && value.preset !== "none" && idleValue(value, "amount", 1) > 0;
+  function validateIdleSpec(value) {
+    if (value === undefined) return;
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !["preset", "speed", "amount"].includes(key)) || !IDLE_TYPES.includes(idleValue(value, "preset", "none")) || !Number.isFinite(idleValue(value, "speed", 1)) || idleValue(value, "speed", 1) < 0.25 || idleValue(value, "speed", 1) > 4 || !Number.isFinite(idleValue(value, "amount", 1)) || idleValue(value, "amount", 1) < 0 || idleValue(value, "amount", 1) > 2) throw new Error("文字待機特效類型無效，速度為 0.25–4，強度為 0–2。");
+  }
   function validateSpec(value, transition = false) {
     if (value === undefined) return;
     const keys = transition ? ["type", "duration", "next_id"] : ["type", "duration"];
@@ -19,14 +28,18 @@
       const spec = item[field];
       if (active(spec)) result[field] = { type: spec.type, duration: spec.duration, ...(field === "transition_out" ? { next_id: spec.next_id } : {}) };
     }
+    if (activeIdle(item.animation_idle)) result.animation_idle = { preset: item.animation_idle.preset, speed: idleValue(item.animation_idle, "speed", 1), amount: idleValue(item.animation_idle, "amount", 1) };
     return result;
   }
   function validateAnimations(item, length) {
     validateSpec(item.animation_in); validateSpec(item.animation_out); validateSpec(item.transition_out, true);
+    validateIdleSpec(item.animation_idle);
+    if (item.animation_idle !== undefined && item.kind !== "text") throw new Error("待機特效只能使用文字圖層。");
     if (!Number.isFinite(length) || length <= 0 || (active(item.animation_in) ? item.animation_in.duration : 0) + (active(item.animation_out) ? item.animation_out.duration : 0) > length + 1e-9) throw new Error("進場與退場動畫的總長不可超過片段。");
   }
   function clampAnimations(item, length) {
     validateSpec(item.animation_in); validateSpec(item.animation_out);
+    validateIdleSpec(item.animation_idle);
     if (!Number.isFinite(length) || length <= 0) throw new Error("動畫片段長度無效。");
     const total = (active(item.animation_in) ? item.animation_in.duration : 0) + (active(item.animation_out) ? item.animation_out.duration : 0);
     if (total > length && total > 0) for (const field of ["animation_in", "animation_out"]) if (active(item[field])) item[field] = { ...item[field], duration: item[field].duration * length / total };
@@ -34,7 +47,9 @@
   }
   function splitAnimations(item, firstLength, secondLength) {
     validateSpec(item.animation_in); validateSpec(item.animation_out); validateSpec(item.transition_out, true);
+    validateIdleSpec(item.animation_idle);
     const first = {}, second = {};
+    if (activeIdle(item.animation_idle)) first.animation_idle = { ...item.animation_idle }, second.animation_idle = { ...item.animation_idle };
     if (active(item.animation_in)) first.animation_in = { ...item.animation_in, duration: Math.min(item.animation_in.duration, firstLength) };
     if (active(item.animation_out)) second.animation_out = { ...item.animation_out, duration: Math.min(item.animation_out.duration, secondLength) };
     if (active(item.transition_out)) second.transition_out = { ...item.transition_out, duration: Math.min(item.transition_out.duration, secondLength) };
@@ -61,6 +76,23 @@
       const effect = effectTransform(spec.type, progress, entering);
       result.opacity *= effect.opacity; result.x += effect.x; result.y += effect.y; result.scale *= effect.scale;
     }
+    const idle = idleTransformAt(item, localTime, length);
+    result.opacity *= idle.opacity; result.x += idle.x; result.y += idle.y; result.scale *= idle.scale;
+    return result;
+  }
+  function idleTransformAt(item, localTime, length) {
+    const result = { opacity: 1, x: 0, y: 0, scale: 1 }, spec = item.animation_idle;
+    if (item.kind !== "text" || !activeIdle(spec) || !IDLE_TYPES.includes(spec.preset)) return result;
+    const start = active(item.animation_in) ? item.animation_in.duration : 0;
+    const end = length - (active(item.animation_out) ? item.animation_out.duration : 0), idleLength = end - start;
+    if (idleLength <= 1e-6 || localTime <= start || localTime >= end) return result;
+    const elapsed = localTime - start, ramp = Math.min(0.2, idleLength / 2);
+    const envelope = smoothstep(Math.min(1, elapsed / ramp, (end - localTime) / ramp));
+    const amount = idleValue(spec, "amount", 1), phase = 2 * Math.PI * elapsed * idleValue(spec, "speed", 1), wave = Math.sin(phase / 2) ** 2;
+    if (spec.preset === "pulse") result.scale = 1 + 0.08 * amount * wave * envelope;
+    else if (spec.preset === "float") result.y = -0.025 * amount * Math.sin(phase) * envelope;
+    else if (spec.preset === "shake") result.x = 0.0125 * amount * Math.sin(phase * 4) * envelope;
+    else if (spec.preset === "blink") result.opacity = 1 - Math.min(1, 0.8 * amount) * wave * envelope;
     return result;
   }
   function transitionTracks(project, durationFn = speedMath.clipDuration) {
@@ -100,7 +132,7 @@
     if (type === "wipe_right") return { from: { opacity: 1, left: value, right: 1 }, to: { opacity: 1, left: 0, right: value } };
     return { from: { opacity: 1 - value, left: 0, right: 1 }, to: { opacity: value, left: 0, right: 1 } };
   }
-  const core = { ANIMATION_TYPES, TRANSITION_TYPES, MAX_ANIMATION_DURATION, smoothstep, canonicalAnimations, validateAnimations, clampAnimations, splitAnimations, animationTransformAt, transitionTracks, validateTransitions, transitionPairs, transitionStateAt, transitionAt, transitionVisualAt };
+  const core = { ANIMATION_TYPES, IDLE_TYPES, TRANSITION_TYPES, TRANSITION_EFFECT_TYPES, REFERENCE_TRANSITION_TYPES, MAX_ANIMATION_DURATION, smoothstep, validateIdleSpec, canonicalAnimations, validateAnimations, clampAnimations, splitAnimations, animationTransformAt, idleTransformAt, transitionTracks, validateTransitions, transitionPairs, transitionStateAt, transitionAt, transitionVisualAt };
   if (typeof module !== "undefined" && module.exports) module.exports = core;
   root.H3EditorAnimations = core;
 })(typeof window !== "undefined" ? window : globalThis);

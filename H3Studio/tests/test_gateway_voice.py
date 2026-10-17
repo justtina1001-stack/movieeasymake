@@ -152,6 +152,30 @@ class GatewayVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.jobs, {})
         self.assertIsNone(self.installer.task)
 
+    async def test_same_client_id_cannot_be_reused_for_a_different_model(self):
+        payload = self.payload()
+        job = await self.create(payload)
+        response = await self.client.post("/api/voice/jobs", json={**payload, "model_id": "custom_1_7b"},
+                                          headers=self.headers())
+        self.assertEqual(response.status, 409)
+        self.assertEqual((await response.json())["error_code"], "remote_voice_model_conflict")
+        self.assertEqual(len(self.manager.jobs), 1)
+        self.assertEqual(job["model_id"], "custom")
+
+    async def test_large_model_and_capabilities_are_public_without_paths(self):
+        response = await self.client.get("/api/voice/status", headers=self.headers())
+        status = await response.json()
+        self.assertTrue(status["capabilities"]["model_selection"])
+        self.assertTrue(status["capabilities"]["custom_voice_instruct"])
+        self.assertEqual(status["models"]["custom_1_7b"]["mode"], "custom")
+        self.assertTrue(status["models"]["custom_1_7b"]["supports_instruct"])
+        self.assertNotIn("directory", status["models"]["custom_1_7b"])
+        job = await self.create(self.payload(model_id="custom_1_7b", instruct="清楚喜悅。"))
+        self.assertEqual(job["mode"], "custom")
+        self.assertEqual(job["model_id"], "custom_1_7b")
+        self.assertIn("1.7B", job["model_label"])
+        self.assertEqual(job["model_repo"], "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
+
     async def test_other_user_cannot_read_cancel_resume_or_download_a_job(self):
         job = await self.create()
         cancel = Mock(wraps=self.manager.cancel)

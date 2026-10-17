@@ -8,7 +8,7 @@ import aiohttp
 from domain import compile_request, required_asset_ids, validate_runtime_inventory
 from scriptwriting import ScriptwritingError, local_base_url
 from shortfilm import compile_shot_payload, flatten_shots, resolve_shot_asset_ids, validate_shot_references
-from custom_loras import active_loras, validate_loras_for_family
+from custom_loras import active_loras, validate_loras_for_family, validate_lora_requirements
 from h3_prompt_translation import prepare_h3_payload, payload_digest
 from script_video_format import normalize_video_settings, video_dimensions, ScriptVideoFormatError
 
@@ -57,6 +57,7 @@ class ScriptVideoRenderer:
         try:
             normalize_video_settings(project.get("video_settings"))
             loras = validate_loras_for_family(project.get("custom_loras", []), "ref2va")
+            validate_lora_requirements(loras, "ref2va")
         except ValueError as error:
             raise ScriptwritingError(str(error)) from error
         duration = project.get("duration", 0)

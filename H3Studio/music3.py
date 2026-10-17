@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import re
@@ -49,10 +50,29 @@ MUSIC3_MODELS = (
 )
 MAX_SEED = 2**64 - 1
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+MUSIC_REQUEST_FIELDS = (
+    "job_name", "mode", "use_case", "genre", "mood", "bpm", "key", "duration",
+    "instruments", "structure", "vocals", "lyrics", "production", "avoid", "details",
+    "seed", "format", "tiled_decode",
+)
 
 
 class Music3Error(ValueError):
     pass
+
+
+class Music3ProbeError(Music3Error):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def music_request_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep reusable form fields, never arbitrary request metadata or secrets."""
+    return {
+        key: value for key in MUSIC_REQUEST_FIELDS
+        if isinstance((value := payload.get(key)), (str, int, float, bool))
+    }
 
 
 def utc_now() -> str:
@@ -307,6 +327,13 @@ class Music3Installer:
             "speed_bps": round(self.speed_bps),
             "models": models,
             "installed": all(model["installed"] for model in models),
+            "connection_mode": self.comfy.mode,
+            "compute_location": "remote" if self.comfy.mode == "remote" else "local",
+            "connection_url": str(getattr(self.comfy, "base_url", "")),
+            "model_location": "remote" if self.comfy.mode == "remote" else "local",
+            "result_location": "studio",
+            "available": True,
+            "error_code": "install_failed" if self.error else "",
         }
 
     async def status_for_current_engine(self) -> dict[str, Any]:
@@ -320,35 +347,69 @@ class Music3Installer:
             ("VAELoader", "vae_name", MUSIC3_VAE, "vae"),
         )
         nodes_ready = False
+        error_code = ""
+        error_message = ""
+
+        async def object_info(session: aiohttp.ClientSession, node: str) -> dict[str, Any]:
+            async with session.get(
+                f"{self.comfy.base_url}/object_info/{node}",
+                headers=self.comfy.auth_headers(), allow_redirects=False,
+            ) as response:
+                if response.status in {401, 403}:
+                    raise Music3ProbeError("authentication", "遠端主機拒絕認證，請檢查個人金鑰或請管理者換發；不需重新安裝模型。")
+                if response.status == 404:
+                    return {}
+                if response.status != 200:
+                    raise Music3ProbeError("connection", f"遠端主機暫時無法讀取 Music 3 狀態（HTTP {response.status}），請檢查 Gateway 與引擎服務。")
+                payload = await response.json()
+                if not isinstance(payload, dict):
+                    raise Music3ProbeError("invalid_response", "遠端網址未回傳有效的引擎狀態，請檢查 Gateway 網址。")
+                return payload
+
         try:
             timeout = aiohttp.ClientTimeout(total=12)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                    f"{self.comfy.base_url}/object_info/MiniMaxMusic3TextEncode",
-                    headers=self.comfy.auth_headers(),
-                ) as response:
-                    nodes_ready = response.status == 200
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                metadata = await object_info(session, "MiniMaxMusic3TextEncode")
+                nodes_ready = isinstance(metadata.get("MiniMaxMusic3TextEncode"), dict)
                 for node, field, filename, key in lookups:
-                    async with session.get(
-                        f"{self.comfy.base_url}/object_info/{node}",
-                        headers=self.comfy.auth_headers(),
-                    ) as response:
-                        if response.status != 200:
-                            continue
-                        payload = await response.json()
+                    payload = await object_info(session, node)
                     choices = payload.get(node, {}).get("input", {}).get("required", {}).get(field, [[]])[0]
                     available[key] = filename in choices
-        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
-            pass
+            if not nodes_ready:
+                error_code = "nodes_missing"
+                error_message = "遠端 ComfyUI 尚未提供 Music 3 節點，請 GPU 主機管理者更新並重新啟動遠端 ComfyUI。"
+            elif not all(available.values()):
+                error_code = "models_missing"
+                error_message = "遠端主機尚未安裝完整 Music 3 模型，請 GPU 主機管理者安裝缺少的模型；這台電腦不需安裝。"
+        except Music3ProbeError as error:
+            error_code, error_message = error.code, str(error)
+        except asyncio.TimeoutError:
+            error_code = "timeout"
+            error_message = "遠端主機回應逾時，請檢查主機、Gateway 與網路連線後重試；不需重新安裝模型。"
+        except aiohttp.ContentTypeError:
+            error_code = "invalid_response"
+            error_message = "遠端網址未回傳有效的 Music 3 狀態，請檢查 Gateway 網址及主機版本。"
+        except (aiohttp.ClientError, OSError):
+            error_code = "connection"
+            error_message = "無法連線到遠端主機，請檢查 Gateway 網址、主機與網路連線；不需重新安裝模型。"
+        except (TypeError, ValueError, AttributeError, KeyError, IndexError):
+            error_code = "invalid_response"
+            error_message = "遠端網址未回傳有效的 Music 3 狀態，請檢查 Gateway 網址及主機版本。"
         for model in status["models"]:
             model["installed"] = available.get(model["key"], False)
             model["downloaded"] = model["size"] if model["installed"] else 0
+        installed = not error_code and nodes_ready and all(available.values())
         status.update({
-            "installed": nodes_ready and all(available.values()),
+            "installed": installed,
             "downloaded": sum(model["size"] for model in status["models"] if model["installed"]),
-            "state": "complete" if nodes_ready and all(available.values()) else "remote_missing",
+            "state": "complete" if installed else "remote_missing" if error_code in {"nodes_missing", "models_missing"} else "unavailable",
             "progress": round(sum(model["size"] for model in status["models"] if model["installed"]) / self.total * 100, 2),
-            "error": "" if nodes_ready else "遠端 ComfyUI 尚未提供 Music 3 節點，請先更新遠端 ComfyUI。",
+            "error": error_message,
+            "error_code": error_code,
+            "available": error_code in {"", "nodes_missing", "models_missing"},
+            "active": False,
+            "current": "",
+            "can_install": False,
         })
         return status
 
@@ -541,6 +602,19 @@ class MusicJobManager:
         self._persist(self.jobs[job_id])
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise Music3Error("音樂生成設定格式錯誤。")
+        request_id = str(payload.get("request_id") or "").strip()
+        if request_id and not re.fullmatch(r"[a-zA-Z0-9_-]{8,128}", request_id):
+            raise Music3Error("音樂提交識別碼格式錯誤，請重新整理後再試。")
+        settings = music_request_settings(payload)
+        fingerprint = hashlib.sha256(json.dumps(settings, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        if request_id:
+            for existing in self.jobs.values():
+                if existing.get("request_id") == request_id:
+                    if existing.get("request_fingerprint") != fingerprint:
+                        raise Music3Error("此提交識別碼已用於不同設定，請建立新的音樂工作。")
+                    return existing
         compiled = compile_music_request(payload)
         if self.comfy.mode == "local" and not self.installer.public_status()["installed"]:
             raise Music3Error("Music 3 模型尚未安裝完成，請先按「安裝 Music 3 模型」。")
@@ -564,7 +638,10 @@ class MusicJobManager:
             "lyrics": compiled["lyrics"],
             "created_at": utc_now(),
             "updated_at": utc_now(),
+            "settings": {**settings, "job_name": compiled["name"], "seed": compiled["seed"]},
         }
+        if request_id:
+            job.update(request_id=request_id, request_fingerprint=fingerprint)
         self.jobs[job_id] = job
         self.cancel_events[job_id] = asyncio.Event()
         self._persist(job)
@@ -674,4 +751,15 @@ class MusicJobManager:
         pages = max(1, math.ceil(total / page_size))
         page = min(max(1, page), pages)
         start = (page - 1) * page_size
-        return {"items": records[start:start + page_size], "page": page, "page_size": page_size, "total": total, "total_pages": pages}
+        items = []
+        for job in records[start:start + page_size]:
+            item = dict(job)
+            if "settings" not in item:
+                try:
+                    payload = json.loads((self.job_dir / f"{job['id']}.request.json").read_text(encoding="utf-8"))
+                    if isinstance(payload, dict):
+                        item["settings"] = {**music_request_settings(payload), "seed": job.get("seed"), "job_name": job.get("name", "")}
+                except (OSError, ValueError, UnicodeError):
+                    pass
+            items.append(item)
+        return {"items": items, "page": page, "page_size": page_size, "total": total, "total_pages": pages}

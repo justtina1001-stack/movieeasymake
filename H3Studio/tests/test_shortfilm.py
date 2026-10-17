@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import json
+from unittest.mock import patch
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from domain import compile_request
 from shortfilm import (
     ShortFilmStore,
     ShortFilmError,
+    ShortFilmConflictError,
     append_continuous_scene,
     changed_reference_aliases,
     compile_shot_payload,
@@ -311,12 +314,8 @@ class ShortFilmTests(unittest.TestCase):
         self.assertTrue(any("10 張參考圖片" in warning and "9 張上限" in warning for warning in warnings))
 
     def test_store_crud(self) -> None:
-        directory = Path(__file__).resolve().parents[1] / "data" / "test-shortfilm-store"
-        directory.mkdir(parents=True, exist_ok=True)
-        projects_file = directory / "projects.json"
-        projects_file.unlink(missing_ok=True)
-        try:
-            store = ShortFilmStore(directory)
+        with TemporaryDirectory() as directory:
+            store = ShortFilmStore(Path(directory))
             created = store.create(new_project("測試短片"))
             self.assertEqual(store.get(created["id"])["title"], "測試短片")
             created["title"] = "修改後"
@@ -325,8 +324,157 @@ class ShortFilmTests(unittest.TestCase):
             self.assertEqual(len(store.list()), 1)
             store.delete(created["id"])
             self.assertEqual(store.list(), [])
-        finally:
-            projects_file.unlink(missing_ok=True)
+
+    def test_store_detects_stale_project_revision(self):
+        with TemporaryDirectory() as directory:
+            store = ShortFilmStore(Path(directory))
+            first_tab = store.create(new_project("原名"))
+            other_tab = store.get(first_tab["id"])
+            first_tab["title"] = "第一視窗修改"
+            saved = store.update(first_tab["id"], first_tab)
+            self.assertEqual(saved["revision"], 2)
+            other_tab["title"] = "過期視窗修改"
+            with self.assertRaises(ShortFilmConflictError) as raised:
+                store.update(other_tab["id"], other_tab)
+            self.assertEqual(raised.exception.current_revision, 2)
+            self.assertEqual(store.get(saved["id"])["title"], "第一視窗修改")
+            legacy_request = dict(saved)
+            legacy_request.pop("revision")
+            with self.assertRaises(ShortFilmConflictError):
+                store.update(saved["id"], legacy_request)
+
+    def test_legacy_project_revision_and_long_text_survive_reload_and_unrelated_edit(self):
+        with TemporaryDirectory() as directory:
+            project, scene, shot = self.project_with_shot()
+            project.pop("revision", None)
+            project["title"] = "舊" * 90
+            project["updated_at"] = "2025-01-01T00:00:00+00:00"
+            shot["action"] = "舊字句" * 2000
+            index = Path(directory) / "projects.json"
+            index.write_text(json.dumps([project]), encoding="utf-8")
+            store = ShortFilmStore(Path(directory))
+            restored = store.get(project["id"])
+            self.assertEqual(restored["revision"], 0)
+            self.assertEqual(restored["updated_at"], project["updated_at"])
+            self.assertEqual(restored["title"], project["title"])
+            self.assertEqual(restored["scenes"][0]["shots"][0]["action"], shot["action"])
+            restored["target_duration"] = 40
+            saved = store.update(project["id"], restored)
+            self.assertEqual(saved["revision"], 1)
+            reloaded = ShortFilmStore(Path(directory)).get(project["id"])
+            self.assertEqual(reloaded["scenes"][0]["shots"][0]["action"], shot["action"])
+            saved["scenes"][0]["shots"][0]["action"] += "新增"
+            with self.assertRaisesRegex(ShortFilmError, "5000 字上限"):
+                store.update(project["id"], saved)
+
+    def test_legacy_missing_collections_and_nested_optional_fields_remain_loadable(self):
+        for legacy in ({"id": "a" * 32, "title": "早期專案"},
+                       {"id": "b" * 32, "title": "早期場次", "assets": [{"alias": "Alice"}], "scenes": [{"title": "場次"}]}):
+            with self.subTest(legacy=legacy), TemporaryDirectory() as directory:
+                index = Path(directory) / "projects.json"
+                index.write_text(json.dumps([legacy]), encoding="utf-8")
+                store = ShortFilmStore(Path(directory))
+                self.assertTrue(store.storage_status()["available"])
+                loaded = store.get(legacy["id"])
+                self.assertEqual(loaded["revision"], 0)
+                self.assertEqual(loaded["title"], legacy["title"])
+                if loaded["scenes"]:
+                    self.assertEqual(loaded["scenes"][0]["shots"], [])
+                    self.assertEqual(loaded["assets"][0]["image_asset_ids"], [])
+                loaded["synopsis"] = "補上大綱"
+                saved = store.update(legacy["id"], loaded)
+                self.assertEqual(saved["revision"], 1)
+
+    def test_overlong_new_text_is_rejected_instead_of_truncated(self):
+        for field, limit in (("title", 80), ("style", 1000), ("synopsis", 5000)):
+            with self.subTest(field=field):
+                project = new_project()
+                project[field] = "字" * (limit + 1)
+                with self.assertRaisesRegex(ShortFilmError, f"{limit} 字上限"):
+                    normalize_project(project)
+                self.assertEqual(len(project[field]), limit + 1)
+        project, _, shot = self.project_with_shot()
+        shot["dialogue"] = "字" * 1801
+        with self.assertRaisesRegex(ShortFilmError, "鏡頭 1.*台詞.*1800 字上限"):
+            normalize_project(project)
+        shot["dialogue"] = ""
+        project["segment_draft"] = {"prompts": ["字" * 5001]}
+        with self.assertRaisesRegex(ShortFilmError, "第 1 段分鏡詞"):
+            normalize_project(project)
+
+    def test_corrupt_index_without_backup_blocks_every_mutation_and_preserves_bytes(self):
+        for damaged in (b"{broken", b"{}", b"[{}]"):
+            with self.subTest(damaged=damaged), TemporaryDirectory() as directory:
+                index = Path(directory) / "projects.json"
+                index.write_bytes(damaged)
+                store = ShortFilmStore(Path(directory))
+                self.assertFalse(store.storage_status()["available"])
+                for action in (store.list, lambda: store.create(new_project()),
+                               lambda: store.update("a" * 32, {}), lambda: store.delete("a" * 32)):
+                    with self.assertRaisesRegex(ShortFilmError, "儲存已停止"):
+                        action()
+                self.assertEqual(index.read_bytes(), damaged)
+
+    def test_corrupt_index_restores_valid_backup_and_archives_original_before_write(self):
+        with TemporaryDirectory() as directory:
+            store = ShortFilmStore(Path(directory))
+            project = store.create(new_project("原始備份"))
+            project["title"] = "最新版本"
+            store.update(project["id"], project)
+            damaged = b"[truncated-json"
+            store.index_path.write_bytes(damaged)
+            recovered = ShortFilmStore(Path(directory))
+            self.assertTrue(recovered.storage_status()["recovered"])
+            self.assertEqual(recovered.get(project["id"])["title"], "原始備份")
+            self.assertEqual(recovered.corrupt_path.read_bytes(), damaged)
+            saved = recovered.get(project["id"])
+            saved["title"] = "確認後存回"
+            recovered.update(saved["id"], saved)
+            self.assertEqual(recovered.corrupt_path.read_bytes(), damaged)
+            self.assertEqual(ShortFilmStore(Path(directory)).get(saved["id"])["title"], "確認後存回")
+
+    def test_invalid_project_inside_index_is_not_silently_dropped(self):
+        with TemporaryDirectory() as directory:
+            index = Path(directory) / "projects.json"
+            contents = json.dumps([new_project("有效"), {"id": "invalid", "title": "不可丟棄"}])
+            index.write_text(contents, encoding="utf-8")
+            store = ShortFilmStore(Path(directory))
+            with self.assertRaises(ShortFilmError):
+                store.create(new_project("不能覆寫"))
+            self.assertEqual(index.read_text(encoding="utf-8"), contents)
+
+    def test_malformed_nested_records_cannot_be_silently_removed_on_save(self):
+        for changes in ({"assets": "broken"}, {"assets": [None]}, {"scenes": [None]},
+                        {"scenes": [{"shots": "broken"}]}, {"scenes": [{"shots": [None]}]}):
+            with self.subTest(changes=changes), TemporaryDirectory() as directory:
+                index = Path(directory) / "projects.json"
+                contents = json.dumps([{**new_project(), **changes}])
+                index.write_text(contents, encoding="utf-8")
+                store = ShortFilmStore(Path(directory))
+                with self.assertRaises(ShortFilmError):
+                    store.create(new_project("不能覆寫"))
+                self.assertEqual(index.read_text(encoding="utf-8"), contents)
+
+    def test_failed_atomic_write_does_not_change_memory_or_index(self):
+        with TemporaryDirectory() as directory:
+            store = ShortFilmStore(Path(directory))
+            project = store.create(new_project("原始"))
+            index_before = store.index_path.read_bytes()
+            projects_before = store.list()
+            original_replace = Path.replace
+            def fail_index_replace(path, target):
+                if Path(target) == store.index_path:
+                    raise OSError("disk unavailable")
+                return original_replace(path, target)
+            updated = dict(project, title="不應存進記憶體")
+            for mutation in (lambda: store.create(new_project("新增失敗")),
+                             lambda: store.update(project["id"], updated),
+                             lambda: store.delete(project["id"])):
+                with patch.object(Path, "replace", fail_index_replace), self.assertRaises(OSError):
+                    mutation()
+                self.assertEqual(store.list(), projects_before)
+                self.assertEqual(store.index_path.read_bytes(), index_before)
+                self.assertEqual(list(Path(directory).glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ const SCRIPT_VIDEO_DEFAULTS = { aspect_ratio: "16:9", megapixels: 0.4, output_re
 const SCRIPT_VIDEO_ASPECTS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"];
 const SCRIPT_VIDEO_PRECISION = [0.4, 0.7, 0.9, 0.98];
 const SCRIPT_DEFAULT_STYLE = "精緻 3D CG 遊戲動畫風格，色彩明亮；依場景保留少量神祕冒險氛圍。";
-const SCRIPT_DEFAULT_INSTRUCTIONS = "以繁體中文編寫可直接製作的劇本。全片不要配樂／零 BGM，只保留場景環境音、蟲鳴、樹葉摩擦、腳步聲、遺跡能量聲等適合情境的聲音，以及角色動作音效與對白。\n先列全片風格、聲音規則及角色／場景與參考圖片的固定對應，再以連續時間碼分段；起點為 0.0s，最後一段結束於目標片長，沒有空白或重疊。每段清楚列出：鏡頭／景別（焦段與機位）、地點、角色／位置與空間關係、動作／行為與表情、運鏡、VFX、聲音、對白；沒有對白請寫「無」。動作與對白須能在段落時長內完成，前後鏡頭保持角色外觀、位置、方向與因果連續，收尾交代最後反應、定格或切黑。\n若提供「角色＝圖一；角色＝圖二；場景＝圖三」等對應，全片固定使用；未提供圖片時不要虛構圖片內容。角色與故事依本次設定發展。\n詳細描寫應增加段落內的可見資訊，不增加片長。動作寫準備→移動／接觸→反應與收勢，補上視線、手勢、重心與位置變化；運鏡交代方向、速度及最後構圖。禁止用「同上」或重複結尾補長，目標片長到達後立即停止。";
+const SCRIPT_DEFAULT_INSTRUCTIONS = "以繁體中文編寫可直接製作的劇本。全片不要配樂／零 BGM，只保留場景環境音、蟲鳴、樹葉摩擦、腳步聲、遺跡能量聲等適合情境的聲音，以及角色動作音效與對白。\n先列全片風格、聲音規則及角色／場景與參考圖片的固定對應，再以連續時間碼分段；起點為 0.0s，最後一段結束於目標片長，沒有空白或重疊。每段清楚列出：鏡頭／景別（焦段與機位）、地點、角色／位置與空間關係、動作／行為與表情、運鏡、VFX、聲音、對白；沒有對白請寫「無」。動作與對白須能在段落時長內完成，前後鏡頭保持角色外觀、位置、方向與因果連續，收尾交代最後反應、定格或切黑。\n若提供「角色＝圖一；角色＝圖二；場景＝圖三」等對應，全片固定使用；未提供圖片時不要虛構圖片內容。角色與故事依本次設定發展。\n詳細描寫應增加段落內的可見資訊，不增加片長。動作寫準備→移動／接觸→反應與收勢，補上視線、手勢、重心與位置變化；運鏡交代方向、速度及最後構圖。禁止用「同上」或重複結尾補長，目標片長到達後立即停止。\n完整劇本與潤飾稿使用繁體中文逐段文字，不輸出 JSON 或 Python 字典。段名採「1. 0.0–2.0s｜段名」，上述八個欄位分行；動作／表情列出 2～4 個可見變化及必要的段內時點，不能只寫「激烈戰鬥」「施法」等摘要。未指定節奏的 15 秒稿採 0–2、2–4、4–6.5、6.5–9、9–12、12–15 秒六段，指定時間優先。";
 const SCRIPT_MONKEY_EXAMPLE_INSTRUCTIONS = `範例全長固定 15.0 秒，共 8 段。金猴爺＝圖一；神祕女子＝圖二；古代遺跡＝圖三。這是參考圖對應設定，圖片須另行提供，不代表已上傳。叢林明亮，遺跡區帶少量神祕冒險氛圍。
 1. 0.0–2.0s｜深入叢林：18mm 超廣角大全景，低機位貼地穿過熱帶葉片追至金猴爺後方。茂密熱帶叢林深處；金猴爺在中央偏前，背對鏡頭，以小短腿快走、雙手撥大葉片、左右好奇張望。低機位追焦→快速推進。金黃體積光、花粉塵埃、葉片水珠；蟲鳴、鳥叫、踩落葉「沙沙沙」；無對白。
 2. 2.0–4.0s｜發現古代遺跡：24mm 中遠景，右後方 3/4 背影。金猴爺停在左下，圖三入口在前方約 15 公尺的中央；猛停、睜大眼、抬頭看石門與藍色傳送門。背後慢慢上仰揭露完整遺跡；青藍漩渦慢轉、金框暖光、少量紫粒子；低沉「嗡——」；金猴爺小聲「哇……」。
@@ -110,15 +110,20 @@ function scriptLoraSelectionError(value, { video = false, catalog = null } = {})
     seen.add(row.name.toLowerCase());
     if (!Number.isFinite(row.strength) || row.strength < 0 || row.strength > 2) return "LoRA 強度請填寫 0～2 的數字。";
     if (!["fl2va", "ref2va", "both"].includes(row.family)) return `請明確選擇「${row.name}」的適用模型；未知 LoRA 請依作者說明確認。`;
-    const metadata = catalog?.items?.find(item => item.name === row.name);
-    if (row.enabled && row.strength > 0 && catalog?.builtin_items?.some(item => item.name === row.name)) return "Turbo 加速由影片品質模式管理，請移除此自訂 Turbo 項目。";
+    const records = [...(Array.isArray(catalog?.items) ? catalog.items : []), ...(Array.isArray(catalog?.recommended_items) ? catalog.recommended_items : [])];
+    const metadata = records.find(item => item && typeof item.name === "string" && item.name.replace(/\\/g, "/").toLowerCase() === row.name.toLowerCase());
+    if (row.enabled && row.strength > 0 && Array.isArray(catalog?.builtin_items) && catalog.builtin_items.some(item => item?.name === row.name)) return "Turbo 加速由影片品質模式管理，請移除此自訂 Turbo 項目。";
     if (video && row.enabled && row.strength > 0 && (row.family === "fl2va" || metadata?.known === true && metadata.family === "fl2va")) return `「${row.name}」只適用 FL2VA，腳本自動影片使用 Ref2VA；請停用或選擇 Ref2VA 相容檔案。`;
+    if (video && row.enabled && row.strength > 0 && (metadata?.installed === false || metadata?.availability === "missing" || metadata?.availability === "gated" || metadata?.manual_selectable === false)) return `「${row.name}」尚未安裝或不可手動選用；已保留設定，請停用或安裝後重新掃描。`;
+    if (video && row.enabled && row.strength > 0 && metadata?.requires_source_video === true) return `「${row.name}」需來源影片，請到影片工作室→角色替換；腳本自動影片請停用此項。`;
   }
   return "";
 }
 
 function scriptLoraCanonicalFamily(sent, saved) {
-  return sent?.name?.split("/").pop().toLowerCase() === "wushu_h3_r2v_v7_2000.safetensors" && sent.family === "both" && saved.family === "ref2va";
+  const known = { "wushu_h3_r2v_v7_2000.safetensors": "ref2va", "h3_character_swap_pro4500_1000.safetensors": "ref2va", "minimax_h3_flf2v_lora_v1.safetensors": "fl2va" };
+  const family = known[sent?.name?.split("/").pop().toLowerCase()];
+  return Boolean(family) && sent?.family === "both" && family === saved?.family;
 }
 
 function scriptLoraSaveConfirmed(sent, saved) {
@@ -188,6 +193,19 @@ function scriptJobPresentation(job) {
 
 function scriptCanDeleteJob(job) {
   return Boolean(job?.id) && ["completed", "failed", "cancelled", "canceled", "interrupted"].includes(job.status);
+}
+
+function scriptPreviewData(job, requestedView = "readable") {
+  const supported = ["screenplay", "rewrite", "storyboard"].includes(job?.action);
+  const raw = typeof job?.raw_content === "string" && job.raw_content.trim() ? job.raw_content : typeof job?.content === "string" ? job.content : "";
+  const plainContent = typeof job?.content === "string" && !/^(?:[\[{]|```(?:json|python))/i.test(job.content.trimStart());
+  const readable = typeof job?.readable_content === "string" && job.readable_content.trim() ? job.readable_content
+    : ["screenplay", "rewrite"].includes(job?.action) && plainContent ? job.content : "";
+  const readableReady = supported && job?.status === "completed" && job.truncated !== true && Boolean(readable.trim());
+  const view = requestedView === "raw" || !readableReady ? "raw" : "readable";
+  const readableLabel = job?.action === "storyboard" && job.readable_content_source === "screenplay" ? "原表演腳本（分鏡來源）" : "表演腳本";
+  const note = typeof job?.readable_content_note === "string" ? job.readable_content_note : "";
+  return { supported, readableReady, view, text: view === "readable" ? readable : raw, readableLabel, note };
 }
 
 const SCRIPT_PIPELINE_STAGES = { queued: "排隊", screenplay: "編寫劇本", storyboard: "建立分鏡", import: "建立短片", render: "生成影片", assemble: "組合影片", completed: "影片完成" };
@@ -275,10 +293,16 @@ function normalizeScriptSkills(value) {
   if (!Array.isArray(value) || !value.length) throw new Error("創作 Skill 清單回應不完整，請重新檢查。");
   const seen = new Set();
   const lines = value => typeof value === "string" ? [value] : Array.isArray(value) ? value.filter(item => typeof item === "string") : [];
+  const text = value => typeof value === "string" ? value : "";
+  const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
   return value.map(item => {
     if (!item || typeof item.id !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(item.id) || seen.has(item.id) || typeof item.name !== "string" || !item.name.trim()) throw new Error("創作 Skill 清單回應不完整，請重新檢查。");
     seen.add(item.id);
-    return { id: item.id, name: item.name, category: typeof item.category === "string" ? item.category : "", description: typeof item.description === "string" ? item.description : "", recommended_for: lines(item.recommended_for), guide: lines(item.guide), sources: Array.isArray(item.sources) ? item.sources.filter(source => source && typeof source === "object").map(source => ({ name: typeof source.name === "string" ? source.name : "參考來源", url: typeof source.url === "string" ? source.url : "", license: typeof source.license === "string" ? source.license : "", license_url: typeof source.license_url === "string" ? source.license_url : "" })) : [] };
+    return { id: item.id, name: item.name, category: text(item.category), description: text(item.description), version: text(item.version), recommended_for: lines(item.recommended_for), guide: lines(item.guide), sources: Array.isArray(item.sources) ? item.sources.filter(source => source && typeof source === "object").map(source => ({
+      name: typeof source.name === "string" ? source.name : "參考來源", url: text(source.url), license: text(source.license), license_url: text(source.license_url),
+      repo_url: text(source.repo_url), repository_stars: count(source.repository_stars), repository_forks: count(source.repository_forks), checked_at: text(source.checked_at),
+      provenance: ["official", "community"].includes(source.provenance) ? source.provenance : "", commit: text(source.commit), version: text(source.version),
+    })) : [] };
   });
 }
 
@@ -288,7 +312,14 @@ function scriptSkillSourceUrl(value) {
 
 function scriptRecommendedWritingSkill(project, skills) {
   const text = `${project?.genre || ""}\n${project?.idea || ""}`;
-  const rules = [["suspense-horror", /恐怖|懸疑|驚悚|鬼|詭異|異常腳步|背後.*腳步|horror|suspense/i], ["game-trailer", /遊戲.*(?:預告|宣傳)|(?:預告|宣傳).*遊戲|game.*trailer/i], ["product-demo", /產品.*(?:示範|教學|操作)|(?:示範|操作教學).*產品|product.*demo/i], ["product-commercial", /廣告|商品|產品|commercial/i], ["educational-explainer", /科普|知識|教學|解說|原理|educational|explainer/i], ["comedy-reaction", /喜劇|搞笑|笑點|尷尬|comedy/i], ["emotional-drama", /情感|親情|愛情|失戀|告白|重逢|思念|emotional/i], ["fantasy-adventure", /奇幻|魔法|冒險|遺跡|fantasy|adventure/i], ["action-chase", /動作|追逐|追車|打鬥|action|chase/i], ["documentary-lifestyle", /紀錄片|生活紀錄|旅遊|紀實|documentary|lifestyle/i]];
+  const rules = [
+    ["h3-reference-planning", /參考(?:圖|圖片|素材|影像|音訊|影片)|多模態|\bref2va\b|multimodal|reference\s+(?:image|video|audio|planning)/i],
+    ["h3-performance-beats", /表演節拍|動作節拍|節拍|performance\s+beats|acting\s+beats|anticipation/i],
+    ["h3-director-continuity", /導演|鏡頭銜接|軸線|180\s*度|director|shot\s+continuity|screen\s+direction|blocking/i],
+    ["h3-3d-animation", /\b3d\b|三維動畫|三维动画|CG\s*動畫|CG\s*animation/i],
+    ["h3-official-storyboard", /\bH3\b|MiniMax|官方分鏡|官方提示詞/i],
+    ["suspense-horror", /恐怖|懸疑|驚悚|鬼|詭異|異常腳步|背後.*腳步|horror|suspense/i], ["game-trailer", /遊戲.*(?:預告|宣傳)|(?:預告|宣傳).*遊戲|game.*trailer/i], ["product-demo", /產品.*(?:示範|教學|操作)|(?:示範|操作教學).*產品|product.*demo/i], ["product-commercial", /廣告|商品|產品|commercial/i], ["educational-explainer", /科普|知識|教學|解說|原理|educational|explainer/i], ["comedy-reaction", /喜劇|搞笑|笑點|尷尬|comedy/i], ["emotional-drama", /情感|親情|愛情|失戀|告白|重逢|思念|emotional/i], ["fantasy-adventure", /奇幻|魔法|冒險|遺跡|fantasy|adventure/i], ["action-chase", /動作|追逐|追車|打鬥|action|chase/i], ["documentary-lifestyle", /紀錄片|生活紀錄|旅遊|紀實|documentary|lifestyle/i],
+  ];
   const id = rules.find(([id, expression]) => skills.some(skill => skill.id === id) && expression.test(text))?.[0] || "cinematic-story";
   return skills.find(skill => skill.id === id) || null;
 }
@@ -298,6 +329,7 @@ if (typeof module !== "undefined" && module.exports) {
 }
 
 if (typeof module !== "undefined" && module.exports) Object.assign(module.exports, { normalizeScriptLoras, scriptLoraSourceUrl, scriptLoraSelectionError, scriptLoraSaveConfirmed });
+if (typeof module !== "undefined" && module.exports) Object.assign(module.exports, { scriptPreviewData });
 if (typeof module !== "undefined" && module.exports) Object.assign(module.exports, { normalizeScriptVideoSettings, scriptVideoDimensions, scriptPipelineVideoFormat, scriptVideoFormatLabel });
 
 if (typeof document !== "undefined") {
@@ -306,9 +338,9 @@ if (typeof document !== "undefined") {
   const fieldIds = { title: "scriptTitle", idea: "scriptIdea", genre: "scriptGenre", duration: "scriptDuration", characters: "scriptCharacters", style: "scriptStyle", instructions: "scriptInstructions", content: "scriptContent", writing_skill: "scriptWritingSkill" };
   const videoFieldIds = { aspect_ratio: "scriptVideoAspectRatio", megapixels: "scriptVideoMegapixels", output_resolution: "scriptVideoResolution" };
   const state = { project: createNewScriptProject(), projects: [], jobs: [], job: null, selectedJobId: null, ready: false, visionReady: false, referencesSupported: false, referencesSupportKnown: false, referencesSaveWaiting: false, engineCheckPromise: null, messageKind: "", settings: null, dirty: false, loading: false, saving: false, starting: false, importing: false, pollBusy: false, settingsDirty: false, settingsSaving: false, conflict: null, recovery: null, ownDrafts: {}, newDraftCounter: 1, newDraftId: "__new__-1", draftAvailable: true, jobsRevision: 0, generation: 0, referenceControls: new Map(), referenceUploads: new Map(), referenceCounter: 0, historyScope: "all", historyPersistent: false, historyStorage: "loading", historyError: "", activeJobs: [], deletingJobIds: new Set(), deletedJobIds: new Set(), historyDeleteControls: new Map(), autoVideo: false, videoPipelinesSupported: false, videoReady: false, videoError: "", pipelines: [], pipeline: null, selectedPipelineId: null, pipelineStarting: false, pipelinePollBusy: false, pipelinesRevision: 0 };
-  Object.assign(state, { writingSkills: [], skillsSupported: false, skillsSupportKnown: false, skillsCatalogReady: false, skillsLoading: false, skillsError: "", skillsSaveWaiting: false });
+  Object.assign(state, { writingSkills: [], skillsSupported: false, skillsSupportKnown: false, skillsCatalogReady: false, skillsLoading: false, skillsError: "", skillsSaveWaiting: false, previewRequestFailed: false, previewView: "readable", previewViewJobId: null });
   Object.assign(state, { videoHistoryScope: "all", historyVideos: [], selectedHistoryVideoId: null, historyPreviewVideo: null, historyPreviewError: "", videoHistoryStatus: "loading", videoHistoryError: "", videoHistoryWarning: "", videoHistoryBusy: false });
-  Object.assign(state, { lorasSupported: false, lorasSupportKnown: false, lorasSaveWaiting: false, loraCatalog: { names: [], items: [], builtin_items: [] }, loraCatalogReady: false, loraCatalogBusy: false, loraCatalogError: "", loraCatalogSerial: 0, loraControls: [] });
+  Object.assign(state, { lorasSupported: false, lorasSupportKnown: false, lorasSaveWaiting: false, loraCatalog: { names: [], items: [], recommended_items: [], builtin_items: [] }, loraCatalogReady: false, loraCatalogBusy: false, loraCatalogError: "", loraCatalogSerial: 0, loraControls: [] });
 
   function message(text, error = false, kind = "") {
     state.messageKind = kind;
@@ -363,6 +395,16 @@ if (typeof document !== "undefined") {
 
   function loraFamily(item) { return item?.known === true && ["fl2va", "ref2va", "both"].includes(item.family) ? item.family : null; }
 
+  function scriptLoraChoices() { return globalThis.H3LoraHelp?.choices ? globalThis.H3LoraHelp.choices(state.loraCatalog) : state.loraCatalog.items; }
+
+  function loraUnavailableReason(name) {
+    const metadata = loraMetadata(name);
+    if (globalThis.H3LoraHelp?.selectionReason) return globalThis.H3LoraHelp.selectionReason(metadata, { family: "ref2va", sourceVideo: false });
+    if (loraFamily(metadata) === "fl2va") return "僅 FL2VA；請使用影片工作室的首尾模式。";
+    if (metadata.requires_source_video === true) return "需來源影片，請到影片工作室→角色替換。";
+    return state.loraCatalog.names.includes(name) && metadata.manual_selectable !== false ? "" : "尚未安裝或不可手動選用。";
+  }
+
   function renderLoraHelp(container, metadata) {
     if (globalThis.H3LoraHelp?.render) { globalThis.H3LoraHelp.render(container, metadata); return; }
     container.replaceChildren();
@@ -381,13 +423,17 @@ if (typeof document !== "undefined") {
     $("scriptLoraCount").textContent = `${rows.length} / 4`;
     $("scriptLoraCatalogStatus").textContent = state.loraCatalogBusy ? "正在重新掃描引擎 LoRA…" : state.loraCatalogError ? `${state.loraCatalogError} 已保留目前選擇與上次清單。` : !state.loraCatalogReady ? "尚未讀取引擎清單；已保存的選擇仍可查看。" : state.loraCatalog.names.length ? `引擎目前有 ${state.loraCatalog.names.length} 個自訂 LoRA。` : "引擎尚無可選的自訂 LoRA；內建 Turbo 由影片品質模式管理。";
     $("scriptLoraCompatibility").textContent = rows.some(row => row.name) && !state.lorasSupported ? state.lorasSupportKnown ? "目前主機尚未支援劇本 LoRA 儲存；選擇與本機草稿會保留，請更新主機後重新檢查。" : "暫時無法確認主機的劇本 LoRA 儲存功能；選擇仍保留。" : scriptLoraSelectionError(rows, { video: true, catalog: state.loraCatalog });
+    const choices = scriptLoraChoices(), recommendations = $("scriptLoraRecommendationList"); recommendations.replaceChildren();
+    $("scriptLoraRecommendationSummary").textContent = `查看 ${choices.length} 個 LoRA 的用途、安裝狀態與來源`;
+    $("scriptLoraRecommendations").classList.toggle("hidden", !choices.length);
+    for (const metadata of choices) { const help = document.createElement("div"); renderLoraHelp(help, metadata); recommendations.append(help); }
     if (!rows.length) { const empty = document.createElement("p"); empty.className = "script-hint"; empty.textContent = "目前未啟用 LoRA。可自由選用，保持空白即可使用原影片設定。"; container.append(empty); }
     rows.forEach((row, index) => {
       const card = document.createElement("article"), grid = document.createElement("div"), modelLabel = document.createElement("label"), select = document.createElement("select"), strengthLabel = document.createElement("label"), strength = document.createElement("input"), familyLabel = document.createElement("label"), family = document.createElement("select"), enabledLabel = document.createElement("label"), enabled = document.createElement("input"), remove = document.createElement("button"), details = document.createElement("details"), summary = document.createElement("summary"), help = document.createElement("div");
       card.className = "script-lora-card"; grid.className = "script-lora-grid";
       modelLabel.textContent = "LoRA 檔案"; select.add(new Option("選擇引擎中的 LoRA", ""));
-      const names = [...new Set([...state.loraCatalog.names, ...(row.name ? [row.name] : [])])];
-      for (const name of names) { const metadata = loraMetadata(name), option = new Option(globalThis.H3LoraHelp?.label ? globalThis.H3LoraHelp.label(metadata) : `${metadata.title || name} · ${metadata.purpose || "用途未確認"}`, name); option.disabled = loraFamily(metadata) === "fl2va" || state.loraCatalog.builtin_items.some(item => item.name === name); if (option.disabled) option.textContent += "（不適用腳本 Ref2VA）"; else if (!state.loraCatalog.names.includes(name)) option.textContent += "（尚未在清單確認）"; select.add(option); }
+      const names = [...new Set([...choices.map(item => item.name), ...(row.name ? [row.name] : [])])];
+      for (const name of names) { const metadata = loraMetadata(name), reason = loraUnavailableReason(name), option = new Option(globalThis.H3LoraHelp?.label ? globalThis.H3LoraHelp.label(metadata) : `${metadata.title || name} · ${metadata.purpose || "用途未確認"}`, name); option.disabled = Boolean(reason) || state.loraCatalog.builtin_items.some(item => item.name === name); if (reason) option.textContent += `（${reason}）`; select.add(option); }
       select.value = row.name; modelLabel.append(select);
       strengthLabel.textContent = "強度"; strength.type = "number"; strength.min = "0"; strength.max = "2"; strength.step = "0.05"; strength.value = row.strength; strengthLabel.append(strength);
       familyLabel.textContent = "適用模型"; family.add(new Option("請依作者說明選擇", "")); family.add(new Option("Ref2VA 多模態", "ref2va")); family.add(new Option("FL2VA／Ref2VA 兩者", "both")); const fl = new Option("FL2VA（不適用自動影片）", "fl2va"); fl.disabled = true; family.add(fl); family.value = row.family; familyLabel.append(family);
@@ -395,10 +441,10 @@ if (typeof document !== "undefined") {
       remove.type = "button"; remove.className = "button ghost small"; remove.textContent = "移除";
       grid.append(modelLabel, strengthLabel, familyLabel, enabledLabel, remove); card.append(grid);
       help.className = "script-lora-help"; renderLoraHelp(help, loraMetadata(row.name)); card.append(help);
-      select.addEventListener("change", () => { const metadata = loraMetadata(select.value); if (loraFamily(metadata) === "fl2va" || state.loraCatalog.builtin_items.some(item => item.name === select.value)) { select.value = row.name; message("這個檔案不能用在脚本 Ref2VA；請選擇相容 LoRA。", true); return; } row.name = select.value; row.family = loraFamily(metadata) || ""; row.enabled = false; markDirty(); renderScriptLoras(); updateControls(); });
+      select.addEventListener("change", () => { const metadata = loraMetadata(select.value), reason = select.value ? loraUnavailableReason(select.value) : ""; if (reason || state.loraCatalog.builtin_items.some(item => item.name === select.value)) { select.value = row.name; message(reason || "這個檔案不能用在腳本 Ref2VA；請選擇相容 LoRA。", true); return; } row.name = select.value; row.family = loraFamily(metadata) || ""; row.strength = metadata.default_strength ?? 0.5; row.enabled = false; markDirty(); renderScriptLoras(); updateControls(); });
       strength.addEventListener("input", () => { row.strength = strength.value === "" ? NaN : Number(strength.value); markDirty(); renderLoraStatus(); });
       family.addEventListener("change", () => { const fixed = loraFamily(loraMetadata(row.name)); if (fixed && fixed !== "both" && family.value !== fixed) { family.value = row.family; message("已知 LoRA 的適用模型依作者設定固定，請改選正確版本。", true); return; } row.family = family.value; markDirty(); renderLoraStatus(); });
-      enabled.addEventListener("change", () => { if (enabled.checked && (row.family === "fl2va" || loraFamily(loraMetadata(row.name)) === "fl2va")) { enabled.checked = row.enabled; message("FL2VA LoRA 不能啟用於脚本 Ref2VA，請保留停用或移除。", true); return; } row.enabled = enabled.checked; markDirty(); renderLoraStatus(); });
+      enabled.addEventListener("change", () => { const reason = state.loraCatalogReady && row.name ? loraUnavailableReason(row.name) : ""; if (enabled.checked && (row.family === "fl2va" || reason)) { enabled.checked = row.enabled; message(reason || "FL2VA LoRA 不能啟用於腳本 Ref2VA，請保留停用或移除。", true); return; } row.enabled = enabled.checked; markDirty(); renderLoraStatus(); });
       remove.addEventListener("click", () => { state.project.custom_loras.splice(index, 1); markDirty(); renderScriptLoras(); updateControls(); });
       state.loraControls.push({ select, strength, family, enabled, remove, row }); container.append(card);
     });
@@ -442,6 +488,7 @@ if (typeof document !== "undefined") {
     $("scriptSkillSummary").textContent = skill ? skill.description : selected ? "所選創作方法尚未讀取，可繼續編輯稿件。" : "依照目前的故事設定、風格與創作要求編寫。";
     $("scriptSkillSuitable").textContent = skill?.recommended_for.length ? `適用：${skill.recommended_for.join("、")}` : "";
     $("scriptSkillGuide").replaceChildren(); $("scriptSkillSources").replaceChildren();
+    $("scriptSkillVersion").textContent = skill?.version ? `方法版本：${skill.version}` : "";
     $("scriptSkillDetails").classList.toggle("hidden", !skill);
     if (skill) {
       for (const method of skill.guide) { const item = document.createElement("li"); item.textContent = method; $("scriptSkillGuide").append(item); }
@@ -450,7 +497,18 @@ if (typeof document !== "undefined") {
         if (url) { const link = document.createElement("a"); link.textContent = source.name; link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer"; item.append(link); }
         else { const name = document.createElement("span"); name.textContent = source.name; item.append(name); }
         const license = document.createElement(licenseUrl ? "a" : "span"); license.textContent = ` · ${source.license || "來源未列出授權"}`;
-        if (licenseUrl) { license.href = licenseUrl; license.target = "_blank"; license.rel = "noopener noreferrer"; } item.append(license); $("scriptSkillSources").append(item);
+        if (licenseUrl) { license.href = licenseUrl; license.target = "_blank"; license.rel = "noopener noreferrer"; } item.append(license);
+        const details = [];
+        if (source.provenance) details.push(source.provenance === "official" ? "官方來源" : "社群來源");
+        if (Number.isSafeInteger(source.repository_stars) && source.repository_stars >= 0) details.push(`倉庫 ⭐ ${source.repository_stars.toLocaleString("en-US")}`);
+        if (Number.isSafeInteger(source.repository_forks) && source.repository_forks >= 0) details.push(`Forks ${source.repository_forks.toLocaleString("en-US")}`);
+        if (source.checked_at) details.push(`查核 ${source.checked_at}`);
+        if (source.commit) details.push(`來源版本 ${source.commit.slice(0, 8)}`);
+        else if (source.version) details.push(`來源版本 ${source.version}`);
+        if (details.length) { const note = document.createElement("span"); note.textContent = ` · ${details.join(" · ")}`; if (source.commit) note.title = source.commit; item.append(note); }
+        const repositoryUrl = scriptSkillSourceUrl(source.repo_url);
+        if (repositoryUrl) { const repository = document.createElement("a"); repository.textContent = " · 查看倉庫"; repository.href = repositoryUrl; repository.target = "_blank"; repository.rel = "noopener noreferrer"; item.append(repository); }
+        $("scriptSkillSources").append(item);
       }
     }
     const recommendation = available ? scriptRecommendedWritingSkill(readProject(), state.writingSkills) : null;
@@ -732,7 +790,7 @@ if (typeof document !== "undefined") {
       renderProjects();
       try { localStorage.setItem(SCRIPT_SAVED_PREFIX + saved.id, JSON.stringify({ revision: saved.revision, writer: clientId, savedAt: Date.now() })); } catch (_) { /* Server save still succeeded. */ }
       message(outcome.dirty ? "已儲存送出時的版本；儲存期間新增的修改仍保留在編輯稿，請再儲存一次。" : copy ? "已另存為新的劇本副本。" : "劇本已儲存至 Studio 主機。");
-      if (copy) { state.generation++; state.referenceUploads.clear(); state.job = null; state.selectedJobId = null; renderPreview(); renderHistory(); }
+      if (copy) { state.generation++; state.referenceUploads.clear(); state.job = null; state.selectedJobId = null; state.previewRequestFailed = false; renderPreview(); renderHistory(); }
       return !outcome.dirty;
     } catch (error) {
       storeDraft();
@@ -759,6 +817,7 @@ if (typeof document !== "undefined") {
       writeProject(project);
       state.selectedJobId = null;
       state.job = null;
+      state.previewRequestFailed = false;
       state.autoVideo = false;
       state.selectedPipelineId = null; state.pipeline = null;
       message("");
@@ -902,7 +961,8 @@ if (typeof document !== "undefined") {
     const visible = visibleHistoryJobs();
     if (!visible.some(job => job.id === state.selectedJobId)) {
       state.selectedJobId = null; state.job = null;
-      if (visible[0]) await selectJob(visible[0].id);
+      const current = state.project.id && visible.find(job => job.project_id === state.project.id);
+      if (current) await selectJob(current.id);
     }
     renderHistory(); renderPreview(); renderPipelines();
   }
@@ -1120,9 +1180,33 @@ if (typeof document !== "undefined") {
   function renderPreview() {
     const job = state.job;
     const presentation = scriptJobPresentation(job);
-    $("scriptJobBadge").textContent = presentation.label;
+    if (state.previewViewJobId !== (job?.id || null)) { state.previewViewJobId = job?.id || null; state.previewView = "readable"; }
+    const display = scriptPreviewData(job, state.previewView);
+    $("scriptPreviewViews").classList.toggle("hidden", !display.supported);
+    $("scriptPreviewReadable").textContent = display.readableLabel;
+    $("scriptPreviewReadable").disabled = !display.readableReady;
+    $("scriptPreviewRaw").disabled = !job;
+    for (const [id, view] of [["scriptPreviewReadable", "readable"], ["scriptPreviewRaw", "raw"]]) {
+      const selected = display.view === view;
+      $(id).setAttribute("aria-pressed", String(selected));
+      $(id).classList.toggle("primary", selected); $(id).classList.toggle("secondary", !selected);
+    }
+    const formatNote = !display.supported || display.view === "readable" ? ""
+      : display.readableReady ? "目前顯示原始資料；可切換查看表演腳本。" : presentation.active ? "生成中先顯示原始文字；完成後提供表演腳本。" : "這筆紀錄尚未提供可讀表演腳本，目前顯示原始資料。";
+    $("scriptPreviewFormatNote").textContent = display.supported ? [formatNote, display.note].filter(Boolean).join(" ") : "";
+    $("scriptPreviewFormatNote").classList.toggle("hidden", !$("scriptPreviewFormatNote").textContent);
+    const otherProject = Boolean(job && job.project_id !== state.project.id);
+    const owner = job?.project_title || job?.input?.project?.title || state.projects.find(project => project.id === job?.project_id)?.title || "未命名劇本";
+    $("scriptPreviewTitle").textContent = job && (otherProject || state.previewRequestFailed) ? `歷史生成預覽 · ${owner}` : "生成預覽";
+    $("scriptJobBadge").textContent = `${state.previewRequestFailed ? "本次尚未確認 · " : ""}${otherProject ? "其他劇本 · " : state.previewRequestFailed && job ? "歷史結果 · " : ""}${presentation.label}`;
     $("scriptJobBadge").className = `script-job-badge ${job?.status || ""}`;
-    $("scriptPreviewContent").textContent = job?.content || (presentation.active ? "本機模型正在準備，生成文字會逐步顯示…" : "每一個故事，都從一個想法開始。");
+    const context = [];
+    if (state.previewRequestFailed) context.push(job ? "本次尚未確認新的生成工作；目前顯示已保存歷史結果。請重新整理生成紀錄確認。" : "本次尚未確認新的生成工作；請先重新整理生成紀錄確認。");
+    if (otherProject) context.push(`這是「${owner}」的生成紀錄，不是目前劇本的結果。`);
+    $("scriptPreviewContext").textContent = context.join(" ");
+    $("scriptPreviewContext").classList.toggle("hidden", !context.length);
+    $("scriptPreviewContext").classList.toggle("error", state.previewRequestFailed);
+    $("scriptPreviewContent").textContent = display.text || (presentation.active ? "本機模型正在準備，生成文字會逐步顯示…" : "每一個故事，都從一個想法開始。");
     $("scriptJobDetail").textContent = job ? job.error || `${SCRIPT_ACTIONS[job.action] || "寫作工作"} · ${dateLabel(job.created_at)}${job.model ? ` · ${job.model}` : ""}${job.waiting_reason ? ` · ${job.waiting_reason}` : ""}${job.truncated ? " · 已達輸出 Token 上限，內容可能未寫完。可提高輸出預算後重新生成，或接續手寫。" : presentation.active ? " · 生成中可繼續編輯，結果不會自動覆寫編輯稿。" : job.status === "completed" ? job.action === "storyboard" ? " · 分鏡可建立為新的短片專案。" : " · 結果已保存，確認後可套用到編輯稿。" : " · 已保留目前收到的文字；未完成結果不會套用。"}` : "選擇左側寫作功能，結果會逐步出現在這裡。";
     if (job?.action === "appearance") $("scriptJobDetail").textContent = job.error || `${job.reference_name || "角色"} · 外觀分析${presentation.active ? " · 可繼續編輯，結果不會自動套用。" : job.status === "completed" && !job.truncated ? " · 確認圖片與描述後，按「套用角色外觀」。" : " · 未完成結果可複製參考。"}`;
     if (job && job.project_id !== state.project.id) $("scriptJobDetail").textContent += " · 這筆記錄屬於其他劇本，可先開啟原劇本再套用。";
@@ -1140,7 +1224,7 @@ if (typeof document !== "undefined") {
     $("importScriptStoryboard").classList.toggle("hidden", job?.action !== "storyboard");
     $("cancelScriptJob").classList.toggle("hidden", !presentation.active);
     $("cancelScriptJob").disabled = job?.status === "cancelling";
-    $("copyScriptResult").disabled = !String(job?.content || "").trim();
+    $("copyScriptResult").disabled = !display.text.trim();
     const imported = job?.shortfilm_id || job?.imported_shortfilm_id;
     $("openImportedShortfilm").classList.toggle("hidden", !imported);
     if (imported) $("openImportedShortfilm").href = `/?workspace=shortfilm&project=${encodeURIComponent(imported)}`;
@@ -1151,6 +1235,7 @@ if (typeof document !== "undefined") {
     if (state.deletedJobIds.has(id)) return;
     const generation = state.generation;
     state.selectedJobId = id;
+    state.previewRequestFailed = false;
     state.job = state.jobs.find(job => job.id === id) || null;
     renderHistory();
     renderPreview();
@@ -1174,14 +1259,14 @@ if (typeof document !== "undefined") {
       state.historyPersistent = data?.history_persistent === true;
       state.historyError = typeof data?.persistence_error === "string" ? data.persistence_error : "";
       state.historyStorage = state.historyError ? "error" : state.historyPersistent ? "saved" : "unknown";
-      if (!state.selectedJobId) state.selectedJobId = state.jobs.find(job => job.project_id === state.project.id)?.id || (state.historyScope === "all" ? state.jobs[0]?.id : null) || null;
+      if (!state.selectedJobId) state.selectedJobId = (state.project.id && state.jobs.find(job => job.project_id === state.project.id)?.id) || null;
       const selectedId = state.selectedJobId;
       if (selectedId) {
         try {
           const detail = await api(`/api/scripts/jobs/${encodeURIComponent(selectedId)}`);
           if (generation === state.generation && selectedId === state.selectedJobId && !state.deletedJobIds.has(selectedId)) state.job = detail;
         } catch (error) { if (generation === state.generation && selectedId === state.selectedJobId && !state.deletedJobIds.has(selectedId)) throw error; }
-      }
+      } else state.job = null;
       if (generation !== state.generation) return;
       renderHistory(); renderPreview();
     } catch (error) {
@@ -1206,20 +1291,24 @@ if (typeof document !== "undefined") {
       if (state.pipelines.some(item => item.project_id === state.project.id && scriptPipelinePresentation(item).active)) { message("這份劇本已有製作中的影片流程，請等待完成或取消後再開始新的自動製作。", true); return; }
     }
     state.starting = true;
-    updateControls();
+    state.previewRequestFailed = false;
+    const requestGeneration = state.generation;
+    let accepted = false;
+    renderPreview();
     try {
       if (state.dirty || !state.project.id || writingSkillNeedsCheck() || (autoVideo && JSON.stringify(initial.video_settings) !== JSON.stringify(normalizeScriptVideoSettings(state.project.video_settings)))) {
         const saved = await saveProject();
-        if (!saved) return;
+        if (!saved) { state.previewRequestFailed = true; renderPreview(); return; }
       }
       const projectId = state.project.id;
       const generation = state.generation;
       const job = await api("/api/scripts/jobs", { method: "POST", body: JSON.stringify({ project_id: projectId, action, ...(autoVideo ? { auto_video: true } : {}), ...(action === "appearance" ? { reference_id: referenceId } : { instructions: $("scriptInstructions").value }) }) });
+      accepted = true;
       state.jobsRevision++;
       state.jobs.unshift(job);
       if (generation === state.generation && state.project.id === projectId) { state.selectedJobId = job.id; state.job = job; renderHistory(); renderPreview(); message(`${SCRIPT_ACTIONS[action]}已加入本機生成佇列。你可以繼續修改${action === "appearance" ? "外觀描述" : "編輯稿"}。`); }
       if (generation === state.generation && job.video_pipeline_id) { state.pipelinesRevision++; await selectPipeline(job.video_pipeline_id); message("劇本生成後將接續製作多模態影片；原編輯稿與各階段記錄會保留。"); }
-    } catch (error) { message(error.message, true); }
+    } catch (error) { if (!accepted && requestGeneration === state.generation) { state.previewRequestFailed = true; renderPreview(); } message(error.message, true); }
     finally { state.starting = false; updateControls(); }
   }
 
@@ -1233,7 +1322,8 @@ if (typeof document !== "undefined") {
       state.referenceControls.get(reference.id)?.appearance.focus(); message("已套用角色外觀；可修正描述後儲存劇本，下一次編寫會使用這份外觀設定。"); return;
     }
     if ($("scriptContent").value.trim() && !window.confirm("套用會取代目前編輯稿的全文。生成紀錄仍會保留；要套用這個版本嗎？")) return;
-    $("scriptContent").value = state.job.content;
+    const display = scriptPreviewData(state.job, "readable");
+    $("scriptContent").value = ["screenplay", "rewrite"].includes(state.job.action) && display.readableReady ? display.text : state.job.content;
     markDirty();
     $("scriptContent").focus();
     message("已套用到編輯稿。你可以接續修改，完成後按「儲存劇本」。");
@@ -1351,7 +1441,9 @@ if (typeof document !== "undefined") {
     $("applyScriptResult").addEventListener("click", applyResult);
     $("cancelScriptJob").addEventListener("click", cancelJob);
     $("importScriptStoryboard").addEventListener("click", importStoryboard);
-    $("copyScriptResult").addEventListener("click", async () => { try { await navigator.clipboard.writeText(state.job?.content || ""); message("已複製生成結果。"); } catch (_) { message("瀏覽器未允許剪貼簿存取。可在預覽區選取文字並複製。", true); } });
+    $("scriptPreviewReadable").addEventListener("click", () => { if (scriptPreviewData(state.job).readableReady) { state.previewView = "readable"; renderPreview(); } });
+    $("scriptPreviewRaw").addEventListener("click", () => { state.previewView = "raw"; renderPreview(); });
+    $("copyScriptResult").addEventListener("click", async () => { try { await navigator.clipboard.writeText(scriptPreviewData(state.job, state.previewView).text); message("已複製目前預覽內容。"); } catch (_) { message("瀏覽器未允許剪貼簿存取。可在預覽區選取文字並複製。", true); } });
     $("restoreScriptDraft").addEventListener("click", restoreDraft);
     $("dismissScriptDraft").addEventListener("click", () => { $("scriptDraftRecovery").classList.add("hidden"); });
     $("saveScriptCopy").addEventListener("click", () => saveProject({ copy: true }).catch(error => message(error.message, true)));

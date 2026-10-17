@@ -325,8 +325,8 @@ class StudioStartupTests(unittest.TestCase):
 
     def test_clip_animations_and_transitions_require_loaded_renderers_before_reuse(self):
         required = ("position_keyframes", "speed_curves", "overlay_tracks", "text_style",
-                    "generated_video_thumbnails", "clip_animations", "clip_transitions")
-        for missing in ("clip_animations", "clip_transitions", None):
+                    "generated_video_thumbnails", "clip_animations", "clip_transitions", "transition_effects", "reference_transitions")
+        for missing in ("clip_animations", "clip_transitions", "transition_effects", "reference_transitions", None):
             with self.subTest(missing=missing):
                 flags = {name: True for name in required}
                 if missing:
@@ -339,9 +339,24 @@ class StudioStartupTests(unittest.TestCase):
                     else:
                         with self.assertRaises(RuntimeError) as error:
                             self.plan(port, required_editor_capabilities=required)
-                        self.assertIn("入場與退場動畫" if missing == "clip_animations" else "影片轉場", str(error.exception))
+                        self.assertIn({"clip_animations": "入場與退場動畫", "clip_transitions": "影片轉場", "transition_effects": "內建轉場特效", "reference_transitions": "放射與橫向模糊轉場"}[missing], str(error.exception))
                 self.assertEqual(requests, ["/", "/api/editor/capabilities"])
                 self.assertTrue(startup._has_listener(port))
+                self.assertFalse(self.lock_file.exists())
+
+    def test_color_adjustments_require_the_loaded_renderer_before_reuse(self):
+        for capability in (None, False, 1, "true", True):
+            with self.subTest(color_adjustments=capability):
+                flags = {} if capability is None else {"color_adjustments": capability}
+                port, requests = self.server(capabilities=json.dumps(flags).encode())
+                with patch.object(startup, "_try_lock", side_effect=AssertionError("must not lock a running Studio")), \
+                        patch.object(startup, "_reserve_port", side_effect=AssertionError("must not start another Studio")):
+                    if capability is True:
+                        self.assertTrue(self.plan(port, required_editor_capabilities=("color_adjustments",)).existing)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "時間軸調色"):
+                            self.plan(port, required_editor_capabilities=("color_adjustments",))
+                self.assertEqual(requests, ["/", "/api/editor/capabilities"])
                 self.assertFalse(self.lock_file.exists())
 
     def test_text_style_editor_reuses_the_same_ready_instance(self):

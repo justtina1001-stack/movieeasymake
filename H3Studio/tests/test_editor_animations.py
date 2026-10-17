@@ -9,7 +9,8 @@ import av
 import numpy as np
 from PIL import Image
 
-from editor_animations import animate_main_frame, animation_at, transition_surface, validate_animations, validate_transition_setting
+from editor_animations import (EFFECT_TRANSITION_TYPES, TRANSITION_TYPES, animate_main_frame, animation_at,
+                               transition_surface, validate_animations, validate_transition_setting)
 from editor_overlays import OverlayCompositor, validate_layer
 from test_editor_overlays import frame, image_layer, text_layer
 from test_video_editor_render import decoded_audio, make_source
@@ -72,12 +73,15 @@ class AnimationValidationTests(unittest.TestCase):
             self.store.create_project({"audio_clips": [self.clip(animation_in={"type": "fade", "duration": .2})]})
 
     def test_transition_schema_validates_bound_adjacent_main_and_overlay_videos(self):
-        for kind in ("crossfade", "wipe_left", "wipe_right"):
+        for kind in TRANSITION_TYPES:
             setting = self.transition(kind)
             project = self.store.create_project({"clips": [self.clip(transition_out=setting), self.clip("right", "b" * 32)]})
             self.assertEqual(project["clips"][0]["transition_out"], setting)
             layered = self.store.create_project({"overlays": [self.layer(transition_out=setting), self.layer("right", "b" * 32, .75)]})
             self.assertEqual(layered["overlays"][0]["transition_out"], setting)
+            restored = editor.EditorStore(self.root / "data", SimpleNamespace(), SimpleNamespace(jobs={}))
+            self.assertEqual(restored.projects[project["id"]]["clips"][0]["transition_out"], setting)
+            self.assertEqual(restored.projects[layered["id"]]["overlays"][0]["transition_out"], setting)
         for setting in (self.transition(duration=1), self.transition(next_id="other"), self.transition(next_id=""),
                         self.transition(kind="spin"), self.transition(duration=True),
                         {"type": "crossfade", "duration": .2}):
@@ -148,6 +152,40 @@ class AnimationValidationTests(unittest.TestCase):
         self.assertGreater(pixels[12][48, 48, 0], 230)
         plain, _, _ = self.render({**project, "clips": [self.clip()]}, "fade-plain.mp4")
         self.assertLess(float(np.max(np.abs(decoded_audio(animated)[1] - decoded_audio(plain)[1]))), 1e-6)
+
+    def test_real_effect_exports_main_and_translucent_overlay_keep_clock_audio_and_lower_track(self):
+        base = {"width": 96, "height": 96, "fps": 24,
+                "clips": [self.clip(), self.clip("right", "b" * 32)]}
+        plain, plain_result, _ = self.render(base, "effect-plain.mp4")
+        green_id = "c" * 32
+        green_path = self.root / "effect-background.png"
+        with Image.new("RGBA", (96, 96), (0, 255, 0, 255)) as green:
+            green.save(green_path)
+        self.paths[green_id] = green_path
+        for kind in EFFECT_TRANSITION_TYPES:
+            with self.subTest(kind=kind, track="main"):
+                setting = self.transition(kind)
+                target, result, pixels = self.render({**base,
+                    "clips": [self.clip(transition_out=setting), self.clip("right", "b" * 32)]}, kind + "-main.mp4")
+                self.assertEqual(result, plain_result)
+                self.assertEqual(result["frame_count"], 36)
+                self.assertEqual(result["audio_samples"], 72000)
+                self.assertGreater(pixels[12][48, 48, 0], 230)
+                self.assertGreater(pixels[24][48, 48, 2], 230)
+                expected = {"white_flash": [255, 255, 255], "horizontal_blur": [230, 0, 255]}.get(kind, [127, 0, 127])
+                np.testing.assert_allclose(pixels[18][48, 48], expected, atol=12)
+                self.assertLess(float(np.max(np.abs(decoded_audio(target)[1] - decoded_audio(plain)[1]))), 1e-6)
+            with self.subTest(kind=kind, track="overlay"):
+                layers = [image_layer(id="background", media_id=green_id, width=1, end=1.5),
+                          self.layer(transition_out=setting, opacity=.5),
+                          self.layer("right", "b" * 32, .75, opacity=.5)]
+                _, result, pixels = self.render({"width": 96, "height": 96, "fps": 24,
+                                                "clips": [], "overlays": layers}, kind + "-overlay.mp4")
+                self.assertEqual(result["frame_count"], 36)
+                self.assertEqual(result["audio_samples"], 72000)
+                expected = {"white_flash": [128, 255, 128], "horizontal_blur": [115, 127, 128]}.get(kind, [64, 127, 64])
+                np.testing.assert_allclose(pixels[18][48, 48], expected, atol=12)
+                np.testing.assert_allclose(pixels[18][3, 3], [0, 255, 0], atol=3)
 
     def test_overlay_transition_is_one_translucent_surface_over_lower_track(self):
         layers = [self.layer(transition_out=self.transition(), opacity=.5), self.layer("right", "b" * 32, .75, opacity=.5)]

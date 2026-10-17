@@ -18,6 +18,7 @@ AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".aac", ".ogg"}
 MAX_REFERENCE_BYTES = 50 * 1024**2
 PUBLIC_JOB_FIELDS = {
     "id", "type", "name", "favorite", "mode", "status", "progress", "current_node",
+    "model_id", "model_label", "model_repo",
     "text", "language", "instruct", "speaker", "reference_text", "seed",
     "created_at", "updated_at", "generation_started_at", "finished_at", "execution_seconds",
 }
@@ -78,10 +79,10 @@ class GatewayVoice:
         self._user(request)
         state = self.gateway.voice_installer.public_status()
         result = {key: state.get(key) for key in (
-            "state", "active", "current", "requested_mode", "runtime_installed", "installed",
+            "state", "active", "current", "requested_mode", "requested_model_id", "runtime_installed", "installed", "capabilities",
         )}
         result["models"] = {
-            mode: {key: model.get(key) for key in ("label", "repo", "description", "installed")}
+            mode: {key: model.get(key) for key in ("label", "repo", "description", "installed", "mode", "size", "supports_instruct")}
             for mode, model in state.get("models", {}).items() if isinstance(model, dict)
         }
         result["error"] = "GPU 主機語音模型安裝未完成，請聯絡主機管理者。" if state.get("error") else ""
@@ -148,15 +149,18 @@ class GatewayVoice:
             client_id = payload.get("client_job_id")
             if not isinstance(client_id, str) or not SAFE_ID.fullmatch(client_id):
                 return _error("語音 client_job_id 必須是 32 位十六進位識別碼。")
+            compiled = compile_voice_request(payload)
             request_key = f"{user['id']}:{client_id}"
             existing = self.store.state.get("voice_client_jobs", {}).get(request_key)
             existing_id = existing.get("job_id") if isinstance(existing, dict) else None
             if existing_id:
                 job = self.gateway.voice_jobs.jobs.get(existing_id)
                 if job and self._owns("voice_job_owners", existing_id, str(user["id"])):
+                    if compiled["model_id"] != job.get("model_id", job.get("mode", "custom")):
+                        return _error("同一筆遠端語音工作的模型設定已變更，請建立新的語音工作。", 409,
+                                      "remote_voice_model_conflict")
                     return web.json_response(_public_job(job), status=202)
                 return _error("這筆遠端語音工作已不存在，請建立新的語音工作。", 409)
-            compiled = compile_voice_request(payload)
             if compiled["mode"] == "clone":
                 asset_id = compiled["reference_asset_id"]
                 if not SAFE_ID.fullmatch(asset_id) or not self._owns("voice_asset_owners", asset_id, str(user["id"])):
@@ -169,10 +173,11 @@ class GatewayVoice:
                 if reference.parent != root or reference.suffix.lower() not in AUDIO_EXTENSIONS or not reference.is_file():
                     return _error("找不到你上傳的語音參考素材。", 404)
             installer = self.gateway.voice_installer
-            if not installer.runtime_installed() or not installer.model_installed(compiled["mode"]):
+            if not installer.runtime_installed() or not installer.model_installed(compiled["model_id"]):
                 return _error("GPU 主機尚未安裝所選語音模型，請主機管理者先在主機完成安裝。", 409,
                               "remote_voice_model_missing")
             submitted = {key: value for key, value in payload.items() if key != "client_job_id"}
+            submitted.update(model_id=compiled["model_id"], instruct=compiled["instruct"])
             job = self.gateway.voice_jobs.create(submitted)
             self.store.state.setdefault("voice_job_owners", {})[job["id"]] = {
                 "user_id": str(user["id"]), "created_at": utc_now(),

@@ -1,0 +1,4 @@
+# Installed only into the isolated editor caption environment.
+# faster-whisper / Whisper weights: MIT; OpenCC: Apache-2.0.
+faster-whisper==1.2.1
+OpenCC==1.4.2
