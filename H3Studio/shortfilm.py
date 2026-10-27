@@ -11,6 +11,7 @@ from typing import Any
 from custom_loras import normalize_loras
 from dialogue import format_dialogue
 from domain import FL_ONLY_QUALITY_MODES, QUALITY_MODES
+from video_models import VIDEO_MODEL_FAST, normalize_video_model
 
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -212,6 +213,11 @@ def normalize_project(
     base["format"] = raw.get("format") if raw.get("format") in FORMATS else "narrative"
     base["aspect_ratio"] = raw.get("aspect_ratio") if raw.get("aspect_ratio") in ASPECT_RATIOS else "16:9"
     base["megapixels"] = _bounded_number(raw.get("megapixels"), 0.4, 0.2, 1.0)
+    if "video_model" in raw or existing and "video_model" in existing:
+        try:
+            base["video_model"] = normalize_video_model(raw.get("video_model", (existing or {}).get("video_model")))
+        except ValueError as error:
+            raise ShortFilmError(str(error)) from error
     quality_mode = text(raw.get("quality_mode"), limit=40) or "native"
     base["quality_mode"] = quality_mode if quality_mode in QUALITY_MODES else "native"
     video_vae = text(raw.get("video_vae"), limit=10) or "auto"
@@ -701,7 +707,7 @@ def compile_shot_payload(
         "voice_mode": asset["voice_mode"],
     } for asset in referenced]
     use_reference_mode = bool(references or shot["storyboard_asset_id"] or prepared_continuation)
-    quality_mode = project["quality_mode"]
+    quality_mode = "native" if project.get("video_model") == VIDEO_MODEL_FAST else project["quality_mode"]
     if use_reference_mode and quality_mode in FL_ONLY_QUALITY_MODES:
         quality_mode = "turbo"
         warnings.append("這個鏡頭使用 Ref2VA 素材，已自動改用相容的 Turbo 穩定模式。")
@@ -752,6 +758,10 @@ def compile_shot_payload(
             "guide_mode": "reference",
         }] if shot["storyboard_asset_id"] else [],
     }
+    if "video_model" in project:
+        payload["video_model"] = project["video_model"]
+    if project.get("video_model") == VIDEO_MODEL_FAST:
+        payload.update(quality_mode="native", steps=8, scheduler="simple", memory_optimization=False, custom_loras=[])
     return payload, warnings
 
 

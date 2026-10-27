@@ -16,7 +16,7 @@ from runtime_env import inspect_python_candidates
 
 
 COMFY_REPO = "https://github.com/Comfy-Org/ComfyUI.git"
-COMFY_REVISION = "8713616fcc321624e306bbd36be5906203dcb0dc"  # ComfyUI v0.41.3, native Qwen-Image-2.1 and FLUX 3
+COMFY_REVISION = "b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c"  # ComfyUI v0.42.0, native FastH3 Omni PDD, FLUX 3 and Qwen
 LICENSE_URL = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
 EXCLUDED_TERRITORIES = "歐盟、英國、韓國與美國"
 GIB = 1024**3

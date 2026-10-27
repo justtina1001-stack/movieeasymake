@@ -60,7 +60,7 @@ function fixture() {
       throw new Error(`unexpected ${url}`);
     },
   });
-  for (const name of ['activeShortFilmProject', 'shortFilmFlatten', 'setButtonBusy', 'saveShortFilmProject', 'getShortFilmSaveCoordinator', 'renderShortFilmSaveStatus',
+  for (const name of ['activeShortFilmProject', 'shortFilmFlatten', 'setButtonBusy', 'saveShortFilmProject', 'shortFilmModelSaveError', 'getShortFilmSaveCoordinator', 'renderShortFilmSaveStatus',
     'shortFilmGenerationSignature', 'renderShortFilmShotRequests', 'confirmTranslationFallback', 'compileShortFilmShot', 'refreshShortFilmShotStatuses']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1, name);

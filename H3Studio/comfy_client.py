@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import mimetypes
 import os
@@ -16,6 +17,7 @@ from urllib.parse import urlencode
 import aiohttp
 
 from domain import TURBO_LORA_CANDIDATES, VIDEO_VAE_FILENAMES
+from video_models import FASTH3_FILENAME, FASTH3_SIZE, VIDEO_MODEL_FAST, blackwell_device, fasth3_node_support
 
 from settings import ConnectionSettings
 from runtime_env import inspect_python_candidates
@@ -152,12 +154,14 @@ class ComfyClient:
             **{f"video_vae_{precision}": ("VAELoader", "vae_name", filename)
                for precision, filename in VIDEO_VAE_FILENAMES.items()},
             "audio_vae": ("VAELoader", "vae_name", "minimax_h3_audio_vae_fp32.safetensors"),
+            VIDEO_MODEL_FAST: ("UNETLoader", "unet_name", FASTH3_FILENAME),
         }
         result = {name: False for name in expected}
         result.update({f"turbo_{profile}": False for profile in TURBO_LORA_CANDIDATES})
         result.update({"h3_memory_optimization": False, "h3_optimizations": False,
                        "h3_sla_attention": False, "h3_sigma_shift": False,
-                       "video_vae_int8_supported": False})
+                       "video_vae_int8_supported": False, "fasth3_blackwell": False,
+                       "fasth3_core_supported": False, "fasth3_nodes_ready": False})
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -175,7 +179,8 @@ class ComfyClient:
                         for profile, candidates in TURBO_LORA_CANDIDATES.items():
                             result[f"turbo_{profile}"] = any(candidate in available_loras for candidate in candidates)
                 node_schemas = {}
-                for node in ("H3MemoryOptimization", "H3SparseAttention", "BlockSparseAttention", "MiniMaxH3SigmaShift"):
+                for node in ("H3MemoryOptimization", "H3SparseAttention", "BlockSparseAttention", "MiniMaxH3SigmaShift",
+                             "MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide"):
                     async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
                         if response.status == 200:
                             payload = await response.json()
@@ -183,6 +188,7 @@ class ComfyClient:
                 result["h3_memory_optimization"] = bool(node_schemas.get("H3MemoryOptimization"))
                 result["h3_optimizations"] = result["h3_memory_optimization"] and bool(node_schemas.get("H3SparseAttention"))
                 result["h3_sigma_shift"] = bool(node_schemas.get("MiniMaxH3SigmaShift"))
+                result["fasth3_nodes_ready"] = fasth3_node_support(node_schemas)
                 sparse_inputs = node_schemas.get("BlockSparseAttention", {}).get("input", {}).get("required", {})
                 selection = sparse_inputs.get("selection", [])
                 options = selection[1].get("options", []) if len(selection) > 1 and isinstance(selection[1], dict) else []
@@ -205,7 +211,19 @@ class ComfyClient:
             result["video_vae_int8_supported"] = bool(
                 match and tuple(map(int, match.group(1, 2, 3))) >= (0, 37, 0)
             )
-        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
+            result["fasth3_blackwell"] = blackwell_device(stats)
+            result["fasth3_core_supported"] = bool(match and tuple(map(int, match.group(1, 2, 3))) >= (0, 42, 0))
+            if self.mode == "local":
+                path = self.comfy_dir / "models" / "diffusion_models" / FASTH3_FILENAME
+                result[VIDEO_MODEL_FAST] = result[VIDEO_MODEL_FAST] and path.is_file() and path.stat().st_size == FASTH3_SIZE
+                # Full PDD checkpoints need the output-head constructor added in
+                # 0.42, rather than the older LoRA-only head-bank implementation.
+                tree = ast.parse((self.comfy_dir / "comfy/ldm/minimax/model.py").read_text(encoding="utf-8"))
+                layer = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "FinalLayer")
+                constructor = next(node for node in layer.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+                result["fasth3_core_supported"] = result["fasth3_core_supported"] and any(arg.arg == "pdd_steps" for arg in constructor.args.args)
+        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError, OSError, StopIteration, SyntaxError):
+            result["fasth3_core_supported"] = False
             pass
         result["video_vae"] = result["video_vae_fp16"] or (
             result["video_vae_int8"] and result["video_vae_int8_supported"]

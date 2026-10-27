@@ -22,7 +22,7 @@ function fixture() {
     return elements.get(selector);
   };
   const context = vm.createContext({
-    $: element, structuredClone, keyframePrepareVersion: 0, engineModelInventory: {},
+    $: element, structuredClone, keyframePrepareVersion: 0, engineModelInventory: {}, videoModelSupported: false,
     shortFilmProjects: [], activeShortFilmId: "", shortFilmSaveTimer: null, clearTimeout,
     shortFilmSaveCoordinator: null, shortFilmRecoveries: new Map(), ShortFilmPersistence,
     localStorage: { getItem(key) { return storage.get(key) ?? null; }, setItem(key, value) { storage.set(key, value); }, removeItem(key) { storage.delete(key); } },
@@ -48,7 +48,7 @@ function fixture() {
   for (const name of [
     "currentSettings", "persistForm", "restoreForm", "saveState", "collectPayload", "recipeAsset", "originalGenerationRequest", "applyJobRecipe",
     "videoVaeBackendIsStale", "videoVaeHint", "syncVideoVaeHints", "activeShortFilmProject", "renderShortFilmWorkspace", "saveShortFilmProject",
-    "scheduleShortFilmSave", "getShortFilmSaveCoordinator", "renderShortFilmSaveStatus",
+    "scheduleShortFilmSave", "shortFilmModelSaveError", "getShortFilmSaveCoordinator", "renderShortFilmSaveStatus",
     "shortFilmFlatten", "shortFilmAliasMentioned", "shortFilmShotAssetSelection", "shortFilmAssetShotIds", "invalidateShortFilmRenders", "updateShortFilmGenerationField",
   ]) {
     const index = source.search(new RegExp(`(?:async )?function ${name}\\(`));
@@ -155,4 +155,50 @@ test("legacy backend disables both selectors with a restart hint but keeps selec
     assert.equal(element("#sfVideoVae").disabled, false);
     assert.doesNotMatch(element("#videoVaeHint").textContent, /待重啟/);
   }
+});
+
+test("short-film reload retains an unknown model identity rather than selecting H3", () => {
+  const {context:c,element}=fixture();
+  c.shortFilmProjects=[{id:'unknown-project',video_model:'future_video_model'}];c.activeShortFilmId='unknown-project';
+  const select=element('#sfVideoModel');select.options=[{value:'h3'},{value:'fasth3_omni_nvfp4'}];
+  let value='h3';Object.defineProperty(select,'value',{get:()=>value,set:next=>{value=select.options.some(option=>option.value===String(next))?String(next):'';}});
+  select.add=option=>select.options.push(option);c.Option=class {constructor(text,value){this.textContent=text;this.value=value;}};
+  c.renderShortFilmWorkspace();
+  assert.equal(select.value,'future_video_model');assert.match(select.options.at(-1).textContent,/不支援/);
+  assert.equal(c.shortFilmProjects[0].video_model,'future_video_model');
+});
+
+test("unsupported hosts cannot erase Fast or unknown short-film selections through autosave", async () => {
+  for(const selection of ['fasth3_omni_nvfp4','future_video_model']){
+    const {context:c,storage}=fixture();let calls=0;c.api=async()=>{calls++;return {id:'project',revision:2};};
+    c.shortFilmProjects=[{id:'project',revision:1,title:'kept',video_model:selection,scenes:[]}];c.activeShortFilmId='project';
+    await assert.rejects(c.saveShortFilmProject(),/草稿|原選擇/);assert.equal(calls,0);
+    const saved=JSON.parse(storage.get(ShortFilmPersistence.PREFIX+'project'));assert.equal(saved.project.video_model,selection);
+    c.shortFilmSaveCoordinator=null;
+    const recovered=c.getShortFilmSaveCoordinator().restore({id:'project',revision:1,title:'server H3',scenes:[]});
+    assert.equal(recovered.project.video_model,selection);assert.equal(recovered.restored,true);
+  }
+});
+
+test("short-film save verifies semantic model identity before clearing the crash draft", async () => {
+  const {context:c,storage}=fixture();c.videoModelSupported=true;let calls=0;
+  c.shortFilmProjects=[{id:'project',revision:1,title:'kept',video_model:'fasth3_omni_nvfp4',scenes:[]}];c.activeShortFilmId='project';
+  c.api=async()=>{calls++;return {id:'project',revision:2,title:'dropped Fast',scenes:[]};};
+  await assert.rejects(c.saveShortFilmProject(),/未完整保存影片模型/);assert.equal(calls,1);
+  assert.equal(c.getShortFilmSaveCoordinator().status('project').state,'error');
+  assert.equal(JSON.parse(storage.get(ShortFilmPersistence.PREFIX+'project')).project.video_model,'fasth3_omni_nvfp4');
+  assert.equal(c.shortFilmProjects[0].video_model,'fasth3_omni_nvfp4');assert.equal(c.shortFilmProjects[0].revision,1);
+  const legacy=fixture();legacy.context.shortFilmProjects=[{id:'legacy',revision:1,title:'H3',video_model:'h3',scenes:[]}];legacy.context.activeShortFilmId='legacy';
+  legacy.context.api=async()=>({id:'legacy',revision:2,title:'H3',scenes:[]});
+  await legacy.context.saveShortFilmProject();assert.equal(legacy.storage.get(ShortFilmPersistence.PREFIX+'legacy'),undefined);
+});
+
+test("draft rescue copy also refuses unsupported model storage without discarding the original",async()=>{
+  const {context:c,storage}=fixture();let calls=0;c.api=async()=>{calls++;return {};};
+  c.shortFilmProjects=[{id:'project',revision:1,title:'kept',video_model:'fasth3_omni_nvfp4',scenes:[]}];c.activeShortFilmId='project';
+  c.shortFilmRecovering=false;c.shortFilmBatchRunning=false;c.setShortFilmBatchEditing=()=>{};
+  await assert.rejects(c.saveShortFilmProject());
+  const start=source.indexOf('async function recoverShortFilmDraft(');vm.runInContext(source.slice(start,source.indexOf('\n}',start)+2),c);
+  await assert.rejects(c.recoverShortFilmDraft(true),/草稿已保留/);
+  assert.equal(calls,0);assert.equal(JSON.parse(storage.get(ShortFilmPersistence.PREFIX+'project')).project.video_model,'fasth3_omni_nvfp4');
 });

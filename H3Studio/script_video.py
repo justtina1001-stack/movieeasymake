@@ -11,8 +11,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from custom_loras import validate_loras_for_family, validate_lora_requirements
+from custom_loras import normalize_loras, validate_loras_for_family, validate_lora_requirements
 from script_video_format import normalize_video_settings, video_dimensions
+from video_models import VIDEO_MODEL_FAST
 
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -95,7 +96,10 @@ class ScriptVideoManager:
             result = await self._renderer().readiness()
             if not isinstance(result, dict):
                 raise ScriptVideoError("影片引擎狀態格式錯誤。", 503)
-            return {"ready": result.get("ready") is True, "error": result.get("error")}
+            value = {"ready": result.get("ready") is True, "error": result.get("error")}
+            if result.get("video_model_supported") is True:
+                value.update(video_model_supported=True, video_models=result.get("video_models", []))
+            return value
         except Exception as error:
             return {"ready": False, "error": str(error)}
 
@@ -108,9 +112,12 @@ class ScriptVideoManager:
 
     def _check_snapshot(self, snapshot: dict[str, Any]) -> None:
         try:
-            normalize_video_settings(snapshot.get("video_settings"))
-            snapshot["custom_loras"] = validate_loras_for_family(snapshot.get("custom_loras", []), "ref2va")
-            validate_lora_requirements(snapshot["custom_loras"], "ref2va")
+            settings = normalize_video_settings(snapshot.get("video_settings"))
+            if settings.get("video_model") == VIDEO_MODEL_FAST:
+                snapshot["custom_loras"] = normalize_loras(snapshot.get("custom_loras", []))
+            else:
+                snapshot["custom_loras"] = validate_loras_for_family(snapshot.get("custom_loras", []), "ref2va")
+                validate_lora_requirements(snapshot["custom_loras"], "ref2va")
         except ValueError as error:
             raise ScriptVideoError(str(error)) from error
         duration = snapshot.get("duration")

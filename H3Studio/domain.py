@@ -7,6 +7,7 @@ from custom_loras import normalize_loras, active_loras, required_lora_trigger_sp
 from dialogue import format_dialogue, visual_direction_text
 from h3_prompt_format import base_prompt as format_base_prompt, combine_storyboards, cut_time, language_warning, number_speakers, rewrite_aliases, unpack_prompt
 from typing import Any
+from video_models import FASTH3_FILENAME, FASTH3_STEPS, VIDEO_MODEL_FAST, VIDEO_MODEL_H3, normalize_video_model, video_model_profiles
 
 
 FPS = 24
@@ -135,6 +136,7 @@ class CompiledRequest:
     video_vae: str = "auto"
     warnings: list[str] = field(default_factory=list)
     official_mode: str = "T2VA"
+    video_model: str = VIDEO_MODEL_H3
 
 
 def resolve_video_vae(compiled: CompiledRequest, inventory: dict[str, bool]) -> str:
@@ -161,6 +163,16 @@ def resolve_video_vae(compiled: CompiledRequest, inventory: dict[str, bool]) -> 
 
 def validate_runtime_inventory(compiled: CompiledRequest, inventory: dict[str, bool]) -> None:
     """Fail before asset upload when the selected engine cannot run this recipe."""
+    try:
+        normalize_video_model(compiled.video_model)
+    except ValueError as error:
+        raise RequestError(str(error)) from error
+    if compiled.video_model == VIDEO_MODEL_FAST:
+        profile = next(item for item in video_model_profiles(inventory) if item["id"] == VIDEO_MODEL_FAST)
+        if not profile["ready"]:
+            raise RequestError(profile["error"])
+        resolve_video_vae(compiled, inventory)
+        return
     family = "ref2va" if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"} else "fl2va"
     required_models = {
         family: "H3 Ref2VA 主模型" if family == "ref2va" else "H3 FL2VA 主模型",
@@ -448,6 +460,10 @@ def _sound_sections(payload: dict[str, Any], body: str, embedded_sound: str, emb
 
 
 def compile_request(payload: dict[str, Any]) -> CompiledRequest:
+    try:
+        video_model = normalize_video_model(payload.get("video_model"))
+    except ValueError as error:
+        raise RequestError(str(error)) from error
     video_vae = _clean_text(payload.get("video_vae")) or "auto"
     if video_vae not in VIDEO_VAE_MODES:
         raise RequestError("不支援的影片解碼選項，請選擇自動、INT8 或 FP16。")
@@ -477,6 +493,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         scheduler = "simple"
     ref_image_size = "max" if payload.get("ref_image_size") == "max" else "match"
     quality_mode = _clean_text(payload.get("quality_mode")) or "native"
+    if video_model == VIDEO_MODEL_FAST and quality_mode != "native":
+        raise RequestError("FastH3 已內建 8 步生成，請關閉原版 H3 的 Turbo／SLA／品質加速選項。")
     if quality_mode not in QUALITY_MODES:
         quality_mode = "native"
     if reference_mode and quality_mode in FL_ONLY_QUALITY_MODES:
@@ -484,6 +502,11 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     if not reference_mode and quality_mode == "turbo_ref_quality":
         raise RequestError("Ref 8 步品質模式只支援多模態參考、角色替換、彈窗面板與 MG 動畫；文生與首尾請改用 FL2VA 品質模式。")
     memory_optimization = payload.get("memory_optimization") is True
+    if video_model == VIDEO_MODEL_FAST:
+        if memory_optimization:
+            raise RequestError("FastH3 尚未驗證與額外 H3 省顯存節點疊加，請關閉獨立省顯存。")
+        if any(item["enabled"] and item["strength"] > 0 for item in custom_loras):
+            raise RequestError("FastH3 尚未驗證額外 H3 LoRA，請停用自訂 LoRA，或切回原版 H3。")
     if quality_mode == "turbo_sla" and memory_optimization:
         raise RequestError("SLA 已內建分塊 QKV，請關閉額外省顯存以避免節點衝突。")
     sampler_name = "res_multistep"
@@ -492,6 +515,12 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     turbo_lora_strength = 0.0
     shift_video = None
     shift_audio = None
+    if video_model == VIDEO_MODEL_FAST:
+        steps = FASTH3_STEPS
+        scheduler = "simple"
+        sampler_name = "euler"
+        shift_video = 12.0
+        shift_audio = 3.0
     if quality_mode != "native":
         scheduler = "simple"
         sampler_name = "euler"
@@ -992,6 +1021,7 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         mapping=mapping,
         warnings=list(dict.fromkeys(warnings)),
         official_mode=official_mode,
+        video_model=video_model,
     )
 
 
@@ -1003,6 +1033,10 @@ def build_workflow(
     custom_lora_names: dict[str, str] | None = None,
     video_vae_name: str | None = None,
 ) -> dict[str, Any]:
+    try:
+        normalize_video_model(compiled.video_model)
+    except ValueError as error:
+        raise RequestError(str(error)) from error
     if compiled.video_vae not in VIDEO_VAE_MODES:
         raise RequestError("不支援的影片解碼選項。")
     selected_vae = video_vae_name or VIDEO_VAE_FILENAMES.get(compiled.video_vae, VIDEO_VAE_FILENAMES["int8"])
@@ -1020,12 +1054,20 @@ def build_workflow(
         workflow[node_id] = {"class_type": class_type, "inputs": inputs, "_meta": {"title": title}}
         return node_id
 
-    diffusion_model = (
+    diffusion_model = FASTH3_FILENAME if compiled.video_model == VIDEO_MODEL_FAST else (
         "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
         if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"}
         else "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     )
     model = add("UNETLoader", {"unet_name": diffusion_model, "weight_dtype": "default"}, "MiniMax H3 Model")
+    if compiled.video_model == VIDEO_MODEL_FAST:
+        if (compiled.quality_mode != "native" or compiled.memory_optimization
+                or any(item["enabled"] and item["strength"] > 0 for item in compiled.custom_loras)
+                or compiled.steps != FASTH3_STEPS or compiled.sampler_name != "euler" or compiled.scheduler != "simple"):
+            raise RequestError("FastH3 工作設定不相容，請重新選擇 FastH3 的 8 步預設，或切回原版 H3。")
+        model = add("MiniMaxH3SigmaShift", {
+            "model": [model, 0], "shift_video": 12.0, "shift_audio": 3.0,
+        }, "FastH3 Omni Sigma Shift")
     if compiled.quality_mode != "native":
         lora_name = turbo_lora_name or compiled.turbo_lora
         if not lora_name or compiled.shift_video is None or compiled.shift_audio is None:

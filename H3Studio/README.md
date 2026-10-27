@@ -1,5 +1,35 @@
 # MiniMax H3 Studio
 
+## FastH3-Omni NVFP4 與原版 H3 切換（2026-10-27）
+
+影片工作室新增「影片模型」選單，可選 **MiniMax H3 原有模型** 或 **FastH3-Omni NVFP4 試用**。原版 H3 保留且仍是預設；舊專案與沒有模型欄位的歷史紀錄沿用 H3。切換 FastH3 時會保存原本 H3 的品質、步數、LoRA 與省顯存設定，切回 H3 後恢復。工作紀錄保存實際使用的模型與採樣設定。
+
+FastH3 使用獨立的完整模型，固定 **8 步、Euler／simple、CFG 1、影片／聲音 Shift 12／3**。這組設定不疊加 H3 Turbo、Turbo-SLA、額外 LoRA 或 H3 的省顯存 patch；介面會關閉對應選項，後端也會檢查。原版 H3 的品質與加速選項仍可切回使用。速度與畫質應以同一素材、尺寸及實際採樣配方比較，不能直接套用官方多 GPU 的加速數字。
+
+### 本機速度與畫面對照
+
+在 Windows、RTX 5060 Ti 16 GB、64 GB RAM、ComfyUI 0.42.0 的低顯存模式，以同一張紅機器人參考圖、同一提示詞與 480 × 864 尺寸，生成 124 幀／24 fps（約 5.17 秒）含聲音影片。下表為引擎開始至成功的總耗時，包含參考條件處理、模型載入、採樣與影音輸出。每組第 1 支使用 Seed 42，第 2 支緊接使用 Seed 43；引擎持續運作，保留 Studio 正常快取。
+
+| 模型與設定 | 本組第 1 支 | 緊接第 2 支 |
+| --- | ---: | ---: |
+| 原 H3 Ref Turbo，8 步 | 311.30 秒 | 238.97 秒 |
+| FastH3-Omni NVFP4，8 步 | 224.77 秒 | 164.57 秒 |
+| 原 H3 原生品質，20 步 | 432.38 秒 | — |
+
+這個鏡頭的連續生成耗時，FastH3 比原 H3 Ref Turbo 少約 **31%**。同 Seed 的抽幀對照中，三種設定都保留角色外觀及右手招呼後回位的動作；FastH3 與 Ref Turbo 視覺表現接近，紅漆稍亮，手部細節仍有簡化。這是單一簡單鏡頭的結果，較大尺寸、長片與複雜動態需依素材另行驗證；原生 20 步僅做一支模型切換後的品質基準。
+
+本機另完成 FastH3 文生、首尾幀及圖片／影片／獨立聲音混合參考，合計 8 支影片均通過完整幀數與音軌解碼檢查；7 支含對白的影片，離線 CPU 語音辨識均讀出「Hello!」。首尾幀測試是近似循環，仍出現多次眨眼及接縫差異；另一個 Seed 的發聲時間也有偏晚情況，精準事件數、動作時序與無縫循環需逐片確認。聲音辨識僅作詞句可懂度旁證，未進行人工聽感或逐幀對嘴驗收。Python 1,355 項測試（1 項另以 ComfyUI CPU 環境補驗）及 JavaScript 1,151 項均通過。引擎升級後另實際生成 FLUX 3 1024 × 1024 圖片及 Qwen Turbo 512 × 512 圖片，確認共存路徑可用。
+
+### GPU 主機安裝與引擎版本
+
+FastH3 NVFP4 需要 **NVIDIA Blackwell GPU，例如 RTX 50 系列**。本版使用的核心是 **ComfyUI v0.42.0 / `b1a247c9cf9dbfda4b2c0a0c1d50950667eeaa0c`**，搭配 **comfy-kitchen 0.2.39**；核心必須具備完整 PDD checkpoint 支援，舊版只有 PDD LoRA 支援並不足以載入此模型。FastH3 以本段的核心版本為準，其他章節保留各自功能原始驗證時的版本紀錄。
+
+先等生成與匯出工作完成，備份 Studio 設定、工作紀錄及 `ComfyUI/user/` 資料庫，再關閉 Studio 與 ComfyUI。將核心更新至上述固定版本並依該版 `requirements.txt` 同步依賴後，在 GPU 主機執行根目錄 `setup_fasth3_omni.bat`。安裝器只負責權重，不會自行更新核心或依賴。
+
+安裝只新增 [官方 FastH3-Omni NVFP4 QAD Comfy 權重](https://huggingface.co/FastVideo/FastH3-Omni-NVFP4-QAD-Comfy)，大小為 **13,773,998,700 bytes，約 13.77 GB（十進位）**，並沿用既有 H3 的 NVFP4 AWQ 文字編碼器、影片 VAE 與聲音 VAE。來源固定為 `36dbf15cd11113471114b1040c4f38646c031549`，安裝器核對檔案大小及完整 SHA-256，驗證完成才以同磁碟的原子操作發布；不同內容的同名檔會保留並報錯，原本 H3 權重不會被取代。已有離線檔案時，可執行 `setup_fasth3_omni.bat --source-file "完整模型檔案路徑"`，同樣會校驗。
+
+完成後重新啟動引擎與 Studio，再按 Ctrl＋F5。遠端同事只需更新及重啟 Studio；模型、Blackwell GPU 與相容引擎都位於實際 GPU 主機。FastH3 未安裝或未就緒時會顯示原因，不影響原版 H3 的可用模式。權重沿用 [MiniMax H3 Community License](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE)；模型、憑證與私人作品不發布到 Git。
+
 ## FLUX 3 文生圖、改圖與 Qwen 切換（2026-10-27）
 
 在「圖片」工作室的模型選單，可切換 **Qwen 原版、Qwen 官方 Turbo、FLUX 3 Image Klein**。選擇 FLUX 3 後，「生成方式」可使用文字生圖或單張參考圖編輯。文生圖輸入畫面描述並指定寬高；改圖上傳一張主圖，描述修改及保留內容。兩種模式均先用本機提示詞改寫模型整理指令，再進行 16 步生成，沿用同一套已安裝權重。

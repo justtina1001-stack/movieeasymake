@@ -11,6 +11,7 @@ from shortfilm import compile_shot_payload, flatten_shots, resolve_shot_asset_id
 from custom_loras import active_loras, validate_loras_for_family, validate_lora_requirements
 from h3_prompt_translation import prepare_h3_payload, payload_digest
 from script_video_format import normalize_video_settings, video_dimensions, ScriptVideoFormatError
+from video_models import VIDEO_MODEL_H3, VIDEO_MODEL_FAST, normalize_video_model, video_model_profiles
 
 
 class ScriptVideoRenderer:
@@ -32,31 +33,44 @@ class ScriptVideoRenderer:
         return comfy
 
     @staticmethod
-    def _probe_request():
+    def _probe_request(video_model=VIDEO_MODEL_H3):
         # Compiling this recipe only verifies model compatibility; it runs no inference.
-        return compile_request({"mode": "r2v", "duration": 5, "quality_mode": "native",
+        return compile_request({"mode": "r2v", "video_model": video_model, "duration": 5, "quality_mode": "native",
                                 "megapixels": 0.4, "aspect_ratio": "16:9",
                                 "prompt": "Preserve the referenced subject's appearance during a simple visible action.",
                                 "references": [{"alias": "參考角色", "type": "character",
                                                 "image_asset_ids": ["0" * 32], "description": "Reference appearance."}]})
 
-    async def readiness(self):
+    async def readiness(self, video_model=None):
+        profiles = video_model_profiles({})
         try:
             comfy = self._local_engine()
             if not await comfy.is_ready():
-                return {"ready": False, "error": "本機影片引擎尚未就緒，請先啟動影片工作室的 H3 引擎並重新檢查。"}
+                raise ScriptwritingError("本機影片引擎尚未就緒，請先啟動影片工作室的 H3 引擎並重新檢查。")
             inventory = await comfy.model_inventory()
-            validate_runtime_inventory(self._probe_request(), inventory)
+            profiles = video_model_profiles(inventory)
+            for profile in profiles:
+                try:
+                    validate_runtime_inventory(self._probe_request(profile["id"]), inventory)
+                    profile.update(ready=True, error=None)
+                except ValueError as error:
+                    profile.update(ready=False, error=str(error))
             if self.app.get("editor") is None:
                 raise ScriptwritingError("本機影片合成功能尚未啟用。", 503)
-            return {"ready": True, "error": None}
         except (ValueError, OSError, RuntimeError, TimeoutError, aiohttp.ClientError) as error:
-            return {"ready": False, "error": str(error)}
+            for profile in profiles:
+                profile.update(ready=False, error=str(error))
+        selected = ([profile for profile in profiles if profile["id"] == normalize_video_model(video_model)]
+                    if video_model is not None else profiles)
+        ready = any(profile["ready"] for profile in selected)
+        return {"ready": ready, "error": None if ready else next((profile.get("error") for profile in selected if profile.get("error")), "影片模型尚未就緒。"),
+                "video_model_supported": True, "video_models": profiles}
 
     async def preflight(self, project):
         try:
-            normalize_video_settings(project.get("video_settings"))
-            loras = validate_loras_for_family(project.get("custom_loras", []), "ref2va")
+            settings = normalize_video_settings(project.get("video_settings"))
+            video_model = normalize_video_model(settings.get("video_model"))
+            loras = [] if video_model == VIDEO_MODEL_FAST else validate_loras_for_family(project.get("custom_loras", []), "ref2va")
             validate_lora_requirements(loras, "ref2va")
         except ValueError as error:
             raise ScriptwritingError(str(error)) from error
@@ -82,7 +96,7 @@ class ScriptVideoRenderer:
             missing = [item["name"] for item in selected if item["name"] not in available]
             if missing:
                 raise ScriptwritingError("影片引擎缺少已選 LoRA：" + "、".join(missing) + "。請重新掃描或停用後再啟動自動影片。")
-        result = await self.readiness()
+        result = await self.readiness(video_model)
         if not result["ready"]:
             raise ScriptwritingError(result["error"], 503)
 
@@ -142,10 +156,13 @@ class ScriptVideoRenderer:
     def _validate_frozen_format(cls, project, pipeline):
         snapshot = pipeline.get("snapshot") or {}
         if "video_settings" not in pipeline and "video_settings" not in snapshot:
+            if normalize_video_model(project.get("video_model")) != VIDEO_MODEL_H3:
+                raise ScriptwritingError("這筆舊流程使用原版 H3；影片模型已修改，請開始新的流程。", 409)
             return
         settings = cls._video_settings(pipeline)
-        if project.get("aspect_ratio", "16:9") != settings["aspect_ratio"] or project.get("megapixels", 0.4) != settings["megapixels"]:
-            raise ScriptwritingError("影片比例或生成解析度已被修改，請開始新的流程；已完成的片段仍保留。", 409)
+        if (project.get("aspect_ratio", "16:9") != settings["aspect_ratio"] or project.get("megapixels", 0.4) != settings["megapixels"]
+                or normalize_video_model(project.get("video_model")) != normalize_video_model(settings.get("video_model"))):
+            raise ScriptwritingError("影片模型、比例或生成解析度已被修改，請開始新的流程；已完成的片段仍保留。", 409)
 
     @staticmethod
     def _generation_source(project):

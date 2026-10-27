@@ -94,6 +94,8 @@ let modelUpdateData = null;
 let lastModelUpdateStatus = "idle";
 let modelUpdateDismissedThisSession = false;
 let engineModelInventory = {};
+let videoModelSupported = false;
+let videoModelProfiles = [];
 let musicMode = "instrumental";
 let musicModelsInstalled = false;
 let musicPage = 1;
@@ -1084,6 +1086,11 @@ function renderLoraPanels() {
   for (const [scope, id] of [["quick", "quickLoraPanel"], ["sf", "sfLoraPanel"]]) {
     const panel = $(`#${id}`);
     if (!panel) continue;
+    const fast = (scope === "sf" ? activeShortFilmProject()?.video_model : $("#videoModel")?.value) === "fasth3_omni_nvfp4";
+    if (fast) {
+      panel.innerHTML = '<p class="field-help">FastH3 本次不套用 H3 自訂 LoRA；原本選擇已保留，切回 H3 可繼續使用。</p>';
+      continue;
+    }
     const open = $("details", panel)?.open || false;
     const rows = loraItems(scope);
     const choices = H3LoraHelp.choices(loraCatalog);
@@ -1118,6 +1125,8 @@ function renderBuiltinLoraHelp() {
   for (const id of ["qualityBuiltinLoraHelp", "sfBuiltinLoraHelp"]) {
     const container = $(`#${id}`);
     if (!container) continue;
+    const fast = (id === "sfBuiltinLoraHelp" ? activeShortFilmProject()?.video_model : $("#videoModel")?.value) === "fasth3_omni_nvfp4";
+    if (fast) { container.innerHTML = "FastH3 使用獨立模型，不載入 H3 Turbo LoRA。"; continue; }
     const items = loraCatalog?.builtin_items || [];
     container.innerHTML = items.length
       ? `<details class="lora-catalog"><summary>生成品質的內建加速 LoRA · ${items.length} 個版本</summary><p>由「生成品質」選項管理，無須在自訂 LoRA 重複加入。</p><div class="lora-catalog-list">${items.map(item=>H3LoraHelp.html(item)).join("")}</div></details>`
@@ -1208,20 +1217,22 @@ function setVideoSeedAuto(enabled, persist = true) {
 }
 
 function currentSettings() {
+  const fast = $("#videoModel")?.value === "fasth3_omni_nvfp4";
   return {
-    custom_loras: state.customLoras || [],
+    video_model: $("#videoModel")?.value || "h3",
+    custom_loras: fast ? [] : state.customLoras || [],
     aspect_ratio: $("#aspectRatio").value,
     megapixels: Number($("#megapixels").value),
     duration: Number($("#duration").value),
     retime_duration: $("#retimeEnabled").checked ? Number($("#retimeDuration").value) : null,
     export_frames: $("#exportFrames").checked,
     seed: Number($("#seed").value),
-    steps: Number($("#steps").value),
-    scheduler: $("#scheduler").value,
-    ref_image_size: $("#refImageSize").value,
-    quality_mode: $("#qualityMode").value,
+    steps: fast ? 8 : Number($("#steps").value),
+    scheduler: fast ? "simple" : $("#scheduler").value,
+    ref_image_size: fast ? "match" : $("#refImageSize").value,
+    quality_mode: fast ? "native" : $("#qualityMode").value,
     video_vae: $("#videoVae").value || "auto",
-    memory_optimization: $("#memoryOptimization").checked,
+    memory_optimization: fast ? false : $("#memoryOptimization").checked,
     keyframe_fit: $("#keyframeFit").value,
     motion_profile: $("#motionProfile").value,
     motion_intensity: Number($("#motionIntensity").value),
@@ -1243,6 +1254,7 @@ function restoreForm() {
   state.customLoras = structuredClone(form.custom_loras || []);
   renderLoraPanels();
   for (const [id, value] of Object.entries({
+    videoModel: form.video_model || "h3",
     aspectRatio: form.aspect_ratio,
     megapixels: form.megapixels,
     duration: form.duration,
@@ -1261,6 +1273,9 @@ function restoreForm() {
     prompt: form.prompt,
     jobName: form.job_name,
   })) {
+    if (id === "videoModel" && !["h3", "fasth3_omni_nvfp4"].includes(value) && !Array.from($("#videoModel").options).some(option => option.value === String(value))) {
+      $("#videoModel").add(new Option(`不支援的影片模型：${String(value)}`, String(value)));
+    }
     if (value !== undefined && $(`#${id}`)) $(`#${id}`).value = value;
   }
   const hasRetime = Number.isFinite(Number(form.retime_duration)) && Number(form.retime_duration) > 0;
@@ -1310,6 +1325,50 @@ const refOnlyQualityModes = new Set(["turbo_ref_quality"]);
 
 function qualityModeCompatible(qualityMode, referenceMode) {
   return !(referenceMode ? flOnlyQualityModes : refOnlyQualityModes).has(qualityMode);
+}
+
+function videoModelSelectionError(selection, mode = null) {
+  selection ||= "h3";
+  if (!["h3", "fasth3_omni_nvfp4"].includes(selection)) return "這份設定使用尚未支援的影片模型；原模型選擇已保留，請明確選擇 H3 或 FastH3 後再生成。";
+  if (!videoModelSupported) return selection === "h3" ? "" : "FastH3 需要新版 Studio；請等工作完成後重新啟動 Studio，再重新檢查。";
+  const profile = videoModelProfiles.find(item => item.id === selection);
+  if (!profile) return "目前主機未提供所選影片模型；選擇已保留，請檢查模型設定。";
+  if (!profile.ready) return profile.error || "所選影片模型尚未就緒，請先在 GPU 主機安裝模型並確認顯卡支援。";
+  if (mode && profile.mode_ready && profile.mode_ready[mode] !== true) return profile.error || "所選影片模型的此生成方式尚未就緒。";
+  if (mode && Array.isArray(profile.modes) && !profile.modes.includes(mode)) return "所選影片模型尚未驗證此生成方式，請切換 H3。";
+  return "";
+}
+
+function videoModelHint(selection) {
+  const error = videoModelSelectionError(selection);
+  return error || (!selection || selection === "h3" ? "使用原有 H3，可選擇原生品質或 Turbo；各項 H3 設定會保留。" : "FastH3-Omni NVFP4 已就緒 · 試用；固定 8 步，不疊加 H3 Turbo、額外 LoRA 或 H3 省顯存。速度與畫質依鏡頭而定。");
+}
+
+function syncVideoModelStatus() {
+  if ($("#videoModelHint")) $("#videoModelHint").textContent = videoModelHint($("#videoModel")?.value || "h3");
+  const project = activeShortFilmProject();
+  if (project && $("#sfVideoModelHint")) $("#sfVideoModelHint").textContent = videoModelHint(project.video_model || "h3");
+}
+
+function changeVideoModel() {
+  const selected = $("#videoModel").value || "h3";
+  const previous = state.form?.video_model || "h3";
+  if (previous === "h3" && selected !== "h3") {
+    state.h3ModelSettings = { quality_mode: $("#qualityMode").value, steps: Number($("#steps").value),
+      scheduler: $("#scheduler").value, ref_image_size: $("#refImageSize").value,
+      memory_optimization: $("#memoryOptimization").checked, custom_loras: structuredClone(state.customLoras || []) };
+  } else if (selected === "h3" && previous !== "h3") {
+    const saved = state.h3ModelSettings || {};
+    $("#qualityMode").value = saved.quality_mode || "native";
+    $("#steps").value = saved.steps || 20;
+    $("#scheduler").value = saved.scheduler || "simple";
+    $("#refImageSize").value = saved.ref_image_size || "match";
+    $("#memoryOptimization").checked = saved.memory_optimization === true;
+    state.customLoras = structuredClone(saved.custom_loras || state.customLoras || []);
+  }
+  syncVideoModelStatus();
+  renderLoraPanels();
+  updateSummary();
 }
 
 function referenceTurboResolutionWarning(width, height) {
@@ -1374,6 +1433,20 @@ function turboProfile(width, height, qualityMode = $("#qualityMode").value, refe
 function syncQualityMode(width, height) {
   const select = $("#qualityMode");
   const referenceMode = isReferenceMode();
+  const fast = $("#videoModel")?.value === "fasth3_omni_nvfp4";
+  select.disabled = fast;
+  if (fast) {
+    select.value = "native";
+    $("#steps").value = 8;
+    $("#scheduler").value = "simple";
+    $("#refImageSize").value = "match";
+    for (const id of ["steps", "scheduler", "refImageSize", "memoryOptimization"]) $(`#${id}`).disabled = true;
+    $("#memoryOptimization").checked = false;
+    $("#qualityModeTitle").textContent = "FastH3-Omni · 固定 8 步";
+    $("#qualityModeHint").textContent = "使用 FastH3 的固定生成設定；原本 H3 品質與採樣設定已保留。";
+    $("#memoryOptimizationHint").textContent = "FastH3 暫不疊加 H3 記憶體最佳化；原本 H3 設定已保留。";
+    return;
+  }
   [...select.options].forEach(option => { option.disabled = !qualityModeCompatible(option.value, referenceMode); });
   // Preserve the requested mode when switching workflows; report incompatibility
   // instead of silently substituting a different model or acceleration method.
@@ -1999,6 +2072,10 @@ function confirmTranslationFallback(payload) {
 async function compilePreview() {
   const button = $("#compileButton");
   if (button.disabled || $("#renderButton").getAttribute("aria-busy") === "true") return null;
+  if (($("#videoModel")?.value || "h3") !== "h3") {
+    const error = videoModelSelectionError($("#videoModel").value, state.mode);
+    if (error) { toast(error, true); return null; }
+  }
   const renderButton = $("#renderButton");
   const renderWasDisabled = renderButton.disabled;
   setButtonBusy(button, true);
@@ -2025,6 +2102,10 @@ async function compilePreview() {
 async function renderVideo() {
   const button = $("#renderButton");
   if (button.disabled || $("#compileButton").disabled) return null;
+  if (($("#videoModel")?.value || "h3") !== "h3") {
+    const error = videoModelSelectionError($("#videoModel").value, state.mode);
+    if (error) { toast(error, true); return null; }
+  }
   const unresolvedKeywords = promptKeywords();
   if (unresolvedKeywords.length && !confirm(`提示詞還有 ${unresolvedKeywords.length} 個 {{關鍵字}} 尚未替換：\n\n${unresolvedKeywords.slice(0, 8).join("、")}${unresolvedKeywords.length > 8 ? "…" : ""}\n\n仍要送出生成嗎？`)) return;
   if (state.mode === "replace") {
@@ -2367,12 +2448,15 @@ function originalGenerationRequest(request) {
 async function applyJobRecipe(jobId) {
   const recipe = await loadJobRecipe(jobId);
   const raw = originalGenerationRequest(recipe.request || {});
+  if (raw.video_model && !["h3", "fasth3_omni_nvfp4"].includes(raw.video_model)) throw new Error("這筆紀錄使用尚未支援的影片模型；未套用設定，請更新 Studio 或選擇其他紀錄。");
   const assets = recipe.assets || {};
   const mode = raw.mode || "t2v";
   keyframePrepareVersion++;
   state.firstImage = null;
   state.lastImage = null;
   setMode(mode);
+  $("#videoModel").value = raw.video_model || "h3";
+  if (typeof syncVideoModelStatus === "function") syncVideoModelStatus();
   $("#qualityMode").value = raw.quality_mode || "native";
   $("#videoVae").value = ["auto", "int8", "fp16"].includes(raw.video_vae) ? raw.video_vae : "auto";
   state.customLoras = structuredClone(raw.custom_loras || []);
@@ -2612,6 +2696,7 @@ async function loadJobs(force = false) {
       const active = ["queued", "preparing", "running"].includes(job.status);
       const date = new Date(job.created_at).toLocaleString("zh-TW", { hour12: false });
       const fallbackName = `${modeLabels[job.mode] || job.mode} · ${job.width}×${job.height}`;
+      const modelLabel = job.video_model === "fasth3_omni_nvfp4" ? "FastH3-Omni NVFP4" : "MiniMax H3";
       const title = job.name || fallbackName;
       const executionLabel = jobExecutionLabel(job);
       const batchLabel = job.batch_type === "replace_long" ? ` · 完整長片 ${job.segments?.length || 0} 段` : "";
@@ -2620,7 +2705,7 @@ async function loadJobs(force = false) {
       const durationLabel = hasRetime
         ? `原始 ${Number(job.original_duration).toFixed(2)} 秒 → 節奏版 ${Number(job.duration).toFixed(2)} 秒`
         : `影片 ${Number(job.duration).toFixed(2)} 秒`;
-      const subtitle = job.name ? `${fallbackName}${batchLabel} · ${date} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}` : `${date}${batchLabel} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}`;
+      const subtitle = job.name ? `${modelLabel} · ${fallbackName}${batchLabel} · ${date} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}` : `${modelLabel} · ${date}${batchLabel} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}`;
       const open = active || expandedJobIds.has(job.id);
       return `
         <details class="job-card ${job.favorite ? "favorite" : ""}" data-job-id="${job.id}" ${open ? "open" : ""}>
@@ -2679,6 +2764,9 @@ async function checkStatus() {
     const data = await api("/api/status");
     if (data.studio_role) applyStudioRole({ studio_role: data.studio_role });
     engineModelInventory = data.models || {};
+    videoModelSupported = data.video_model_supported === true;
+    videoModelProfiles = Array.isArray(data.video_models) ? data.video_models : [];
+    syncVideoModelStatus();
     syncVideoVaeHints();
     syncQualityMode(...dimensions());
     syncShortFilmAcceleration();
@@ -2707,6 +2795,9 @@ async function checkStatus() {
     }
   } catch {
     engineModelInventory = {};
+    videoModelSupported = false;
+    videoModelProfiles = [];
+    syncVideoModelStatus();
     syncVideoVaeHints();
     syncQualityMode(...dimensions());
     syncShortFilmAcceleration();
@@ -2983,10 +3074,25 @@ function scheduleShortFilmSave(project = activeShortFilmProject()) {
   if (project) getShortFilmSaveCoordinator().schedule(project);
 }
 
+function shortFilmModelSaveError(project, returned = null) {
+  const selection = project?.video_model || "h3";
+  if (!["h3", "fasth3_omni_nvfp4"].includes(selection)) return "尚未支援這份草稿的影片模型，原選擇已保留；請明確選擇 H3 或 FastH3。";
+  if (selection !== "h3" && !videoModelSupported) return "主機尚未確認支援 FastH3 儲存，請重新啟動更新後的 Studio，再重新檢查；模型選擇與草稿已保留。";
+  if (returned && (returned.video_model || "h3") !== selection) return "主機未完整保存影片模型，原模型選擇與瀏覽器草稿已保留；請更新主機並重新檢查。";
+  return "";
+}
+
 function getShortFilmSaveCoordinator() {
   if (shortFilmSaveCoordinator) return shortFilmSaveCoordinator;
   shortFilmSaveCoordinator = ShortFilmPersistence.create({
-    send: project => api(`/api/shortfilms/${project.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(project) }),
+    send: async project => {
+      const error = shortFilmModelSaveError(project);
+      if (error) throw new Error(error);
+      const saved = await api(`/api/shortfilms/${project.id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(project) });
+      const saveError = shortFilmModelSaveError(project, saved);
+      if (saveError) throw new Error(saveError);
+      return saved;
+    },
     getProject: id => shortFilmProjects.find(project => project.id === id),
     storage: localStorage,
     onSaved: (saved, { current }) => {
@@ -3026,10 +3132,14 @@ async function recoverShortFilmDraft(copy) {
   $("#copyShortfilmDraft").disabled = true; $("#discardShortfilmDraft").disabled = true;
   try {
   if (copy) {
+    const modelError = shortFilmModelSaveError(draft);
+    if (modelError) throw new Error(modelError);
     const payload = structuredClone(draft);
     delete payload.id; delete payload.revision;
     payload.title = `${draft.title || "短片"}（草稿救援）`.slice(0, 80);
     const created = await api("/api/shortfilms", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const saveError = shortFilmModelSaveError(payload, created);
+    if (saveError) throw new Error(saveError);
     shortFilmProjects.unshift(created); activeShortFilmId = created.id;
   }
   const fresh = await api(`/api/shortfilms/${id}`), index = shortFilmProjects.findIndex(project => project.id === id);
@@ -3313,9 +3423,9 @@ function shortFilmWarnings(project) {
     const usage = shortFilmShotReferenceUsage(project, shot);
     if (usage.assetCount > 9) warnings.push(`${label} 引用 ${usage.assetCount} 項素材，超過每鏡頭 9 項上限。`);
     const referenceMode = shortFilmShotUsesReferenceMode(project, shot);
-    const compatible = qualityModeCompatible(project.quality_mode, referenceMode);
+    const compatible = project.video_model === "fasth3_omni_nvfp4" || qualityModeCompatible(project.quality_mode, referenceMode);
     if (!compatible) warnings.push(`${label} 使用${referenceMode ? "素材參考（Ref2VA）" : "文生／首尾（FL2VA）"}模型，與全片所選品質不相容；本鏡頭會改用 Turbo 快速預覽。若不希望自動適配，請改選全片共用的原生品質。`);
-    const effectiveQuality = compatible ? project.quality_mode : "turbo";
+    const effectiveQuality = project.video_model === "fasth3_omni_nvfp4" ? "native" : compatible ? project.quality_mode : "turbo";
     const resolutionWarning = referenceMode && effectiveQuality === "turbo" ? referenceTurboResolutionWarning(width, height) : "";
     if (resolutionWarning) warnings.push(`${label} 使用 Ref2VA v0.1 4 步快速預覽。${resolutionWarning}`);
     if (usage.imageCount > 9) warnings.push(`${label} 使用 ${usage.imageCount} 張參考圖片，超過每鏡頭 9 張上限。`);
@@ -3333,6 +3443,16 @@ function shortFilmShotUsesReferenceMode(project, shot) {
 function syncShortFilmAcceleration() {
   const project = activeShortFilmProject();
   if (!project) return;
+  const fast = project.video_model === "fasth3_omni_nvfp4";
+  $("#sfQuality").disabled = fast;
+  if (fast) {
+    $("#sfQuality").value = "native";
+    $("#sfMemoryOptimization").disabled = true;
+    $("#sfMemoryOptimization").checked = false;
+    $("#sfQualityHint").textContent = "FastH3：每鏡固定 8 步，不套用 H3 Turbo 或自訂 LoRA；專案原本的 H3 設定已保留。";
+    $("#sfMemoryOptimizationHint").textContent = "FastH3 暫不疊加 H3 記憶體最佳化；切回 H3 會恢復原選擇。";
+    return;
+  }
   const qualityMode = project.quality_mode || "native";
   const memoryInput = $("#sfMemoryOptimization");
   memoryInput.disabled = qualityMode === "turbo_sla";
@@ -3371,6 +3491,10 @@ function renderShortFilmWorkspace() {
   $("#sfTargetDuration").value = project.target_duration || 30;
   $("#sfAspectRatio").value = project.aspect_ratio || "16:9";
   $("#sfMegapixels").value = String(project.megapixels ?? 0.4);
+  const videoModel = project.video_model || "h3";
+  if (!["h3", "fasth3_omni_nvfp4"].includes(videoModel) && !Array.from($("#sfVideoModel").options).some(option => option.value === String(videoModel))) $("#sfVideoModel").add(new Option(`不支援的影片模型：${String(videoModel)}`, String(videoModel)));
+  $("#sfVideoModel").value = videoModel;
+  if (typeof syncVideoModelStatus === "function") syncVideoModelStatus();
   $("#sfQuality").value = project.quality_mode || "native";
   $("#sfVideoVae").value = ["auto", "int8", "fp16"].includes(project.video_vae) ? project.video_vae : "auto";
   $("#sfMemoryOptimization").checked = project.memory_optimization === true;
@@ -3539,7 +3663,7 @@ async function loadShortFilmJobs(force = false) {
     const durationLabel = hasRetime
       ? `原始 ${Number(job.original_duration).toFixed(2)} 秒 → 節奏版 ${Number(job.duration).toFixed(2)} 秒`
       : `影片 ${Number(job.duration || 0).toFixed(2)} 秒`;
-    const subtitle = `${contextLabel} · ${job.width}×${job.height} · ${date} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}`;
+    const subtitle = `${contextLabel} · ${job.video_model === "fasth3_omni_nvfp4" ? "FastH3-Omni NVFP4" : "MiniMax H3"} · ${job.width}×${job.height} · ${date} · ${durationLabel} · ${executionLabel} · ${job.id.slice(0, 8)}`;
     const open = active || expandedShortFilmJobIds.has(job.id);
     return `<details class="job-card shortfilm-job-card ${job.favorite ? "favorite" : ""}" data-shortfilm-job-id="${job.id}" ${open ? "open" : ""}>
       <summary class="job-summary">
@@ -3606,6 +3730,10 @@ function renderShortFilmShotRequests() {
 async function compileShortFilmShot(shotId, generate = false) {
   const original = activeShortFilmProject();
   if (!original || !shortFilmFlatten(original).some(item => item.shot.id === shotId)) throw new Error("找不到短片鏡頭。");
+  if (original.video_model && original.video_model !== "h3") {
+    const error = videoModelSelectionError(original.video_model);
+    if (error) throw new Error(error);
+  }
   const projectId = original.id;
   const requestKey = `${projectId}:${shotId}`;
   if (shortFilmShotRequests.get(requestKey)?.phase && shortFilmShotRequests.get(requestKey).phase !== "error") return null;
@@ -3749,6 +3877,7 @@ function renderShortFilmBatch(batch = shortFilmBatch) {
   } else if (batch?.status === "completed") $("#shortfilmBatchNote").textContent = "未完成鏡頭已依序製作完成，可在短片作品列表預覽。";
   else if (batch) $("#shortfilmBatchNote").textContent = batch.error || "流程已暫停。接續會使用原設定；修改內容後請開始新的流程。";
   else $("#shortfilmBatchNote").textContent = "連戲鏡頭會等待上一鏡完成並擷取尾幀。關閉頁面後仍會依序製作；Studio 主機需保持執行。";
+  if (batch) $("#shortfilmBatchNote").textContent += ` · ${batch.snapshot?.video_model === "fasth3_omni_nvfp4" ? "FastH3-Omni NVFP4" : "MiniMax H3"}`;
 }
 
 async function loadShortFilmBatchStatus() {
@@ -3782,6 +3911,11 @@ async function loadShortFilmBatchStatus() {
 async function runShortFilmBatch(resume = false) {
   if (shortFilmBatchRunning) return;
   const project = activeShortFilmProject();
+  const selection = (resume ? shortFilmBatch?.snapshot?.video_model : project?.video_model) || "h3";
+  if (selection !== "h3") {
+    const error = videoModelSelectionError(selection);
+    if (error) { toast(error, true); return; }
+  }
   if (!project || !shortFilmFlatten(project).length) return toast("請先建立至少一個鏡頭。", true);
   if (!resume) {
     const blockers = shortFilmBatchBlockers(project);
@@ -3958,6 +4092,13 @@ function bindEvents() {
     const project = activeShortFilmProject();
     if (!project) return;
     project.export_frames = event.target.checked;
+    scheduleShortFilmSave();
+  });
+  $("#sfVideoModel").addEventListener("change", event => {
+    const project = activeShortFilmProject();
+    if (!project) return;
+    updateShortFilmGenerationField(project, project, "video_model", event.target.value || "h3");
+    renderShortFilmWorkspace();
     scheduleShortFilmSave();
   });
   $("#sfMemoryOptimization").addEventListener("change", event => {
@@ -4163,6 +4304,7 @@ function bindEvents() {
   $("#memoryOptimization").addEventListener("change", updateSummary);
   $("#duration").addEventListener("change", refreshPromptTemplateIfUntouched);
   $("#qualityMode").addEventListener("change", changeQualityMode);
+  $("#videoModel").addEventListener("change", changeVideoModel);
   ["aspectRatio", "megapixels", "keyframeFit"].forEach(id => {
     $(`#${id}`).addEventListener("change", refreshKeyframes);
   });

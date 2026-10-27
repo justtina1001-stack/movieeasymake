@@ -29,6 +29,7 @@ from PIL import Image, ImageOps
 
 from comfy_client import ComfyClient
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, validate_runtime_inventory, resolve_video_vae
+from video_models import VIDEO_MODEL_H3, video_model_profiles
 from h3_media import prepare_media_payload, normalized_reference_video, reference_video_ids
 from h3_prompt_translation import H3PromptTranslator, original_h3_payload, prepare_h3_payload
 from shortfilm_batch import ShortFilmBatchManager, ShortFilmBatchError, generation_source
@@ -1288,6 +1289,7 @@ class JobManager:
                 job["status"] = "interrupted"
                 job["error"] = "工具上次關閉時工作尚未完成。"
             job.setdefault("name", "")
+            job.setdefault("video_model", VIDEO_MODEL_H3)
             job.setdefault("favorite", False)
             job.setdefault("hidden", False)
             if "workspace" not in job:
@@ -1333,6 +1335,7 @@ class JobManager:
             "parent_job_id": parent_job_id,
             "segment_index": segment_index,
             "mode": compiled.mode,
+            "video_model": compiled.video_model,
             "face_repair": compiled.face_repair,
             "quality_mode": compiled.quality_mode,
             "memory_optimization": compiled.memory_optimization,
@@ -1387,6 +1390,7 @@ class JobManager:
             "favorite": False,
             "hidden": False,
             "mode": "replace",
+            "video_model": compiled.video_model,
             "quality_mode": compiled.quality_mode,
             "memory_optimization": compiled.memory_optimization,
             "video_vae": compiled.video_vae,
@@ -2302,6 +2306,8 @@ def create_app() -> web.Application:
             "starting": comfy.is_starting,
             "device": device,
             "models": models,
+            "video_model_supported": True,
+            "video_models": video_model_profiles(models),
             "connection_mode": comfy.mode,
             "base_url": comfy.base_url,
             "can_start": comfy.can_start,

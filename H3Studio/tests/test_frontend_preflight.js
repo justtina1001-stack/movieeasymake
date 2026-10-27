@@ -9,7 +9,7 @@ function fixture() {
   const elements = new Map();
   const element = selector => {
     if (!elements.has(selector)) elements.set(selector, {
-      value: '5', textContent: '', innerHTML: '', classes: new Set(),
+      value: selector === '#videoModel' ? 'h3' : '5', textContent: '', innerHTML: '', classes: new Set(),
       classList: { add() {}, remove() {}, toggle() {} }, scrollIntoView() {},
       getAttribute: () => 'false', querySelector: () => ({ textContent: '' }),
     });
@@ -17,6 +17,7 @@ function fixture() {
   };
   const c = vm.createContext({
     $: element, structuredClone, state: { mode: 't2v' }, modeLabels: { t2v: '文生影片' }, generationPreflight: null,
+    videoModelSupported: false, videoModelProfiles: [],
     messages: [], calls: [], input: { mode: 't2v', prompt: '角色揮手。', seed: 1 },
     collectPayload: () => ({ ...c.input }), promptKeywords: () => [], setButtonBusy() {},
     async loadJobs() {}, persistForm() {}, toast: message => c.messages.push(message),
@@ -25,7 +26,7 @@ function fixture() {
       return url === '/api/compile' ? c.compiled : { id: 'job-test' };
     },
   });
-  for (const name of ['escapeHtml', 'originalGenerationRequest', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'showGenerationStage', 'confirmTranslationFallback', 'compilePreview', 'renderVideo']) {
+  for (const name of ['escapeHtml', 'videoModelSelectionError', 'originalGenerationRequest', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'showGenerationStage', 'confirmTranslationFallback', 'compilePreview', 'renderVideo']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), c);
@@ -40,6 +41,20 @@ test('every generation mode compiles before submitting and reuses prepared narra
   await c.renderVideo();
   assert.deepEqual(c.calls.map(item => item.url), ['/api/compile', '/api/render']);
   assert.equal(c.calls[1].payload.prompt, 'The actor waves.');
+});
+
+test('Fast requests require explicit host support before either preview or queue submission', async () => {
+  const { c, element } = fixture();
+  element('#videoModel').value = 'fasth3_omni_nvfp4';
+  c.input.video_model = 'fasth3_omni_nvfp4';
+  c.compiled.prepared_payload.video_model = 'fasth3_omni_nvfp4';
+  await c.compilePreview(); await c.renderVideo();
+  assert.equal(c.calls.length, 0); assert.match(c.messages.at(-1), /重新啟動/);
+  c.videoModelSupported = true;
+  c.videoModelProfiles = [{ id: 'h3', ready: false, error: 'H3 absent' }, { id: 'fasth3_omni_nvfp4', ready: true, modes: ['t2v'] }];
+  await c.renderVideo();
+  assert.deepEqual(c.calls.map(item => item.url), ['/api/compile', '/api/render']);
+  assert.equal(c.calls[1].payload.video_model, 'fasth3_omni_nvfp4');
 });
 
 test('preview is reused after a seed change but edited creative inputs compile again', async () => {

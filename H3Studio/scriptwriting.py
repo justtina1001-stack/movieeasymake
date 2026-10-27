@@ -29,6 +29,7 @@ from script_skills import SKILLS_VERSION, list_skills, normalize_skill_id, skill
 from script_performance import normalize_screenplay, storyboard_to_performance
 from script_video_format import ScriptVideoFormatError, normalize_video_settings
 from custom_loras import normalize_loras, validate_loras_for_family, validate_lora_requirements
+from video_models import VIDEO_MODEL_FAST
 
 
 DEFAULT_SETTINGS = {
@@ -1358,8 +1359,13 @@ class ScriptwritingManager:
             if project is not None:
                 return {"shortfilm_id": job["shortfilm_id"], "project": copy.deepcopy(project), "existing": True}
         try:
-            custom_loras = validate_loras_for_family(job["input"]["project"].get("custom_loras", []), "ref2va")
-            validate_lora_requirements(custom_loras, "ref2va")
+            video_settings = normalize_video_settings(job["input"]["project"].get("video_settings"))
+            selected_loras = job["input"]["project"].get("custom_loras", [])
+            if video_settings.get("video_model") == VIDEO_MODEL_FAST:
+                custom_loras = normalize_loras(selected_loras)
+            else:
+                custom_loras = validate_loras_for_family(selected_loras, "ref2va")
+                validate_lora_requirements(custom_loras, "ref2va")
         except ValueError as error:
             raise ScriptwritingError(str(error)) from error
         if job.get("shortfilm_id"):
@@ -1371,11 +1377,9 @@ class ScriptwritingManager:
             job["updated_at"] = utc_now()
             self._save_jobs(job_id)
         project = new_project(storyboard["title"])
-        try:
-            video_settings = normalize_video_settings(job.get("input", {}).get("project", {}).get("video_settings"))
-        except ScriptVideoFormatError as error:
-            raise ScriptwritingError(str(error)) from error
         project.update(aspect_ratio=video_settings["aspect_ratio"], megapixels=video_settings["megapixels"])
+        if "video_model" in video_settings:
+            project["video_model"] = video_settings["video_model"]
         project["custom_loras"] = copy.deepcopy(custom_loras)
         project["id"] = project_id
         project["synopsis"] = storyboard["synopsis"]
@@ -1520,6 +1524,8 @@ def register_scriptwriting_routes(app: web.Application, static_dir: Path, data_d
         value = await manager.status()
         video_status = await videos.readiness() if videos is not None else {"ready": False, "error": video_error}
         value.update(video_pipelines_supported=True, video_ready=video_status["ready"], video_error=video_status["error"])
+        value["video_model_supported"] = video_status.get("video_model_supported") is True
+        value["video_models"] = video_status.get("video_models", [])
         value["writing_skills_supported"] = True
         value["custom_loras_supported"] = True
         return web.json_response(value)

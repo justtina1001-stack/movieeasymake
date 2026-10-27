@@ -47,6 +47,7 @@ function normalizeScriptProject(value = {}) {
 function normalizeScriptVideoSettings(value) {
   const settings = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return {
+    ...(settings.video_model !== undefined && settings.video_model !== null && settings.video_model !== "" ? { video_model: String(settings.video_model) } : {}),
     aspect_ratio: SCRIPT_VIDEO_ASPECTS.includes(settings.aspect_ratio) ? settings.aspect_ratio : SCRIPT_VIDEO_DEFAULTS.aspect_ratio,
     megapixels: SCRIPT_VIDEO_PRECISION.includes(settings.megapixels) ? settings.megapixels : SCRIPT_VIDEO_DEFAULTS.megapixels,
     output_resolution: ["native", "720p", "1080p"].includes(settings.output_resolution) ? settings.output_resolution : SCRIPT_VIDEO_DEFAULTS.output_resolution,
@@ -224,6 +225,14 @@ function scriptPipelineVideoUrl(pipeline) {
   return /^\/api\/(?:assets\/[a-f0-9]{32}|jobs\/[a-f0-9]{32}\/video|scripts\/video-pipelines\/[a-f0-9]{32}\/video|editor\/exports\/[a-f0-9]{32}\/file)(?:\?[^#\s]*)?$/i.test(value) ? value : "";
 }
 
+function scriptPipelineVideoModel(pipeline) {
+  return (pipeline?.video_settings || pipeline?.snapshot?.video_settings || pipeline?.snapshot?.project?.video_settings)?.video_model || "h3";
+}
+
+function scriptVideoModelLabel(selection) {
+  return selection === "fasth3_omni_nvfp4" ? "FastH3-Omni NVFP4" : "MiniMax H3";
+}
+
 function scriptVideoHistoryRecord(pipeline) {
   const safeId = value => typeof value === "string" && /^[a-f0-9]{32}$/i.test(value);
   if (!pipeline || pipeline.status !== "completed" || !safeId(pipeline.id)) return null;
@@ -236,7 +245,7 @@ function scriptVideoHistoryRecord(pipeline) {
   if (!url) return null;
   const title = [pipeline.project_title, pipeline.title, pipeline.snapshot?.title].find(value => typeof value === "string" && value.trim()) || "未命名影片";
   const duration = pipeline.snapshot?.duration ?? pipeline.duration;
-  return { id: pipeline.id, project_id: typeof pipeline.project_id === "string" ? pipeline.project_id : "", title, completed_at: pipeline.completed_at || pipeline.updated_at || pipeline.created_at || "", duration: typeof duration === "number" && Number.isFinite(duration) && duration > 0 ? duration : null, video_url: url, video_format: scriptPipelineVideoFormat(pipeline), editor_url: safeId(pipeline.editor_project_id) ? `/editor?project=${pipeline.editor_project_id}` : "" };
+  return { id: pipeline.id, project_id: typeof pipeline.project_id === "string" ? pipeline.project_id : "", title, completed_at: pipeline.completed_at || pipeline.updated_at || pipeline.created_at || "", duration: typeof duration === "number" && Number.isFinite(duration) && duration > 0 ? duration : null, video_url: url, video_model: scriptPipelineVideoModel(pipeline), video_format: scriptPipelineVideoFormat(pipeline), editor_url: safeId(pipeline.editor_project_id) ? `/editor?project=${pipeline.editor_project_id}` : "" };
 }
 
 function scriptVideoHistoryDownloadUrl(url) {
@@ -336,11 +345,12 @@ if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
   const clientId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const fieldIds = { title: "scriptTitle", idea: "scriptIdea", genre: "scriptGenre", duration: "scriptDuration", characters: "scriptCharacters", style: "scriptStyle", instructions: "scriptInstructions", content: "scriptContent", writing_skill: "scriptWritingSkill" };
-  const videoFieldIds = { aspect_ratio: "scriptVideoAspectRatio", megapixels: "scriptVideoMegapixels", output_resolution: "scriptVideoResolution" };
+  const videoFieldIds = { aspect_ratio: "scriptVideoAspectRatio", megapixels: "scriptVideoMegapixels", output_resolution: "scriptVideoResolution", video_model: "scriptVideoModel" };
   const state = { project: createNewScriptProject(), projects: [], jobs: [], job: null, selectedJobId: null, ready: false, visionReady: false, referencesSupported: false, referencesSupportKnown: false, referencesSaveWaiting: false, engineCheckPromise: null, messageKind: "", settings: null, dirty: false, loading: false, saving: false, starting: false, importing: false, pollBusy: false, settingsDirty: false, settingsSaving: false, conflict: null, recovery: null, ownDrafts: {}, newDraftCounter: 1, newDraftId: "__new__-1", draftAvailable: true, jobsRevision: 0, generation: 0, referenceControls: new Map(), referenceUploads: new Map(), referenceCounter: 0, historyScope: "all", historyPersistent: false, historyStorage: "loading", historyError: "", activeJobs: [], deletingJobIds: new Set(), deletedJobIds: new Set(), historyDeleteControls: new Map(), autoVideo: false, videoPipelinesSupported: false, videoReady: false, videoError: "", pipelines: [], pipeline: null, selectedPipelineId: null, pipelineStarting: false, pipelinePollBusy: false, pipelinesRevision: 0 };
   Object.assign(state, { writingSkills: [], skillsSupported: false, skillsSupportKnown: false, skillsCatalogReady: false, skillsLoading: false, skillsError: "", skillsSaveWaiting: false, previewRequestFailed: false, previewView: "readable", previewViewJobId: null });
   Object.assign(state, { videoHistoryScope: "all", historyVideos: [], selectedHistoryVideoId: null, historyPreviewVideo: null, historyPreviewError: "", videoHistoryStatus: "loading", videoHistoryError: "", videoHistoryWarning: "", videoHistoryBusy: false });
   Object.assign(state, { lorasSupported: false, lorasSupportKnown: false, lorasSaveWaiting: false, loraCatalog: { names: [], items: [], recommended_items: [], builtin_items: [] }, loraCatalogReady: false, loraCatalogBusy: false, loraCatalogError: "", loraCatalogSerial: 0, loraControls: [] });
+  Object.assign(state, { videoModelSupported: false, videoModels: [], videoModelTouched: false });
 
   function message(text, error = false, kind = "") {
     state.messageKind = kind;
@@ -371,7 +381,9 @@ if (typeof document !== "undefined") {
   function readProject() {
     const value = { ...state.project, character_references: normalizeScriptReferences(state.project.character_references), custom_loras: normalizeScriptLoras(state.project.custom_loras) };
     for (const [field, id] of Object.entries(fieldIds)) value[field] = field === "duration" ? Number($(id).value) : $(id).value;
-    value.video_settings = normalizeScriptVideoSettings(Object.fromEntries(Object.entries(videoFieldIds).map(([field, id]) => [field, field === "megapixels" ? Number($(id).value) : $(id).value])));
+    const videoSettings = Object.fromEntries(Object.entries(videoFieldIds).map(([field, id]) => [field, field === "megapixels" ? Number($(id).value) : $(id).value]));
+    if ((!videoSettings.video_model || videoSettings.video_model === "h3") && !state.videoModelTouched && !state.project.video_settings?.video_model) delete videoSettings.video_model;
+    value.video_settings = normalizeScriptVideoSettings(videoSettings);
     return value;
   }
   function writeProject(project) {
@@ -379,7 +391,10 @@ if (typeof document !== "undefined") {
     if (!Array.from($("scriptGenre").options).some(option => option.value === value.genre)) $("scriptGenre").add(new Option(value.genre, value.genre));
     renderWritingSkills(value.writing_skill);
     for (const [field, id] of Object.entries(fieldIds)) $(id).value = value[field];
-    for (const [field, id] of Object.entries(videoFieldIds)) $(id).value = String(value.video_settings[field]);
+    const videoModel = value.video_settings.video_model || "h3";
+    if (!Array.from($("scriptVideoModel").options).some(option => option.value === videoModel)) $("scriptVideoModel").add(new Option(["h3", "fasth3_omni_nvfp4"].includes(videoModel) ? videoModel : `不支援的影片模型：${videoModel}`, videoModel));
+    for (const [field, id] of Object.entries(videoFieldIds)) $(id).value = String(value.video_settings[field] ?? (field === "video_model" ? "h3" : ""));
+    state.videoModelTouched = false;
     state.project = value;
     renderWritingSkillDetails();
     renderReferences();
@@ -655,6 +670,14 @@ if (typeof document !== "undefined") {
     $("exportScript").disabled = state.loading || state.saving;
     for (const id of Object.values(fieldIds)) $(id).disabled = state.loading;
     for (const id of Object.values(videoFieldIds)) $(id).disabled = state.loading;
+    const selectedVideoProject = readProject();
+    const fastVideo = selectedVideoProject.video_settings?.video_model === "fasth3_omni_nvfp4";
+    const videoModelError = scriptVideoModelError(selectedVideoProject);
+    $("scriptVideoModelHint").textContent = videoModelError || (fastVideo
+      ? "FastH3-Omni NVFP4 · 試用；每鏡固定 8 步，不套用 H3 Turbo、自訂 LoRA 或 H3 省顯存。原本 H3 LoRA 選擇會保留。"
+      : "使用原有 H3 自動影片設定；可保留目前的 H3 LoRA 選擇。");
+    $("scriptVideoLoraSection").classList.toggle("hidden", fastVideo);
+    if (fastVideo) $("scriptLoraRecommendations").classList.add("hidden");
     $("scriptVideoFormatSummary").textContent = scriptVideoFormatLabel(scriptVideoDimensions(readProject().video_settings));
     for (const option of Array.from($("scriptWritingSkill").options)) option.disabled = Boolean(option.value) && (!writingSkillsAvailable() || !state.writingSkills.some(skill => skill.id === option.value));
     const recommendation = writingSkillsAvailable() ? scriptRecommendedWritingSkill(readProject(), state.writingSkills) : null;
@@ -682,7 +705,7 @@ if (typeof document !== "undefined") {
     const previewOption = Array.from($("scriptVideoSource").options).find(option => option.value === "preview");
     if (previewOption) previewOption.disabled = !selectedVideoSourceJob();
     if ($("scriptVideoSource").value === "preview" && !selectedVideoSourceJob()) $("scriptVideoSource").value = "current";
-    $("startScriptVideoPipeline").disabled = busy || state.settingsSaving || !state.videoPipelinesSupported || !state.videoReady || !state.ready || writingSkillNeedsCheck() || Boolean(state.conflict) || activePipeline || activeForProject;
+    $("startScriptVideoPipeline").disabled = busy || state.settingsSaving || !state.videoPipelinesSupported || !state.videoReady || Boolean(videoModelError) || !state.ready || writingSkillNeedsCheck() || Boolean(state.conflict) || activePipeline || activeForProject;
     $("startScriptVideoPipeline").textContent = state.pipelineStarting ? "正在啟動製作…" : "劇本 → 自動生成影片";
     $("cancelScriptVideoPipeline").disabled = !state.videoPipelinesSupported || !scriptPipelinePresentation(state.pipeline).active || state.pipeline?.status === "cancelling";
     $("resumeScriptVideoPipeline").disabled = busy || !state.videoPipelinesSupported || !state.videoReady || !["failed", "cancelled", "canceled", "interrupted"].includes(state.pipeline?.status);
@@ -739,6 +762,7 @@ if (typeof document !== "undefined") {
       if (generation !== state.generation || state.saving || state.loading || state.conflict && !copy) return false;
     }
     const sent = readProject();
+    if (!["h3", "fasth3_omni_nvfp4"].includes(sent.video_settings?.video_model || "h3")) { state.dirty = true; storeDraft(); updateControls(); message("這份設定使用尚未支援的影片模型；原選擇與草稿已保留，請明確選擇 H3 或 FastH3 後再儲存。", true); return false; }
     if (sent.custom_loras.length && !state.lorasSupported) { state.dirty = true; storeDraft(); renderScriptLoras(); updateControls(); message("目前主機尚未確認支援劇本 LoRA 儲存，所選 LoRA、編輯稿與本機草稿已保留；請更新主機後重新檢查，或明確移除選擇再儲存。", true, "loras-support"); return false; }
     if (sent.character_references.length && !state.referencesSupported) {
       state.dirty = true; storeDraft(); updateControls();
@@ -883,6 +907,8 @@ if (typeof document !== "undefined") {
       state.videoPipelinesSupported = status.video_pipelines_supported === true;
       state.videoReady = status.video_ready === true;
       state.videoError = typeof status.video_error === "string" ? status.video_error : "";
+      state.videoModelSupported = status.video_model_supported === true;
+      state.videoModels = Array.isArray(status.video_models) ? status.video_models : [];
       state.settings = status.settings || state.settings || {};
       if (!state.settingsDirty || resetSettings) { populateSettings(state.settings, status.models || []); state.settingsDirty = false; }
       $("scriptEngineDot").className = `script-dot ${state.ready ? "ready" : "unavailable"}`;
@@ -896,6 +922,8 @@ if (typeof document !== "undefined") {
       state.ready = false;
       state.visionReady = false;
       state.videoReady = false;
+      state.videoModelSupported = false;
+      state.videoModels = [];
       $("scriptEngineDot").className = "script-dot unavailable";
       $("scriptEngineStatus").textContent = "無法取得本機模型狀態";
       $("scriptEngineDetail").textContent = error.message;
@@ -1000,10 +1028,24 @@ if (typeof document !== "undefined") {
     if (!state.videoPipelinesSupported) return "目前 Studio 尚未提供自動影片功能，請重新啟動更新後的 Studio，再按「重新檢查」。";
     if (!state.ready) return "本機劇本模型尚未就緒，請先重新檢查模型。";
     if (!state.videoReady) return state.videoError || "影片引擎尚未就緒，請先在影片工作室檢查連線與模型。";
+    const modelError = scriptVideoModelError(project); if (modelError) return modelError;
     if (state.referenceUploads.size) return "角色參考圖還在上傳，請完成後再開始製作影片。";
-    if (project.custom_loras?.length && !state.lorasSupported) return "主機尚未確認支援劇本 LoRA；選擇已保留，請更新主機後重新檢查，或明確移除選擇。";
-    const loraError = scriptLoraSelectionError(project.custom_loras, { video: true, catalog: state.loraCatalog }); if (loraError) return loraError;
+    if (project.video_settings?.video_model !== "fasth3_omni_nvfp4") {
+      if (project.custom_loras?.length && !state.lorasSupported) return "主機尚未確認支援劇本 LoRA；選擇已保留，請更新主機後重新檢查，或明確移除選擇。";
+      const loraError = scriptLoraSelectionError(project.custom_loras, { video: true, catalog: state.loraCatalog }); if (loraError) return loraError;
+    }
     return scriptVideoReferencesError(project);
+  }
+
+  function scriptVideoModelError(project) {
+    const selection = project?.video_settings?.video_model || "h3";
+    if (!["h3", "fasth3_omni_nvfp4"].includes(selection)) return "這份設定使用尚未支援的影片模型；原選擇已保留，請明確選擇 H3 或 FastH3 後再製作影片。";
+    if (!state.videoModelSupported) return selection === "h3" ? "" : "FastH3 需要新版 Studio；請重新啟動主機，再按「重新檢查」。";
+    const profile = state.videoModels.find(item => item.id === selection);
+    if (!profile) return "目前主機未提供所選影片模型，選擇已保留。";
+    if (!profile.ready || profile.mode_ready?.r2v === false) return profile.error || "所選影片模型的多模態生成尚未就緒。";
+    if (Array.isArray(profile.modes) && !profile.modes.includes("r2v")) return "所選影片模型尚未支援劇本所需的多模態模式，請切換 H3。";
+    return "";
   }
 
   function upsertPipeline(pipeline) {
@@ -1035,7 +1077,7 @@ if (typeof document !== "undefined") {
     return Number.isNaN(date.getTime()) ? "完成日期未提供" : date.toLocaleString("zh-TW", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
 
-  function historyVideoDetail(record) { return `完成於 ${historyVideoDate(record.completed_at)} · ${record.duration ? `目標片長 ${Number(record.duration.toFixed(3))} 秒` : "片長未提供"} · ${scriptVideoFormatLabel(record.video_format || scriptVideoDimensions())}`; }
+  function historyVideoDetail(record) { return `完成於 ${historyVideoDate(record.completed_at)} · ${scriptVideoModelLabel(record.video_model)} · ${record.duration ? `目標片長 ${Number(record.duration.toFixed(3))} 秒` : "片長未提供"} · ${scriptVideoFormatLabel(record.video_format || scriptVideoDimensions())}`; }
 
   function renderVideoHistory() {
     const records = state.videoHistoryScope === "all" ? state.historyVideos : state.historyVideos.filter(item => item.project_id === state.project.id);
@@ -1093,14 +1135,14 @@ if (typeof document !== "undefined") {
     for (const pipeline of pipelines) {
       const button = document.createElement("button"), title = document.createElement("strong"), detail = document.createElement("small");
       button.type = "button"; button.className = `script-pipeline-row${pipeline.id === state.selectedPipelineId ? " selected" : ""}`; button.dataset.pipelineId = pipeline.id; button.setAttribute("aria-pressed", String(pipeline.id === state.selectedPipelineId));
-      title.textContent = pipelineTitle(pipeline); const view = scriptPipelinePresentation(pipeline); detail.textContent = `${dateLabel(pipeline.created_at)} · ${view.label} · ${view.stage} · ${scriptVideoFormatLabel(scriptPipelineVideoFormat(pipeline))}`;
+      title.textContent = pipelineTitle(pipeline); const view = scriptPipelinePresentation(pipeline); detail.textContent = `${dateLabel(pipeline.created_at)} · ${view.label} · ${view.stage} · ${scriptVideoModelLabel(scriptPipelineVideoModel(pipeline))} · ${scriptVideoFormatLabel(scriptPipelineVideoFormat(pipeline))}`;
       button.append(title, detail); button.addEventListener("click", () => selectPipeline(pipeline.id)); list.append(button);
     }
     const pipeline = state.pipeline, view = scriptPipelinePresentation(pipeline);
     $("scriptVideoPipelineBadge").textContent = view.label; $("scriptVideoPipelineBadge").className = `script-job-badge ${pipeline?.status || ""}`;
     $("scriptVideoPipelineStage").textContent = pipeline ? `${pipelineTitle(pipeline)} · ${view.stage}` : view.stage;
     $("scriptVideoPipelineDetail").textContent = pipeline?.error || pipeline?.waiting_reason || (pipeline ? view.active ? "由 Studio 主機接續製作；生成稿會保留，可繼續編輯原稿。" : pipeline.status === "completed" ? "影片製作完成，可播放、下載或開啟短片接續編輯。" : "目前成果與生成紀錄已保留，檢查後可接續製作。" : "劇本 → 分鏡 → 短片 → 多模態影片 → 組片；原編輯稿不會被覆寫。");
-    if (pipeline) $("scriptVideoPipelineDetail").textContent += ` · ${scriptVideoFormatLabel(scriptPipelineVideoFormat(pipeline))}`;
+    if (pipeline) $("scriptVideoPipelineDetail").textContent += ` · ${scriptVideoModelLabel(scriptPipelineVideoModel(pipeline))} · ${scriptVideoFormatLabel(scriptPipelineVideoFormat(pipeline))}`;
     $("scriptVideoPipelineDetail").classList.toggle("error", pipeline?.status === "failed");
     $("scriptVideoPipelineProgress").value = view.progress; $("scriptVideoPipelineProgressText").textContent = `${Math.round(view.progress)}%`;
     const steps = $("scriptVideoStageList"); steps.replaceChildren(); const ordered = ["screenplay", "storyboard", "import", "render", "assemble"], current = pipeline?.status === "completed" ? ordered.length : ordered.indexOf(pipeline?.stage);
@@ -1167,7 +1209,10 @@ if (typeof document !== "undefined") {
   async function resumePipeline() {
     const pipeline = state.pipeline; if (!pipeline || !["failed", "cancelled", "canceled", "interrupted"].includes(pipeline.status) || state.pipelineStarting || state.loading || state.saving) return;
     if (!state.videoPipelinesSupported || !state.videoReady) { message(state.videoError || "影片引擎尚未就緒，請先重新檢查。", true); return; }
-    const loras = pipeline.snapshot?.custom_loras || pipeline.snapshot?.project?.custom_loras || [];
+    const settings = pipeline.video_settings || pipeline.snapshot?.video_settings || pipeline.snapshot?.project?.video_settings;
+    const modelError = scriptVideoModelError({ video_settings: settings });
+    if (modelError) { message(modelError, true); return; }
+    const loras = settings?.video_model === "fasth3_omni_nvfp4" ? [] : pipeline.snapshot?.custom_loras || pipeline.snapshot?.project?.custom_loras || [];
     if (loras.length && !state.lorasSupported) { message("主機尚未確認支援原流程的 LoRA 設定；原設定與已完成片段仍保留，請重新檢查後再接續。", true, "loras-support"); return; }
     const loraError = scriptLoraSelectionError(loras, { video: true, catalog: state.loraCatalog }); if (loraError) { message(loraError, true); return; }
     state.pipelineStarting = true; updateControls();
@@ -1339,7 +1384,9 @@ if (typeof document !== "undefined") {
 
   async function importStoryboard() {
     if (!scriptJobPresentation(state.job).canImport || state.importing || state.job.project_id !== state.project.id) return;
-    const loras = state.job.input?.project?.custom_loras || [];
+    const selection = state.job.input?.project?.video_settings?.video_model || "h3";
+    if (!["h3", "fasth3_omni_nvfp4"].includes(selection)) { message("這筆紀錄使用尚未支援的影片模型；未匯入分鏡，請更新 Studio 或選擇其他紀錄。", true); return; }
+    const loras = state.job.input?.project?.video_settings?.video_model === "fasth3_omni_nvfp4" ? [] : state.job.input?.project?.custom_loras || [];
     if (loras.length && !state.lorasSupported) { message("主機尚未確認支援劇本 LoRA，生成紀錄與原選擇仍保留；請更新主機後重新檢查再匯入分鏡。", true, "loras-support"); return; }
     const loraError = scriptLoraSelectionError(loras, { video: true, catalog: state.loraCatalog }); if (loraError) { message(loraError, true); return; }
     const id = state.job.id;
@@ -1407,7 +1454,7 @@ if (typeof document !== "undefined") {
 
   function bindEvents() {
     for (const id of Object.values(fieldIds)) $(id).addEventListener("input", markDirty);
-    for (const id of Object.values(videoFieldIds)) $(id).addEventListener("change", markDirty);
+    for (const [field, id] of Object.entries(videoFieldIds)) $(id).addEventListener("change", () => { if (field === "video_model") state.videoModelTouched = true; markDirty(); renderScriptLoras(); updateControls(); });
     $("scriptWritingSkill").addEventListener("change", markDirty);
     $("scriptGenre").addEventListener("change", markDirty);
     $("applyScriptSkillRecommendation").addEventListener("click", applyWritingSkillRecommendation);

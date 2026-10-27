@@ -14,6 +14,7 @@ function fixture(shots = []) {
   const context = vm.createContext({
     project: {id: 'project', assets: [], scenes: [{id: 'scene', title: 'scene', shots}]},
     shortFilmBatchRunning: false, shortFilmBatch: null, shortFilmBatchLoading: false,
+    videoModelSupported: false, videoModelProfiles: [],
     shortFilmRecoveries: new Map(),
     getShortFilmSaveCoordinator: () => ({status: () => ({state: 'saved'})}),
     shortFilmProjects: [], messages: [], submissions: [], waits: [], locks: [], calls: [],
@@ -44,7 +45,7 @@ function fixture(shots = []) {
     },
     async waitForShortFilmJob(id) { context.waits.push(id); return {status: 'completed'}; },
   });
-  for (const name of ['shortFilmFlatten', 'shortFilmSegmentDraft', 'shortFilmSegmentPreview', 'shortFilmAliasMentioned', 'shortFilmShotAssetSelection', 'shortFilmShotReferenceUsage', 'shortFilmBatchBlockers', 'buildShortFilmSegmentRows', 'findShortFilmShot', 'renderShortFilmBatch', 'loadShortFilmBatchStatus', 'runShortFilmBatch', 'stopShortFilmBatch']) {
+  for (const name of ['videoModelSelectionError', 'shortFilmFlatten', 'shortFilmSegmentDraft', 'shortFilmSegmentPreview', 'shortFilmAliasMentioned', 'shortFilmShotAssetSelection', 'shortFilmShotReferenceUsage', 'shortFilmBatchBlockers', 'buildShortFilmSegmentRows', 'findShortFilmShot', 'renderShortFilmBatch', 'loadShortFilmBatchStatus', 'runShortFilmBatch', 'stopShortFilmBatch']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), context);
@@ -54,6 +55,20 @@ function fixture(shots = []) {
 }
 
 const shot = (index, overrides = {}) => ({id: `s${index}`, title: `shot ${index}`, action: 'walk', duration: 5, status: 'draft', asset_ids: [], continue_previous: index > 0, ...overrides});
+
+test('short-film batch tracking and resume use the frozen model independently of edited settings',async()=>{
+  const {context,element}=fixture([shot(0)]);
+  context.project.video_model='h3';
+  context.renderShortFilmBatch({id:'fast-batch',status:'interrupted',snapshot:{video_model:'fasth3_omni_nvfp4'}});
+  assert.match(element('#shortfilmBatchNote').textContent,/FastH3-Omni NVFP4/);
+  await context.runShortFilmBatch(true);
+  assert.equal(context.calls.length,0);assert.match(context.messages.at(-1),/重新啟動/);
+  context.videoModelSupported=true;
+  context.videoModelProfiles=[{id:'h3',ready:false,error:'H3 absent'},{id:'fasth3_omni_nvfp4',ready:true}];
+  await context.runShortFilmBatch(true);
+  assert.deepEqual(context.calls,['/api/shortfilm-batches/fast-batch/resume']);
+  assert.equal(context.project.video_model,'h3');
+});
 
 test('60 / 5 builds 12 editable rows and does not alter existing scenes', () => {
   const {context, element, run} = fixture([shot(0)]);

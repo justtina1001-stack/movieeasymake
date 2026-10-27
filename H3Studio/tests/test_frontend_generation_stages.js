@@ -16,7 +16,7 @@ function fixture() {
   const element = selector => {
     if (!elements.has(selector)) {
       const classes = new Set(['hidden']), attributes = {}, label = {textContent: '開始生成影片'};
-      elements.set(selector, {value: '5', checked: false, disabled: false, textContent: '', innerHTML: '', label,
+      elements.set(selector, {value: selector === '#videoModel' ? 'h3' : '5', checked: false, disabled: false, textContent: '', innerHTML: '', label,
         classList: {remove: name => classes.delete(name), add: name => classes.add(name), contains: name => classes.has(name), toggle() {}},
         setAttribute: (name, value) => attributes[name] = value, removeAttribute: name => delete attributes[name],
         getAttribute: name => attributes[name] || 'false', querySelector: () => label, scrollIntoView() {} });

@@ -69,7 +69,7 @@ function fixture(handler, { confirm = () => true, referencesSupported = true, re
     navigator: { clipboard: { async writeText(value) { clipboard.push(value); } } },
     async fetch(url, options) { calls.push({ url, options }); return handler ? handler(url, options) : response({}); },
   });
-  const exposed = source.replace('start().catch(error => message(error.message, true));', 'globalThis.scriptTest = { state, message, writeProject, readProject, markDirty, saveProject, switchProject, applyMonkeyExample, loadJobs, renderHistory, renderPreview, selectJob, deleteJob, changeHistoryScope, openJobProject, applyResult, restoreDraft, offerDraft, generate, crossTabChanged, saveSettings, addReference, removeReference, uploadReferenceImage, renderReferences, exportDraft, refreshEngine, renderPipelines, selectPipeline, loadPipelines, startVideoPipeline, cancelPipeline, resumePipeline, selectedVideoSourceJob, bindEvents, renderWritingSkills, renderWritingSkillDetails, applyWritingSkillRecommendation, loadWritingSkills, receiveVideoHistory, renderVideoHistory, selectHistoryVideo, changeVideoHistoryScope, refreshVideoHistory }; writeProject(state.project);');
+  const exposed = source.replace('start().catch(error => message(error.message, true));', 'globalThis.scriptTest = { state, message, writeProject, readProject, markDirty, saveProject, switchProject, applyMonkeyExample, loadJobs, renderHistory, renderPreview, selectJob, deleteJob, changeHistoryScope, openJobProject, applyResult, restoreDraft, offerDraft, generate, crossTabChanged, saveSettings, addReference, removeReference, uploadReferenceImage, renderReferences, exportDraft, refreshEngine, renderPipelines, selectPipeline, loadPipelines, startVideoPipeline, cancelPipeline, resumePipeline, selectedVideoSourceJob, scriptVideoModelError, bindEvents, renderWritingSkills, renderWritingSkillDetails, applyWritingSkillRecommendation, loadWritingSkills, receiveVideoHistory, renderVideoHistory, selectHistoryVideo, changeVideoHistoryScope, refreshVideoHistory }; writeProject(state.project);');
   vm.runInContext(loraHelpSource, context);
   vm.runInContext(exposed.replace('globalThis.scriptTest = { state,', 'globalThis.scriptTest = { loadScriptLoras, renderScriptLoras, addScriptLora, importStoryboard, state,'), context);
   Object.assign(context.scriptTest.state, { lorasSupported, lorasSupportKnown });
@@ -545,7 +545,7 @@ test('old short-cut validation failures show a recovery hint without changing th
     ui.state.job = { ...ui.state.job, error, action: 'storyboard', status: 'failed', ...change }; ui.renderPreview();
     assert.doesNotMatch(elements.get('scriptJobDetail').textContent, /短切鏡需合併/);
   }
-  assert.match(html, /scripts\.js\?v=20261012-video-format/);
+  assert.match(html, /scripts\.js\?v=20261027-fasth3/);
 });
 
 function cameraCorrection(overrides = {}) { return { scene_index: 0, shot_index: 0, original_camera: '35mm low-angle tracking shot', original_camera_detail: '鏡頭跟隨主角前進', camera: 'custom', camera_detail: '35mm low-angle tracking shot\n鏡頭跟隨主角前進', ...overrides }; }
@@ -1282,7 +1282,7 @@ test('pipeline stages, progress, failed details and original-settings resume con
   ui.state.pipelines = [pipeline]; ui.state.pipeline = pipeline; ui.state.selectedPipelineId = pipeline.id; ui.renderPipelines();
   assert.equal(elements.get('scriptVideoPipelineStage').textContent, '雨停之前 · 生成影片');
   assert.equal(elements.get('scriptVideoPipelineProgress').value, 67);
-  assert.equal(elements.get('scriptVideoPipelineDetail').textContent, `${pipeline.error} · 生成 864 × 480 → 成片 864 × 480 · MP4 · 24 fps`);
+  assert.equal(elements.get('scriptVideoPipelineDetail').textContent, `${pipeline.error} · MiniMax H3 · 生成 864 × 480 → 成片 864 × 480 · MP4 · 24 fps`);
   assert.equal(elements.get('resumeScriptVideoPipeline').classes.has('hidden'), false);
   assert.equal(elements.get('scriptVideoResumeHint').classes.has('hidden'), false);
   assert.match(html, /接續使用原設定與原參考圖/);
@@ -1466,7 +1466,7 @@ test('H3 sources retain reviewed provenance and repository counts without presen
   assert.equal(rendered.children[3].rel, 'noopener noreferrer');
   assert.equal(elements.get('scriptSkillVersion').textContent, '方法版本：20261006-h3');
   assert.match(html, /Stars 為倉庫關注度，並非成片品質評分/);
-  assert.match(html, /scripts\.js\?v=20261012-video-format/);
+  assert.match(html, /scripts\.js\?v=20261027-fasth3/);
   elements.get('scriptWritingSkill').value = 'h3-performance-beats'; ui.renderWritingSkillDetails();
   assert.match(elements.get('scriptSkillSources').children[0].children[2].textContent, /社群來源.*倉庫 ⭐ 175.*Forks 4/);
 });
@@ -2065,6 +2065,38 @@ test('video settings default for legacy projects and valid selections are deep c
   assert.equal(outcome.dirty, true); assert.equal(outcome.project.video_settings.output_resolution, '720p');
 });
 
+test('Fast video model is preserved in settings without rewriting the legacy default shape', () => {
+  assert.equal(Object.hasOwn(normalizeScriptVideoSettings({}), 'video_model'), false);
+  const settings = { video_model: 'fasth3_omni_nvfp4', aspect_ratio: '9:16', megapixels: 0.7, output_resolution: '1080p' };
+  assert.deepEqual(normalizeScriptVideoSettings(settings), settings);
+  assert.notEqual(scriptProjectSignature(project({ video_settings: settings })), scriptProjectSignature(project()));
+});
+
+test('script model selector persists Fast drafts and keeps H3 LoRA choices available for switching back', async () => {
+  const {ui,elements,stored}=fixture();
+  ui.writeProject(project({custom_loras:[lora({name:'h3-kept.safetensors'})]}));ui.bindEvents();
+  elements.get('scriptVideoModel').value='fasth3_omni_nvfp4';await elements.get('scriptVideoModel').dispatch('change');
+  assert.equal(ui.readProject().video_settings.video_model,'fasth3_omni_nvfp4');
+  assert.equal(ui.readProject().custom_loras[0].name,'h3-kept.safetensors');
+  assert.equal(elements.get('scriptVideoLoraSection').classes.has('hidden'),true);
+  const saved=JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))['project-a'].project;
+  ui.writeProject(saved);assert.equal(elements.get('scriptVideoModel').value,'fasth3_omni_nvfp4');
+  elements.get('scriptVideoModel').value='h3';await elements.get('scriptVideoModel').dispatch('change');
+  assert.equal(ui.readProject().video_settings.video_model,'h3');
+  assert.equal(ui.readProject().custom_loras[0].name,'h3-kept.safetensors');
+  assert.equal(elements.get('scriptVideoLoraSection').classes.has('hidden'),false);
+});
+
+test('script model gating distinguishes old hosts and each model readiness', () => {
+  const {ui}=fixture();const fast={video_settings:{video_model:'fasth3_omni_nvfp4'}};
+  assert.match(ui.scriptVideoModelError(fast),/重新啟動/);assert.equal(ui.scriptVideoModelError(project()),'');
+  ui.state.videoModelSupported=true;
+  ui.state.videoModels=[{id:'h3',ready:false,error:'H3 missing'},{id:'fasth3_omni_nvfp4',ready:true,modes:['r2v'],mode_ready:{r2v:true}}];
+  assert.equal(ui.scriptVideoModelError(fast),'');assert.equal(ui.scriptVideoModelError(project()),'H3 missing');
+  ui.state.videoModels[1].ready=false;ui.state.videoModels[1].error='Fast unsupported GPU';
+  assert.equal(ui.scriptVideoModelError(fast),'Fast unsupported GPU');
+});
+
 test('all six aspect ratios and four precision choices show exact H3 dimensions and configured MP4 dimensions', () => {
   const grids = {
     '16:9': [[864,480],[1152,640],[1280,736],[1344,768]],
@@ -2181,4 +2213,50 @@ test('resume uses its frozen format without saving or sending the edited future 
   assert.equal(calls.length,1); assert.equal(calls[0].options.body,'{}'); assert.ok(calls[0].url.endsWith('/resume'));
   assert.deepEqual(JSON.parse(JSON.stringify(ui.readProject().video_settings)),edited);
   assert.match(elements.get('scriptVideoPipelineDetail').textContent,/生成 640 × 1152 → 成片 720 × 1280/);
+});
+
+test('Fast resume uses its frozen model and omits retained H3 adapters from its compatibility gate', async () => {
+  const frozen = { aspect_ratio: '9:16', megapixels: 0.4, output_resolution: 'native', video_model: 'fasth3_omni_nvfp4' };
+  const previous = pipelineRecord({ status: 'interrupted', snapshot: { project: project({ video_settings: frozen, custom_loras: [lora({ family: 'fl2va' })] }) } });
+  delete previous.video_settings;
+  const { ui, calls } = fixture(async () => response({ ...previous, status: 'running' }), { lorasSupported: false });
+  prepareVideo(ui, { custom_loras: [lora({ family: 'fl2va' })] });
+  Object.assign(ui.state, { videoModelSupported: true, videoModels: [{ id: 'h3', ready: false, error: 'H3 absent' }, { id: 'fasth3_omni_nvfp4', ready: true, modes: ['r2v'] }] });
+  ui.state.pipeline = previous; ui.state.selectedPipelineId = previous.id;
+  await ui.resumePipeline();
+  assert.equal(calls.length, 1); assert.ok(calls[0].url.endsWith('/resume')); assert.equal(calls[0].options.body, '{}');
+  assert.equal(ui.readProject().video_settings.video_model, undefined);
+  assert.equal(ui.readProject().custom_loras[0].family, 'fl2va');
+});
+
+test('queued pipeline and finished video history identify the frozen model after future settings change', () => {
+  const { ui, elements } = fixture(); prepareVideo(ui);
+  const pipeline = pipelineRecord({ video_settings: { ...project().video_settings, video_model: 'fasth3_omni_nvfp4' } });
+  ui.state.pipelines = [pipeline]; ui.state.pipeline = pipeline; ui.renderPipelines();
+  assert.match(elements.get('scriptVideoPipelineDetail').textContent, /FastH3-Omni NVFP4/);
+  assert.match(flatText(elements.get('scriptVideoPipelineHistory')), /FastH3-Omni NVFP4/);
+  assert.equal(ui.readProject().video_settings.video_model, undefined);
+  const completed = { ...pipeline, status: 'completed', video_url: `/api/editor/exports/${'d'.repeat(32)}/file` };
+  ui.receiveVideoHistory({ items: [completed] }); ui.selectHistoryVideo(completed.id);
+  assert.match(elements.get('scriptHistoryVideoDetail').textContent, /FastH3-Omni NVFP4/);
+  assert.equal(scriptVideoHistoryRecord(completed).video_model, 'fasth3_omni_nvfp4');
+  const legacy = { ...completed }; delete legacy.video_settings;
+  assert.equal(scriptVideoHistoryRecord(legacy).video_model, 'h3');
+});
+
+test('unknown model drafts and exports preserve identity while saves imports and frozen resumes are blocked', async () => {
+  const unknown={...project().video_settings,video_model:'future_video_model'};
+  assert.equal(normalizeScriptVideoSettings(unknown).video_model,'future_video_model');
+  const {ui,elements,calls,downloads,stored}=fixture();prepareVideo(ui,{video_settings:unknown});ui.bindEvents();
+  assert.equal(elements.get('scriptVideoModel').value,'future_video_model');
+  assert.ok(elements.get('scriptVideoModel').options.some(option=>option.value==='future_video_model'&&/不支援/.test(option.textContent)));
+  assert.match(ui.scriptVideoModelError(ui.readProject()),/尚未支援/);
+  ui.markDirty();assert.equal(await ui.saveProject(),false);await ui.startVideoPipeline();
+  assert.equal(calls.length,0);assert.equal(JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))['project-a'].project.video_settings.video_model,'future_video_model');
+  elements.get('scriptExportFormat').value='json';ui.exportDraft();assert.equal(JSON.parse(await downloads[0].text()).video_settings.video_model,'future_video_model');
+  const pipeline=pipelineRecord({status:'interrupted',video_settings:unknown});ui.state.pipeline=pipeline;ui.state.selectedPipelineId=pipeline.id;
+  await ui.resumePipeline();assert.equal(calls.length,0);
+  ui.state.job={id:'unknown-storyboard',project_id:'project-a',status:'completed',action:'storyboard',content:'{}',input:{project:project({video_settings:unknown})}};
+  await ui.importStoryboard();assert.equal(calls.length,0);assert.match(elements.get('scriptMessage').textContent,/未匯入分鏡/);
+  elements.get('scriptVideoModel').value='h3';await elements.get('scriptVideoModel').dispatch('change');assert.equal(ui.readProject().video_settings.video_model,'h3');
 });

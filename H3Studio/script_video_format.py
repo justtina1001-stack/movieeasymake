@@ -6,6 +6,7 @@ import math
 from typing import Any
 
 from domain import ASPECT_RATIOS, compute_dimensions
+from video_models import normalize_video_model
 
 
 DEFAULT_VIDEO_SETTINGS = {"aspect_ratio": "16:9", "megapixels": 0.4, "output_resolution": "native"}
@@ -27,9 +28,14 @@ def normalize_video_settings(value: Any = None, *, previous: dict[str, Any] | No
     result = normalize_video_settings(previous) if previous is not None else copy.deepcopy(DEFAULT_VIDEO_SETTINGS)
     if value is None:
         return result
-    if not isinstance(value, dict) or set(value) - set(DEFAULT_VIDEO_SETTINGS):
+    if not isinstance(value, dict) or set(value) - (set(DEFAULT_VIDEO_SETTINGS) | {"video_model"}):
         raise ScriptVideoFormatError("影片格式設定錯誤，請重新選擇畫面比例與解析度。")
     result.update(value)
+    if "video_model" in result:
+        try:
+            result["video_model"] = normalize_video_model(result["video_model"])
+        except ValueError as error:
+            raise ScriptVideoFormatError(str(error)) from error
     if not isinstance(result["aspect_ratio"], str) or result["aspect_ratio"] not in ASPECT_RATIOS:
         raise ScriptVideoFormatError("請選擇支援的影片畫面比例。")
     megapixels = result["megapixels"]
