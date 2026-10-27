@@ -14,8 +14,8 @@ from PIL import Image
 
 import app as studio
 from domain import RequestError
-from flux3_image import EDIT_SYSTEM_PROMPT, compatible_nodes
-from flux3_image_models import MODEL_FILES as FLUX_FILES, STEPS
+from flux3_image import EDIT_SYSTEM_PROMPT, GENERATION_SYSTEM_PROMPT, compatible_nodes
+from flux3_image_models import GENERATION_MAX_PIXELS, MODEL_FILES as FLUX_FILES, STEPS
 from qwen_image import ImageJobManager, build_image_workflow, compile_image_request, image_capabilities
 from qwen_image_models import MODEL_FILES as QWEN_FILES, TURBO_MODEL_FILE
 from tests.test_qwen_image import variant_schemas
@@ -48,6 +48,7 @@ def flux_schemas(qwen=True, flux=True):
         "PreviewAny": node(fields(source="*"), ["STRING"], output_node=True),
         "CLIPTextEncode": node(fields(clip="CLIP", text="STRING"), ["CONDITIONING"]),
         "ConditioningZeroOut": node(fields(conditioning="CONDITIONING"), ["CONDITIONING"]),
+        "EmptyFlux2LatentImage": node(fields(width="INT", height="INT", batch_size="INT"), ["LATENT"]),
         "ReferenceMultiLatent": node({**fields(positive="CONDITIONING"),
             "resolution": ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "resize", "inputs": {"required": fields(megapixels="FLOAT")}}]}]},
             ["CONDITIONING", "CONDITIONING", "LATENT"],
@@ -80,13 +81,49 @@ class Flux3CompileTests(unittest.TestCase):
         self.assertEqual(compiled["lora_strength"], 0)
 
     def test_unverified_features_are_rejected_without_discarding_them(self):
-        for change, message in (({"mode": "generate", "image_asset_ids": []}, "參考圖編輯"),
+        for change, message in (({"mode": "generate"}, "不使用參考圖片"),
                                 ({"image_asset_ids": []}, "單張"),
                                 ({"image_asset_ids": [IMAGE_ID, "b" * 32]}, "單張"),
                                 ({"transparent": True}, "透明"),
                                 ({"lora_name": "qwen_image_2_1/style.safetensors", "lora_strength": 0}, "LoRA")):
             with self.subTest(change=change), self.assertRaisesRegex(RequestError, message):
                 compile_image_request(payload(**change))
+
+    def test_generation_uses_requested_dimensions_and_explicit_one_megapixel_limit(self):
+        for width, height in ((1024, 1024), (1344, 768), (768, 1344), (2048, 512), (256, 256)):
+            with self.subTest(width=width, height=height):
+                compiled = compile_image_request(payload(mode="generate", image_asset_ids=[], width=width, height=height))
+                self.assertEqual((compiled["width"], compiled["height"], compiled["steps"]), (width, height, 16))
+                self.assertEqual(compiled["output_size_policy"], "requested_dimensions")
+                self.assertNotIn("reference_megapixels", compiled)
+                self.assertEqual(compiled["prompt"], compiled["original_prompt"])
+        for width, height in ((1056, 1024), (2048, 2048), (True, 1024), (1024, 1000), (224, 1024)):
+            with self.subTest(width=width, height=height), self.assertRaises(RequestError):
+                compile_image_request(payload(mode="generate", image_asset_ids=[], width=width, height=height))
+
+    def test_generation_graph_uses_native_flux_latent_and_distinct_image_free_upsampler(self):
+        compiled = compile_image_request(payload(mode="generate", image_asset_ids=[], width=1344, height=768))
+        graph = build_image_workflow(compiled, {}, "new-image")
+        self.assertEqual(graph["17"], {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": 1344, "height": 768, "batch_size": 1}})
+        self.assertEqual(graph["6"]["inputs"]["latent_image"], ["17", 0])
+        self.assertEqual(graph["6"]["inputs"]["positive"], ["4", 0])
+        self.assertEqual(graph["6"]["inputs"]["negative"], ["5", 0])
+        self.assertEqual(graph["5"], {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": ""}})
+        self.assertEqual(graph["47"]["inputs"]["prompt"], "TARGET CANVAS: 1344:768\n" + compiled["prompt"])
+        self.assertNotIn("image", graph["47"]["inputs"])
+        self.assertEqual(graph["47"]["inputs"]["system_prompt"], GENERATION_SYSTEM_PROMPT)
+        self.assertNotEqual(GENERATION_SYSTEM_PROMPT, EDIT_SYSTEM_PROMPT)
+        self.assertGreater(len(GENERATION_SYSTEM_PROMPT), 3000)
+        self.assertEqual(graph["47"]["inputs"]["max_length"], 3584)
+        self.assertEqual(graph["47"]["inputs"]["sampling_mode.presence_penalty"], 1.5)
+        self.assertEqual(graph["6"]["inputs"]["seed"], graph["47"]["inputs"]["sampling_mode.seed"])
+        self.assertEqual((graph["6"]["inputs"]["steps"], graph["6"]["inputs"]["cfg"], graph["6"]["inputs"]["sampler_name"], graph["6"]["inputs"]["scheduler"]), (16, 1.0, "euler", "simple"))
+        self.assertEqual(graph["48"]["inputs"]["source"], ["47", 0])
+        self.assertEqual(graph["8"]["class_type"], "SaveImage")
+        self.assertFalse({"LoadImage", "ReferenceMultiLatent", "ConditioningZeroOut"} & {item["class_type"] for item in graph.values()})
+        for change in ({"width": 2048, "height": 2048}, {"transparent": True}, {"lora_name": "anything"}):
+            with self.subTest(change=change), self.assertRaises(RequestError):
+                build_image_workflow({**compiled, **change}, {}, "job")
 
     def test_workflow_uses_reference_latent_and_real_prompt_upsampler(self):
         compiled = compile_image_request(payload())
@@ -142,7 +179,9 @@ class Flux3CapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(flux["id"], "flux3")
         self.assertTrue(flux["ready"])
         self.assertEqual(flux["reference_limit"], 1)
-        self.assertEqual(flux["modes"], ["edit"])
+        self.assertEqual(flux["modes"], ["generate", "edit"])
+        self.assertEqual(flux["mode_ready"], {"generate": True, "edit": True})
+        self.assertEqual(flux["generation_max_pixels"], GENERATION_MAX_PIXELS)
         self.assertFalse(flux["transparent_supported"])
         self.assertEqual(len(flux["models"]), 4)
         self.assertTrue(seen and all(value == "Bearer test" for value in seen))
@@ -178,9 +217,34 @@ class Flux3CapabilityTests(unittest.IsolatedAsyncioTestCase):
                 mutate(schemas[name])
                 result = await image_capabilities(comfy)
                 self.assertTrue(result["variants"][0]["ready"])
-                self.assertFalse(result["variants"][2]["ready"])
-                self.assertIn("節點", result["variants"][2]["error"])
+                flux = result["variants"][2]
+                self.assertFalse(flux["mode_ready"]["edit"])
+                self.assertEqual(flux["mode_ready"]["generate"], name == "ReferenceMultiLatent")
+                self.assertIn("節點", flux["mode_errors"]["edit"])
                 schemas[name] = original
+
+    async def test_generation_and_edit_node_readiness_are_independent(self):
+        for missing, ready_modes in (("EmptyFlux2LatentImage", {"generate": False, "edit": True}),
+                                     ("ReferenceMultiLatent", {"generate": True, "edit": False}),
+                                     ("LoadImage", {"generate": True, "edit": False}),
+                                     ("ConditioningZeroOut", {"generate": True, "edit": False})):
+            with self.subTest(missing=missing):
+                schemas = flux_schemas()
+                schemas.pop(missing)
+                comfy, _ = await self.engine(schemas)
+                result = await image_capabilities(comfy)
+                flux = result["variants"][2]
+                self.assertTrue(flux["ready"])
+                self.assertEqual(flux["mode_ready"], ready_modes)
+                self.assertTrue(result["variants"][0]["ready"])
+        schemas = flux_schemas()
+        schemas["TextGenerate"]["input"]["required"]["image"] = schemas["TextGenerate"]["input"]["optional"].pop("image")
+        self.assertFalse(compatible_nodes(schemas, "generate"))
+        self.assertTrue(compatible_nodes(schemas, "edit"))
+        schemas = flux_schemas()
+        schemas["EmptyFlux2LatentImage"]["output"] = ["IMAGE"]
+        self.assertFalse(compatible_nodes(schemas, "generate"))
+        self.assertTrue(compatible_nodes(schemas, "edit"))
 
     async def test_partial_local_model_is_not_ready(self):
         comfy, _ = await self.engine(flux_schemas())
@@ -232,6 +296,75 @@ class Flux3ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 400)
         self.assertIn("透明", (await response.json())["error"])
         self.assertFalse(self.manager.jobs)
+
+    async def test_generate_completes_without_uploads_and_preserves_requested_canvas(self):
+        content = io.BytesIO()
+        Image.new("RGB", (512, 768), "green").save(content, format="PNG")
+        history = {"outputs": {"8": {"images": [{"filename": "generated.png", "type": "output"}]},
+                               "48": {"text": ["A vertical photograph of a green ceramic vase."]}}}
+        async def run(graph, callback, event):
+            self.assertEqual(graph["17"]["class_type"], "EmptyFlux2LatentImage")
+            self.assertNotIn("image", graph["47"]["inputs"])
+            await callback({"prompt_id": "owned-generation", "progress": 100})
+            return "owned-generation", history
+        profile = {"id": "flux3", "ready": True, "modes": ["generate", "edit"], "mode_ready": {"generate": True, "edit": False}}
+        with patch("qwen_image.image_capabilities", new=AsyncMock(return_value={"ready": True, "variants": [profile]})), \
+             patch.object(self.manager.comfy, "ensure_running", new=AsyncMock()), \
+             patch.object(self.manager.comfy, "upload_asset", new=AsyncMock()) as upload, \
+             patch.object(self.manager.comfy, "run_prompt", side_effect=run), \
+             patch.object(self.manager.comfy, "fetch_output", new=AsyncMock(return_value=(content.getvalue(), "image/png"))):
+            response = await self.client.post("/api/images/jobs", json=payload(mode="generate", image_asset_ids=[], width=512, height=768))
+            self.assertEqual(response.status, 202)
+            job = await response.json()
+            await self.manager.tasks[job["id"]]
+        upload.assert_not_called()
+        final = self.manager.jobs[job["id"]]
+        self.assertEqual((final["status"], final["mode"], final["width"], final["height"]), ("completed", "generate", 512, 768))
+        self.assertEqual(final["model_variant"], "flux3")
+        self.assertEqual(final["output_size_policy"], "requested_dimensions")
+        self.assertEqual(final["expanded_prompt"], "A vertical photograph of a green ceramic vase.")
+        self.assertEqual(final["prompt"], final["original_prompt"])
+        response = await self.client.get(f"/api/images/jobs/{job['id']}/image")
+        self.assertEqual(response.status, 200)
+        with Image.open(io.BytesIO(await response.read())) as image:
+            self.assertEqual(image.size, (512, 768))
+        response = await self.client.post(f"/api/images/jobs/{job['id']}/reference")
+        self.assertEqual(response.status, 200)
+        reference = await response.json()
+        with Image.open(self.app["assets"].path_for(reference["id"])) as image:
+            self.assertEqual(image.size, (512, 768))
+        restored = ImageJobManager(self.manager.comfy, self.root, self.manager.gpu_lock, self.app["assets"])
+        self.assertEqual(restored.jobs[job["id"]]["mode"], "generate")
+
+    async def test_generation_requires_its_mode_even_when_the_edit_model_is_ready(self):
+        profiles = (
+            {"id": "flux3", "ready": True, "modes": ["edit"]},
+            {"id": "flux3", "ready": True, "modes": ["generate", "edit"],
+             "mode_ready": {"generate": False, "edit": True}, "mode_errors": {"generate": "缺少文字生圖節點"}},
+        )
+        for profile in profiles:
+            with self.subTest(profile=profile), \
+                 patch("qwen_image.image_capabilities", new=AsyncMock(return_value={"ready": True, "variants": [profile]})), \
+                 patch.object(self.manager.comfy, "ensure_running", new=AsyncMock()), \
+                 patch.object(self.manager.comfy, "run_prompt", new=AsyncMock()) as run:
+                response = await self.client.post("/api/images/jobs", json=payload(mode="generate", image_asset_ids=[]))
+                job = await response.json()
+                await self.manager.tasks[job["id"]]
+                final = self.manager.jobs[job["id"]]
+                self.assertEqual(final["status"], "failed")
+                self.assertIn("文字生圖", final["error"])
+                run.assert_not_called()
+
+    async def test_generation_rejects_wrong_output_size_instead_of_publishing_it(self):
+        content = io.BytesIO()
+        Image.new("RGB", (64, 64), "blue").save(content, format="PNG")
+        job_id = "d" * 32
+        self.manager.jobs[job_id] = {**compile_image_request(payload(mode="generate", image_asset_ids=[], width=512, height=768)), "id": job_id}
+        history = {"outputs": {"8": {"images": [{"filename": "wrong.png", "type": "output"}]}}}
+        with patch.object(self.manager.comfy, "fetch_output", new=AsyncMock(return_value=(content.getvalue(), "image/png"))), \
+             self.assertRaisesRegex(RequestError, "尺寸與要求不符"):
+            await self.manager._complete(job_id, history)
+        self.assertFalse((self.manager.output_dir / (job_id + ".png")).exists())
 
     async def test_flux_completion_persists_expansion_actual_dimensions_and_reusable_reference(self):
         content = io.BytesIO()

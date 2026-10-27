@@ -4,22 +4,22 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>圖片工作室 · MiniMax H3 Studio</title>
   <link rel="stylesheet" href="/static/styles.css?v=20260921-qwen-image">
-  <link rel="stylesheet" href="/static/images.css?v=20261027-flux3">
+  <link rel="stylesheet" href="/static/images.css?v=20261027-flux3-t2i">
   <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-recommendations">
   <link rel="stylesheet" href="/static/workspace_ui.css?v=20261017-ux">
 </head>
 <body>
   <header class="topbar"><a class="brand" href="/"><span class="brand-mark">H3</span><span><strong>MiniMax H3 Studio</strong><small>IMAGE WORKSPACE</small></span></a><a class="button ghost small" href="/">返回影片工作室</a></header>
   <main class="image-page">
-    <section class="image-intro"><div><p class="eyebrow">QWEN IMAGE · FLUX 3</p><h1>從想法，到畫面。</h1><p>Qwen 生圖與多圖編輯 · FLUX 3 單張改圖</p></div><span id="imageLicenseBadge" class="image-badge">研究／評估版</span></section>
+    <section class="image-intro"><div><p class="eyebrow">QWEN IMAGE · FLUX 3</p><h1>從想法，到畫面。</h1><p>Qwen 生圖與多圖編輯 · FLUX 3 文生圖與單張改圖</p></div><span id="imageLicenseBadge" class="image-badge">研究／評估版</span></section>
     <p class="image-license"><span id="imageLicenseText">Qwen-Image-2.1 限研究／評估；正式商業用途需另取得授權。</span> <a id="imageLicenseLink" href="https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE" target="_blank" rel="noopener">查看所選模型授權</a></p>
     <section class="image-engine"><div><strong id="engineStatus">正在檢查引擎與模型…</strong><p id="engineDetail" role="status"></p></div><button id="refreshStatus" class="button ghost small" type="button">重新檢查</button></section>
     <div class="image-layout">
       <form id="imageForm" class="image-panel">
         <div class="image-section-heading"><span class="eyebrow">01 / CREATE</span><h2>圖片設定</h2></div>
-        <label>圖片模型<select id="imageModel"><option value="standard">Qwen 原版 · 精細生成</option><option value="turbo">Qwen 官方 Turbo · 快速 8 步</option><option value="flux3">FLUX 3 Image Klein · 單張改圖</option></select></label>
+        <label>圖片模型<select id="imageModel"><option value="standard">Qwen 原版 · 精細生成</option><option value="turbo">Qwen 官方 Turbo · 快速 8 步</option><option value="flux3">FLUX 3 Image Klein · 文生圖／單張改圖</option></select></label>
         <p id="imageModelStatus" class="image-hint" role="status">正在檢查所選模型…</p>
-        <label>生成方式<select id="imageMode"><option value="generate">文字生圖</option><option value="edit">參考圖編輯</option></select></label>
+        <label>生成方式<select id="imageMode"><option id="imageGenerateOption" value="generate">文字生圖</option><option value="edit">參考圖編輯</option></select></label>
         <label>工作名稱<input id="imageName" maxlength="80" placeholder="例如：角色三視圖、透明道具"></label>
         <div id="referenceSection" class="hidden">
           <label id="referenceDrop" class="image-upload"><span id="referenceDropLabel">① 上傳或拖入圖片 · 最多 10 張</span><input id="referenceFiles" type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp"></label>
@@ -30,6 +30,7 @@
         </div>
         <label><span id="promptLabel">圖片描述</span><textarea id="imagePrompt" required maxlength="8000" rows="7" placeholder="例如：將圖 1 外套改成深藍色，保留同一人物的五官、髮型、姿勢與背景。多圖時請明確指定各圖用途。"></textarea></label>
         <div id="generationSize" class="image-fields"><label>寬度<input id="imageWidth" type="number" min="256" max="2048" step="32" value="1024" required></label><label>高度<input id="imageHeight" type="number" min="256" max="2048" step="32" value="1024" required></label></div>
+        <p id="generationSizeHint" class="image-hint hidden"></p><p id="generationSizeStatus" class="image-hint image-error" role="status" aria-live="polite"></p>
         <div id="editingSize" class="hidden"><label id="qwenEditingSize">參考圖處理解析度<select id="referenceResolution"><option value="512">512 · 省顯存測試</option><option value="1024" selected>1024 · 建議起點</option><option value="2048">2048 · 較耗顯存</option></select></label><p id="fluxEditingSize" class="image-hint hidden">輸出保留主圖比例，約 1MP；固定 16 步。請明確描述要修改與保留的部分，其他細節仍可能被重繪。</p></div>
         <label class="image-check"><input id="imageTransparent" type="checkbox">生成透明背景 PNG</label>
         <p id="imageTransparentHint" class="image-hint">透明背景由模型生成，可能仍需清理邊緣。16 GB 顯卡建議從 1024、單張參考開始。</p>
@@ -57,7 +58,7 @@
     <p id="upscaleError" role="alert"></p><div class="image-card-actions"><button id="cancelUpscale" type="button" class="button ghost">取消</button><button id="submitUpscale" type="button" class="button primary" disabled>加入放大佇列</button></div>
   </dialog>
   <script src="/static/lora-help.js?v=20261005-lora-recommendations"></script>
-  <script src="/static/images.js?v=20261027-flux3"></script>
+  <script src="/static/images.js?v=20261027-flux3-t2i"></script>
   <script src="/static/workspace_ui.js?v=20261017-ux"></script>
 </body>
 </html>

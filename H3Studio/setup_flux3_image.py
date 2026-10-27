@@ -1,4 +1,4 @@
-"""Install the pinned FLUX 3 Image Klein editing weights on a local GPU host."""
+"""Install the pinned FLUX 3 Image Klein generation and editing weights on a local GPU host."""
 from __future__ import annotations
 
 import argparse
@@ -175,7 +175,7 @@ def main(argv=None):
         temporary = args.evidence_dir / "flux3-model-install.json.tmp"
         temporary.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         temporary.replace(args.evidence_dir / "flux3-model-install.json")
-    print("FLUX 3 editing weights verified. Restart ComfyUI to discover newly installed files.", flush=True)
+    print("FLUX 3 generation and editing weights verified. Restart ComfyUI to discover newly installed files.", flush=True)
     print(f"Model license: {LICENSE_URL}", flush=True)
     return result
 

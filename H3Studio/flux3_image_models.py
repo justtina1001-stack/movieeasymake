@@ -1,4 +1,4 @@
-"""Pinned official FLUX 3 Image Klein files for the tested 16 GB edit workflow."""
+"""Pinned official FLUX 3 Image Klein files for the tested 16 GB workflows."""
 
 REPO = "black-forest-labs/flux-3-image-klein-comfy"
 REVISION = "feef60b0aaf63a4773ace96636ebbcf43b881312"
@@ -8,6 +8,7 @@ COMFY_REVISION = "8713616fcc321624e306bbd36be5906203dcb0dc"
 STEPS = 16
 REFERENCE_LIMIT = 1
 REFERENCE_MEGAPIXELS = 1.0
+GENERATION_MAX_PIXELS = 1024 * 1024
 MODEL_FILES = (
     ("diffusion_models", "flux3-image-klein-int8-convrot.safetensors", 5827874779,
      "847d8933548afd93df4af2cac2498e70891bf28d9dae06d695f536992e168fe2"),

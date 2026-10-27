@@ -19,7 +19,7 @@ from queue_cancel import QueueCancelError
 from qwen_image_models import MODEL_FILES, LICENSE_URL, TURBO_MODEL_FILE, TURBO_SIGMAS, TURBO_STEPS
 from lora_catalog import describe_loras
 from image_upscale import compile_upscale, build_upscale_workflow, upscale_capabilities, MODELS as UPSCALE_MODELS
-from flux3_image import build_edit_workflow as build_flux3_workflow, capabilities as flux3_capabilities, validate_edit_request as validate_flux3_request
+from flux3_image import build_workflow as build_flux3_workflow, capabilities as flux3_capabilities, validate_request as validate_flux3_request
 from flux3_image_models import STEPS as FLUX3_STEPS
 
 ACTIVE = {"queued", "preparing", "running"}
@@ -107,7 +107,7 @@ def compile_image_request(payload):
         if flag in payload and not isinstance(payload[flag], bool):
             raise RequestError(f"{flag} 必須為布林值。")
     seed = secrets.randbelow(MAX_SEED + 1) if payload.get("seed_auto", True) else integer("seed", 42, 0, MAX_SEED)
-    name = str(payload.get("name") or ("FLUX 3 改圖" if variant == "flux3" else "Qwen 圖片")).strip()
+    name = str(payload.get("name") or (("FLUX 3 改圖" if mode == "edit" else "FLUX 3 生圖") if variant == "flux3" else "Qwen 圖片")).strip()
     if len(name) > 80:
         raise RequestError("圖片名稱最多 80 字。")
     text = prompt.strip()
@@ -125,8 +125,10 @@ def compile_image_request(payload):
                 transparent=payload.get("transparent", False), reference_resolution=resolution,
                 lora_name=lora, lora_strength=strength)
     if variant == "flux3":
-        result.update(reference_resolution=1024, reference_megapixels=1.0,
-                      output_size_policy="reference_aspect_1mp", lora_strength=0)
+        result.update(reference_resolution=1024, lora_strength=0,
+                      output_size_policy="reference_aspect_1mp" if mode == "edit" else "requested_dimensions")
+        if mode == "edit":
+            result["reference_megapixels"] = 1.0
     return result
 
 
@@ -389,6 +391,8 @@ class ImageJobManager:
             job = self.jobs[job_id]
             if job["mode"] == "upscale" and (width, height) != (job["width"], job["height"]):
                 raise RequestError("放大結果尺寸與要求不符。")
+            if job.get("model_variant") == "flux3" and job["mode"] == "generate" and (width, height) != (job["width"], job["height"]):
+                raise RequestError("FLUX 3 生圖結果尺寸與要求不符，請檢查目前引擎。")
             rgba = image.mode == "RGBA"
             image.verify()
         temporary.replace(path)
@@ -427,8 +431,15 @@ class ImageJobManager:
                     # Older standard-job consumers can still supply legacy status;
                     # Turbo always requires its own positive readiness result.
                     ready = profile.get("ready", False) if profile else variant == "standard" and profiles is None and status.get("ready", False)
+                    if variant == "flux3" and profile:
+                        mode_ready = profile.get("mode_ready")
+                        ready = (ready and mode_ready.get(job["mode"]) is True) if isinstance(mode_ready, dict) else \
+                            (ready and job["mode"] in profile.get("modes", ["edit"]))
                     if not ready:
-                        raise RequestError((profile or {}).get("error") or status.get("error") or "所選圖片模型尚未在目前引擎就緒，請重新檢查模型。")
+                        mode_error = (profile or {}).get("mode_errors", {}).get(job["mode"]) if variant == "flux3" else None
+                        if variant == "flux3" and profile and job["mode"] == "generate" and "generate" not in profile.get("modes", []):
+                            mode_error = "FLUX 3 文字生圖需要新版 Studio，請更新並重新啟動 Studio。"
+                        raise RequestError(mode_error or (profile or {}).get("error") or status.get("error") or "所選圖片模型尚未在目前引擎就緒，請重新檢查模型。")
                     validate_variant_lora(variant, job.get("lora_name"), job.get("lora_strength", 1))
                     if variant == "flux3":
                         validate_flux3_request(job)
