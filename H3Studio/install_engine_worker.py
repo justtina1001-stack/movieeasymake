@@ -27,7 +27,7 @@ OFFICIAL_REVISION = "b8b09e34f8d2b9d1b7a51982ccb26ae2b8b9ef08"
 
 
 def event(progress: int, step: str, **extra: object) -> None:
-    print("H3_INSTALL_EVENT " + json.dumps({"progress": progress, "step": step, **extra}, ensure_ascii=False), flush=True)
+    print("H3_INSTALL_EVENT " + json.dumps({"progress": progress, "step": step, **extra}, ensure_ascii=True), flush=True)
 
 
 def run(command: list[str], cwd: Path | None = None) -> None:

@@ -1,5 +1,35 @@
 # MiniMax H3 Studio
 
+## FLUX 3 改圖與 Qwen 切換（2026-10-27）
+
+在「圖片」工作室的模型選單，可切換 **Qwen 原版、Qwen 官方 Turbo、FLUX 3 Image Klein**。FLUX 3 這次提供已驗收的單張參考圖編輯：上傳一張主圖、描述修改及保留內容，主機會先以本機提示詞改寫模型整理指令，再進行 16 步改圖。輸出保留主圖比例，約 1MP；不提供額外 LoRA 或透明 PNG 模式。多張參考圖、透明輸出或 Qwen LoRA 可切回 Qwen 使用。
+
+切換模型會保留圖片、描述及名稱，並記住 Qwen 的生成方式、採樣、LoRA 與透明背景設定。若現有參考圖超過 FLUX 3 的一張限制，頁面會說明原因並暫停送出，不會自行刪圖。工作紀錄保存實際模型、原始修改指令及 FLUX 3 的改寫指令；套用設定、繼續編輯、原圖比較與放大沿用既有流程。圖片和影片仍共用 GPU 工作鎖及同一個 ComfyUI 佇列。
+
+### GPU 主機安裝
+
+先確認 ComfyUI 已更新到支援 FLUX 3 的版本；本版固定驗證 **v0.41.3 / `8713616f`**。執行根目錄 `setup_flux3_image.bat` 安裝四個官方檔案（約 17.75GB）：INT8 改圖模型、W4A8 提示詞改寫模型、INT8 文字編碼器及 VAE。安裝器固定來源版本與 SHA-256，驗證後才發布檔案，保留 Qwen 與其他模型。安裝器只安裝權重，不會自行更換正在執行的引擎或升級其相依套件。
+
+官方權重需要 Hugging Face 帳號存取。先在 [官方模型頁](https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy) 登入並同意條款，再使用 ComfyUI 環境中的 `hf auth login` 完成本機登入。新版 Hugging Face CLI 可用瀏覽器裝置授權，不必把 token 貼到對話或設定檔。已有完整離線模型套件時，可使用 `setup_flux3_image.bat --source-dir "模型套件資料夾"`；來源需保留 `diffusion_models`、`text_encoders`、`vae` 子目錄，仍會完整校驗。
+
+遠端使用者只需更新 Studio；模型和支援節點裝在實際 GPU 主機。頁面會分別檢查三款模型的就緒狀態；某款未安裝或引擎版本不符，不影響其他已就緒模型。
+
+### 既有引擎更新
+
+先讓生成、語音、音樂及匯出工作完成，關閉 Studio 與 ComfyUI。記錄原 commit／套件版本，備份 `ComfyUI/user/`（包括資料庫）及 Studio 設定與工作紀錄。沒有自行修改核心的舊安裝，可在專案根目錄 PowerShell 逐行執行：
+
+```powershell
+git -C .\ComfyUI fetch origin 8713616fcc321624e306bbd36be5906203dcb0dc --depth 1
+git -C .\ComfyUI checkout --detach 8713616fcc321624e306bbd36be5906203dcb0dc
+& .\ComfyUI\.venv\Scripts\python.exe -m pip install -r .\ComfyUI\requirements.txt
+```
+
+已有較新且相容的引擎不需降版。若有自行修改核心，請先處理修改及相容性；任一步失敗時停止，不使用強制覆蓋。更新後重新啟動 Studio 和 ComfyUI，再按 Ctrl＋F5。只更新 Git 或重新整理頁面，無法替換記憶體中的舊後端；退版時也需還原原資料庫及套件。
+
+本機驗收使用 RTX 5060 Ti 16GB：FLUX 3 完成 1024×1024 改圖，Qwen 原版及 Turbo 完成 512×512 改圖，均確認實際採樣、PNG 下載及轉為參考圖；H3 原生短片完成 608×320、124 幀及音軌解碼。後端 1,322 項檢查（主套件 1,321 通過，唯一跳過項改用引擎環境補驗通過）、前端 1,125 項檢查通過。這是功能與回歸驗證，不是全面畫質或速度比較；改圖細節仍可能重繪。瀏覽器自動操作因無法可靠辨識網址而停止，本次介面互動以程式測試驗證。
+
+FLUX 3 採 [FLUX Kommunity License](https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md)，商用受其條件限制；Qwen 2.1／Turbo 仍採 [Qwen Research License](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE)。模型權重、帳號憑證、私人圖片與工作紀錄均不發布到 Git。
+
 ## 操作與流程更新 2026 年 10 月 17 日
 
 頁首共用「腳本、圖片、影片、短片、剪輯、語音、音樂」導覽；引擎、模型版本與指南集中在「工具與設定」。空佇列縮為狀態列，影片敘述提前，進階品質與完成後處理可按需展開。畫面尺寸名稱跨工作室一致。
@@ -190,7 +220,7 @@
 
 更新 Studio 並重新啟動後，在「模型更新」安裝版本 `2026.09.22-1`。本機生成的同事各自在自己的 GPU 電腦更新；遠端模式由實際 GPU 主機管理者安裝。[官方 INT8 ConvRot 權重](https://huggingface.co/Comfy-Org/MiniMax-H3/blob/7a2065e37f5ff9d3c4e605f164d4cac388eff8e8/vae/minimax_h3_video_vae_int8_convrot.safetensors) 新增約 2.81 GB（2.62 GiB），安裝清單固定來源版本、大小與 SHA-256，保留原有 `minimax_h3_video_vae_fp16.safetensors` 供回退。完整安裝包含兩種影片 VAE。
 
-本版新引擎固定 ComfyUI `v0.37.0`／`73c9bad4`，這也是本次 INT8 VAE 的驗證基準。**模型更新不會自動升級既有核心或其依賴。** 舊引擎需等工作完成、備份後更新核心及 `requirements.txt`，再重啟引擎與 Studio；只重新整理瀏覽器不會更新後端。
+INT8 VAE 這次的原始驗證基準為 ComfyUI `v0.37.0`／`73c9bad4`；目前新安裝已固定至支援 FLUX 3 的 `v0.41.3`。**模型更新不會自動升級既有核心或其依賴。** 舊引擎需等工作完成、備份後更新核心及 `requirements.txt`，再重啟引擎與 Studio；只重新整理瀏覽器不會更新後端。
 
 舊版核心若要升到本次驗證版本：結束所有工作並關閉 ComfyUI，先記錄原 commit／套件版本、備份 `ComfyUI/user/`（含資料庫）。沒有自行修改核心的安裝，可在專案根目錄的 PowerShell 逐行執行下列指令；任一步失敗就先處理錯誤，不使用強制覆蓋。已是 0.37.0 或較新版本則不用降版。
 
@@ -212,7 +242,7 @@ git -C .\ComfyUI checkout --detach 73c9bad4d21e7addbe1d13bc92eee0f1431b017d
 
 GPU 主機執行根目錄 `setup_qwen_image.bat`，確認研究用途後下載官方 Comfy-Org INT8 擴散模型、INT8 Qwen3-VL 8B 文字編碼器與專用 VAE，合計約 17.3 GB（16.1 GiB）。安裝器固定模型版本 `ace0edeb3791a594ddfa36ed5f41a178a394e921`，以 SHA-256 校驗完整檔案；支援續傳，既有不同內容的同名模型會保留並報錯。模型、下載暫存、私人設定和作品均不進 Git。遠端同事只需更新及重啟 Studio，模型安裝在實際 GPU 主機。
 
-需要含 `TextEncodeQwenImage21` 的 ComfyUI，本版使用 `v0.37.0`／`73c9bad4`。全新引擎安裝已固定此版本；既有引擎仍須由主機管理者在佇列清空後備份 ComfyUI 原版本、虛擬環境套件清單及 `user/`（包括資料庫），更新核心及其 `requirements.txt`，再重啟 ComfyUI 和 Studio。`setup_qwen_image.bat` 只安裝圖片權重，不會自行更新核心。僅 Git pull 或重新整理瀏覽器不會更新已執行的後端。核心升級有資料庫遷移，退版時也須還原更新前的資料庫備份。
+需要含 `TextEncodeQwenImage21` 的 ComfyUI，Qwen 的原始驗證版本為 `v0.37.0`／`73c9bad4`；目前新安裝固定 `v0.41.3`，同時支援 Qwen 與 FLUX 3。既有引擎仍須由主機管理者在佇列清空後備份 ComfyUI 原版本、虛擬環境套件清單及 `user/`（包括資料庫），更新核心及其 `requirements.txt`，再重啟 ComfyUI 和 Studio。`setup_qwen_image.bat` 只安裝圖片權重，不會自行更新核心。僅 Git pull 或重新整理瀏覽器不會更新已執行的後端。核心升級有資料庫遷移，退版時也須還原更新前的資料庫備份。
 
 16 GB 顯卡建議從 1024×1024、25 步、單張參考圖開始；較高解析度、多張參考圖與 40～50 步需要更多資源與時間。編輯模式沿用第一張參考圖的比例，按所選參考圖解析度縮放；文字生圖才使用寬高欄位。透明輸出由模型生成，不保證所有邊緣都乾淨；PNG 保留 Alpha，請在支援透明通道的軟體中檢查。圖片參考的透明 PNG 不會套用 H3 影片素材的螢光綠填底。
 
@@ -277,7 +307,7 @@ SLA 使用 ComfyUI 原生 `BlockSparseAttention` 的 H3 分塊 QKV 路徑；目�
 
 短片品質是全片設定；有參考素材的鏡頭使用 Ref2VA，無參考素材的鏡頭使用 FL2VA。若選了僅限單一模型的品質，不相容鏡頭沿用既有的 Turbo 穩定版適配規則，規則檢查及鏡頭編譯都會提示。缺少模型或節點則明確報錯，不會因缺件偷偷換用其他模型。
 
-本版新安裝固定 ComfyUI `v0.37.0`／`73c9bad4`，自訂節點固定 H3-Optimizations `0.2.42`／`52b5f1e`。既有同事執行 Git 更新不會覆蓋 `ComfyUI/`、模型、私人設定或作品；「模型更新」只補模型與自訂節點，**不會自動升級既有 ComfyUI 核心**。需要 SLA 時，請 GPU 主機管理者備份後更新核心與其 `requirements.txt`，再重啟引擎；遠端面板無權替主機安裝或更新。
+本版新安裝固定 ComfyUI `v0.41.3`／`8713616f`，自訂節點固定 H3-Optimizations `0.2.42`／`52b5f1e`。既有同事執行 Git 更新不會覆蓋 `ComfyUI/`、模型、私人設定或作品；「模型更新」只補模型與自訂節點，**不會自動升級既有 ComfyUI 核心**。需要 SLA 時，請 GPU 主機管理者備份後更新核心與其 `requirements.txt`，再重啟引擎；遠端面板無權替主機安裝或更新。
 
 來源：[ComfyUI 0.35.0](https://github.com/Comfy-Org/ComfyUI/releases/tag/v0.35.0)、[H3-Optimizations](https://github.com/Zironic/H3-Optimizations)、[Turbo-SLA](https://huggingface.co/lightx2v/Minimax-h3-Turbo-SLA)、[FL v1.2](https://huggingface.co/lightx2v/Minimax-h3-Turbo/discussions/52)、[Ref 8 步](https://huggingface.co/lightx2v/Minimax-h3-Turbo/discussions/51)。
 

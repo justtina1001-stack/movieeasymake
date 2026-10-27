@@ -10,6 +10,11 @@ const variants = (standard=true, turbo=true) => ({model_variant_supported:true, 
   {id:'standard',label:'原版',ready:standard,steps:25,model_filename:'standard.safetensors',error:standard ? '' : '原版模型尚未安裝'},
   {id:'turbo',label:'官方 Turbo',ready:turbo,steps:8,model_filename:'turbo.safetensors',error:turbo ? '' : 'Turbo 模型尚未安裝'},
 ]});
+const fluxVariants = (flux=true, standard=true, turbo=true) => {
+  const status=variants(standard,turbo);
+  status.variants.push({id:'flux3',label:'FLUX 3 Image Klein',ready:flux,steps:16,modes:['edit'],reference_limit:1,transparent_supported:false,lora_supported:false,error:flux?'':'FLUX 3 模型尚未安裝'});
+  return status;
+};
 const imageJob = extra => ({id:a,name:'來源圖片',mode:'generate',status:'completed',width:1024,height:1024,steps:25,seed:42,prompt:'來源描述',transparent:false,reference_resolution:1024,image_asset_ids:[],...extra});
 function deferred() { let resolve; const promise=new Promise(done=>{resolve=done;}); return {promise,resolve}; }
 
@@ -148,10 +153,87 @@ test('upscale results use their recorded source variant for editing and never tr
   }
 });
 
-test('result cards and details distinguish Turbo standard legacy and Real-ESRGAN models',async()=>{
+test('result cards and details distinguish Qwen models legacy and Real-ESRGAN models',async()=>{
   const f=await fixture({jobs:[imageJob({model_variant:'turbo'}),imageJob({id:b}),imageJob({id:c,mode:'upscale',scale:2,source_model_variant:'turbo'})]});
-  assert.match(f.el('imageJobs').innerHTML,/模型：官方 Turbo · 快速 8 步/); assert.match(f.el('imageJobs').innerHTML,/模型：原版 · 精細生成/); assert.match(f.el('imageJobs').innerHTML,/模型：Real-ESRGAN · 增強放大/);
-  const html=fs.readFileSync(path.join(__dirname,'../static/images.html'),'utf8'); assert.match(html,/id="imageModel"/); assert.match(html,/images.js\?v=20261012-official-turbo/);
+  assert.match(f.el('imageJobs').innerHTML,/模型：Qwen 官方 Turbo · 快速 8 步/); assert.match(f.el('imageJobs').innerHTML,/模型：Qwen 原版 · 精細生成/); assert.match(f.el('imageJobs').innerHTML,/模型：Real-ESRGAN · 增強放大/);
+  const html=fs.readFileSync(path.join(__dirname,'../static/images.html'),'utf8'); assert.match(html,/id="imageModel"/); assert.match(html,/images.js\?v=20261027-flux3/); assert.match(html,/<option value="flux3">FLUX 3 Image Klein/);
+});
+
+test('FLUX selection preserves Qwen options across reload and submits only its fixed edit settings',async()=>{
+  const name='qwen_image_2_1/style.safetensors';
+  const f=await fixture({status:{...fluxVariants(),loras:[name]},draft:{imagePrompt:'只改杯色',imageName:'比較圖',imageMode:'generate',imageSteps:'37',imageTransparent:true,referenceResolution:'512',imageLora:name,imageLoraStrength:'0.65',editTemplate:'cutout',refs:[{id:a}]}});
+  f.el('imageModel').value='flux3'; await f.fire('imageModel','input');
+  assert.equal(f.el('imageMode').value,'edit'); assert.equal(f.el('imageMode').disabled,true); assert.equal(f.el('imageSteps').value,'16'); assert.equal(f.el('imageSteps').disabled,true);
+  assert.equal(f.el('imageTransparent').checked,false); assert.equal(f.el('imageTransparent').disabled,true); assert.equal(f.el('imageLora').disabled,true); assert.equal(f.el('referenceResolution').disabled,true);
+  assert.equal(f.el('editTemplate').value,''); assert.equal(f.el('editStyleOption').disabled,true); assert.equal(f.el('editCutoutOption').disabled,true);
+  assert.equal(f.el('imagePrompt').value,'只改杯色'); assert.equal(f.el('imageName').value,'比較圖'); assert.deepEqual(f.draft().refs,[{id:a}]);
+  assert.match(f.el('imageLicenseText').textContent,/Kommunity/); assert.match(f.el('imageLicenseLink').href,/flux-3-image-klein/);
+  const saved=f.draft(); assert.equal(saved.qwenModelSettings.mode,'generate'); assert.equal(saved.qwenModelSettings.transparent,true); assert.equal(saved.qwenModelSettings.referenceResolution,'512');
+  await f.fire('refreshStatus','click'); assert.deepEqual(f.draft(),saved); assert.equal(f.el('imageModel').value,'flux3');
+  f.setStatus(fluxVariants(false)); await f.fire('refreshStatus','click'); assert.equal(f.el('generateImage').disabled,true); assert.deepEqual(f.draft(),saved);
+  f.setStatus(fluxVariants()); await f.fire('refreshStatus','click'); assert.equal(f.el('generateImage').disabled,false); assert.equal(f.el('imageModel').value,'flux3');
+  f.el('imageSteps').value='50'; f.el('imageTransparent').checked=true; f.el('referenceResolution').value='2048';
+  await f.fire('imageForm','submit');
+  const payload=JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body);
+  assert.equal(payload.model_variant,'flux3'); assert.equal(payload.mode,'edit'); assert.equal(payload.steps,16); assert.equal(payload.transparent,false); assert.equal(payload.lora_name,''); assert.equal(payload.lora_strength,0); assert.equal(payload.reference_resolution,1024); assert.equal(payload.width,1024); assert.equal(payload.height,1024); assert.deepEqual(payload.image_asset_ids,[a]);
+  const restored=await fixture({status:{...fluxVariants(),loras:[name]},draft:saved});
+  assert.equal(restored.el('imageModel').value,'flux3'); assert.equal(restored.el('imageMode').value,'edit');
+  restored.el('imageModel').value='standard'; await restored.fire('imageModel','input');
+  assert.equal(restored.el('imageMode').value,'generate'); assert.equal(restored.el('imageMode').disabled,false); assert.equal(restored.el('imageSteps').value,'37'); assert.equal(restored.el('imageTransparent').checked,true);
+  assert.equal(restored.el('referenceResolution').value,'512'); assert.equal(restored.el('imageLora').value,name); assert.equal(restored.el('imageLoraStrength').value,'0.65'); assert.equal(restored.el('editTemplate').value,'cutout');
+  assert.match(restored.el('imageLicenseText').textContent,/Qwen/); assert.match(restored.el('imageLicenseLink').href,/Qwen-Image-2.1/);
+});
+
+test('FLUX readiness is separate from Qwen and an old or unavailable backend cannot send it as standard',async()=>{
+  for(const status of [fluxVariants(false),variants(),{ready:true,model_variant_supported:false}]) {
+    const f=await fixture({status,draft:{imageModel:'flux3',imagePrompt:'改圖',refs:[{id:a}]}});
+    assert.equal(f.el('generateImage').disabled,true); assert.match(f.el('imageModelStatus').textContent,/FLUX 3/);
+    await f.fire('imageForm','submit'); assert.equal(f.calls.some(call=>call.url==='/api/images/jobs'),false);
+  }
+  const f=await fixture({status:{...fluxVariants(true,false,false),lora_supported:false},draft:{imageModel:'flux3',refs:[{id:a}]}});
+  assert.equal(f.el('generateImage').disabled,false); await f.fire('imageForm','submit');
+  assert.equal(JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body).model_variant,'flux3');
+});
+
+test('switching a multi-reference Qwen draft to FLUX retains every reference and blocks submission until one is chosen',async()=>{
+  const f=await fixture({status:fluxVariants(),draft:{imageMode:'edit',imagePrompt:'保留原稿',refs:[{id:a},{id:b}]}});
+  f.el('imageModel').value='flux3'; await f.fire('imageModel','input');
+  assert.deepEqual(f.draft().refs,[{id:a},{id:b}]); assert.equal(f.el('generateImage').disabled,true); assert.match(f.el('referenceStatus').textContent,/目前保留 2 張/);
+  await f.fire('imageForm','submit'); assert.equal(f.calls.some(call=>call.url==='/api/images/jobs'),false);
+  f.el('imageModel').value='standard'; await f.fire('imageModel','input'); assert.equal(f.el('generateImage').disabled,false); assert.deepEqual(f.draft().refs,[{id:a},{id:b}]);
+  f.el('imageModel').value='flux3'; await f.fire('imageModel','input'); await f.click('referenceList',{remove:'1'});
+  assert.equal(f.el('generateImage').disabled,false); assert.equal(f.el('imagePrompt').value,'保留原稿');
+  await f.fire('imageForm','submit'); assert.deepEqual(JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body).image_asset_ids,[a]);
+});
+
+test('FLUX upload and template limits reject unsupported actions without erasing the current draft',async()=>{
+  const f=await fixture({status:fluxVariants(),draft:{imageModel:'flux3',imagePrompt:'原始修改',refs:[{id:a}]}});
+  await f.fire('referenceDrop','drop',{dataTransfer:{files:[{name:'extra.png'}]}});
+  assert.equal(f.calls.some(call=>call.url==='/api/assets'),false); assert.match(f.el('formMessage').textContent,/只支援 1 張/); assert.deepEqual(f.draft().refs,[{id:a}]);
+  await f.click('imageJobs',{reference:'job'}); assert.equal(f.calls.some(call=>call.url.endsWith('/reference')),false);
+  for(const key of ['style','cutout']) { f.el('editTemplate').value=key; await f.fire('insertTemplate','click'); assert.equal(f.el('imagePrompt').value,'原始修改'); assert.equal(f.el('imageTransparent').checked,false); }
+});
+
+test('FLUX history retains model identity for reuse continue editing and upscale sources',async()=>{
+  for(const action of ['reuse','continue']) {
+    const f=await fixture({status:fluxVariants(),draft:{imageMode:'generate',imageTransparent:true,imageSteps:'34',imageWidth:'640',imageHeight:'960'},jobs:[imageJob({model_variant:'flux3',mode:'edit',steps:16,image_asset_ids:[a],original_prompt:'把杯子改藍色'})]});
+    assert.match(f.el('imageJobs').innerHTML,/模型：FLUX 3 Image Klein/);
+    await f.click('imageJobs',{[action]:a}); assert.equal(f.el('imageModel').value,'flux3'); assert.equal(f.el('imageMode').value,'edit'); assert.equal(f.el('imageSteps').value,'16');
+    assert.equal(f.el('imageTransparent').checked,false); assert.equal(f.draft().qwenModelSettings.mode,'generate'); assert.equal(f.draft().qwenModelSettings.transparent,true);
+    assert.equal(f.el('imagePrompt').value,action==='reuse'?'把杯子改藍色':''); await f.fire('imageForm','submit'); assert.equal(JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body).model_variant,'flux3');
+    f.el('imageModel').value='standard'; await f.fire('imageModel','input'); assert.equal(f.el('imageWidth').value,'640'); assert.equal(f.el('imageHeight').value,'960');
+  }
+  const f=await fixture({status:fluxVariants(),jobs:[imageJob({mode:'upscale',source_model_variant:'flux3',steps:null,seed:null})]});
+  await f.click('imageJobs',{continue:a}); assert.equal(f.el('imageModel').value,'flux3'); assert.equal(f.el('imageMode').value,'edit');
+});
+
+test('FLUX selected against an older two-model backend requests a Studio restart',async()=>{
+  const f=await fixture({status:variants(),draft:{imageModel:'flux3',imageMode:'edit',imagePrompt:'改成藍色',refs:[{id:a}]}});
+  assert.equal(f.el('generateImage').disabled,true);
+  assert.match(f.el('imageModelStatus').textContent,/重新啟動 Studio/);
+  assert.doesNotMatch(f.el('imageModelStatus').textContent,/請確認已安裝此模型/);
+  await f.fire('imageForm','submit');
+  assert.equal(f.calls.some(call=>call.url==='/api/images/jobs'),false);
 });
 
 test('promoting a reference changes submitted order and preserves the prompt',async()=>{

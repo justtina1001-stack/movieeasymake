@@ -3,15 +3,22 @@
   const $ = id => document.getElementById(id);
   const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const draftKey = 'h3-qwen-image-21-draft-v1';
-  const fields = ['imageMode','imageModel','imageName','imagePrompt','imageWidth','imageHeight','imageSteps','imageSeed','imageSeedAuto','imageTransparent','referenceResolution','imageLora','imageLoraStrength'];
+  const fields = ['imageMode','imageModel','imageName','imagePrompt','imageWidth','imageHeight','imageSteps','imageSeed','imageSeedAuto','imageTransparent','referenceResolution','imageLora','imageLoraStrength','editTemplate'];
   let refs = [], ready = false, uploading = false, submitting = false, page = 1, totalPages = 1, jobs = [], queue = null, polling = false;
   const deletedIds = new Set();
   let pendingDelete = null;
   let pendingUpscale = null, upscaleModels = [], upscaleReady = false;
   let selectedLora = '', loraSupported = false, availableLoras = [], lastJobsMarkup = '';
   let selectedVariant = 'standard', standardSteps = '25', modelVariantSupported = false, modelVariants = [], engineError = '';
-  const modelLabels = {standard:'原版 · 精細生成',turbo:'官方 Turbo · 快速 8 步'};
-  const variantOf = value => value === 'turbo' ? 'turbo' : 'standard';
+  const modelLabels = {standard:'Qwen 原版 · 精細生成',turbo:'Qwen 官方 Turbo · 快速 8 步',flux3:'FLUX 3 Image Klein · 單張改圖'};
+  const modelLicenseUrls = {standard:'https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE',turbo:'https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE',flux3:'https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md'};
+  const variantOf = value => ['standard','turbo','flux3'].includes(value) ? value : 'standard';
+  const normaliseQwenSettings = value => ({
+    mode:value?.mode === 'edit' ? 'edit' : 'generate', transparent:value?.transparent === true,
+    referenceResolution:['512','1024','2048'].includes(String(value?.referenceResolution)) ? String(value.referenceResolution) : '1024',
+    editTemplate:['color','background','style','detail','cutout'].includes(value?.editTemplate) ? value.editTemplate : '',
+  });
+  let qwenSettings = normaliseQwenSettings({});
   const sourceVariant = job => variantOf(job?.mode === 'upscale' ? job.source_model_variant : job?.model_variant);
   const jobModelLabel = job => job.mode === 'upscale' ? 'Real-ESRGAN · 增強放大' : modelLabels[sourceVariant(job)];
   let loraCatalog = H3LoraHelp.catalog({}, {model:'qwen'});
@@ -32,22 +39,49 @@
   function selectedModelReady() {
     return ready && (modelVariantSupported ? modelVariants.some(item => item.id === selectedVariant && item.ready === true) : selectedVariant === 'standard');
   }
+  const referenceLimit = () => selectedVariant === 'flux3' ? 1 : 10;
+  function rememberQwenSettings() {
+    if (selectedVariant !== 'flux3') qwenSettings = normaliseQwenSettings({mode:$('imageMode').value,transparent:$('imageTransparent').checked,referenceResolution:$('referenceResolution').value,editTemplate:$('editTemplate').value});
+  }
   function updateModelControls() {
-    const turbo = selectedVariant === 'turbo', profile = modelVariants.find(item => item.id === selectedVariant);
+    const turbo = selectedVariant === 'turbo', flux = selectedVariant === 'flux3', profile = modelVariants.find(item => item.id === selectedVariant);
     $('imageModel').value = selectedVariant;
     $('imageModel').disabled = submitting;
-    $('imageSteps').disabled = turbo || submitting;
+    $('imageMode').disabled = flux || submitting;
+    $('imageSteps').disabled = turbo || flux || submitting;
     if (turbo) $('imageSteps').value = '8';
-    $('imageStepsHint').textContent = turbo ? '官方 Turbo 固定使用 8 步；切回原版會恢復你的原採樣步數。' : '原版預設 25 步供比較；官方完整品質範例使用 40 步。增加步數會延長生成時間。';
-    $('imageModelStatus').textContent = turbo && !modelVariantSupported ? 'Turbo 需要新版 Studio；請重新啟動 Studio，再按「重新檢查」。回原版可使用既有圖片功能。' :
-      selectedModelReady() ? `${modelLabels[selectedVariant]}已就緒${turbo ? ' · 固定 8 步，Turbo 已含加速' : ' · 可調整採樣步數及使用 LoRA'}` :
+    if (flux) { $('imageMode').value='edit'; $('imageSteps').value='16'; $('imageTransparent').checked=false; $('referenceResolution').value='1024'; if (['style','cutout'].includes($('editTemplate').value)) $('editTemplate').value=''; }
+    $('imageTransparent').disabled = flux || submitting;
+    $('referenceResolution').disabled = flux || submitting;
+    $('qwenEditingSize').classList.toggle('hidden', flux);
+    $('fluxEditingSize').classList.toggle('hidden', !flux);
+    $('imageLoraSection').classList.toggle('hidden', flux);
+    $('editStyleOption').disabled=flux; $('editCutoutOption').disabled=flux;
+    $('referenceDropLabel').textContent = flux ? '① 上傳或拖入一張主圖' : '① 上傳或拖入圖片 · 最多 10 張';
+    $('referenceHint').textContent = flux ? '本版 FLUX 3 使用單張主圖改圖，保留主圖比例並輸出約 1MP。多圖參考可切換至 Qwen；已匯入的參考圖會保留。' : '圖 1 是編輯主圖，決定輸出比例；其餘圖片可供角色、服裝或風格參考。可調整順序，調整後請同步修改描述中的圖號。';
+    $('imageTransparentHint').textContent = flux ? 'FLUX 3 目前輸出一般 PNG，未提供透明背景與 LoRA。切回 Qwen 會恢復原有設定。' : '透明背景由模型生成，可能仍需清理邊緣。16 GB 顯卡建議從 1024、單張參考開始。';
+    $('imageStepsHint').textContent = flux ? 'FLUX 3 固定使用 16 步，會自動整理修改與保留的內容。' : turbo ? '官方 Turbo 固定使用 8 步；切回原版會恢復你的原採樣步數。' : '原版預設 25 步供比較；官方完整品質範例使用 40 步。增加步數會延長生成時間。';
+    $('imageLicenseText').textContent = flux ? 'FLUX 3 使用 Kommunity 授權，商用輸出須符合使用者資格及其他條件。' : 'Qwen-Image-2.1 限研究／評估；正式商業用途需另取得授權。';
+    $('imageLicenseLink').href=modelLicenseUrls[selectedVariant];
+    $('imageLicenseBadge').textContent=flux ? '商用有授權條件' : '研究／評估版';
+    $('imageModelStatus').textContent = (turbo || flux) && (!modelVariantSupported || !profile) ? `${flux ? 'FLUX 3' : 'Turbo'} 需要新版 Studio；請重新啟動 Studio，再按「重新檢查」。回原版可使用既有圖片功能。` :
+      selectedModelReady() ? `${modelLabels[selectedVariant]}已就緒${flux ? ' · 固定 16 步，約 1MP，保留主圖比例' : turbo ? ' · 固定 8 步，Turbo 已含加速' : ' · 可調整採樣步數及使用 LoRA'}` :
       `${modelLabels[selectedVariant]}尚未就緒。${profile?.error || engineError || '請確認已安裝此模型，再按「重新檢查」。'}`;
   }
   function selectModelVariant(value, steps) {
+    const previous = selectedVariant;
+    rememberQwenSettings();
     if (selectedVariant === 'standard') standardSteps = $('imageSteps').value || standardSteps;
     selectedVariant = variantOf(value);
+    if (selectedVariant === 'flux3') {
+      $('imageMode').value='edit'; $('imageTransparent').checked=false; $('referenceResolution').value='1024';
+      if (['style','cutout'].includes($('editTemplate').value)) $('editTemplate').value='';
+    } else if (previous === 'flux3') {
+      $('imageMode').value=qwenSettings.mode; $('imageTransparent').checked=qwenSettings.transparent;
+      $('referenceResolution').value=qwenSettings.referenceResolution; $('editTemplate').value=qwenSettings.editTemplate;
+    }
     if (selectedVariant === 'standard' && steps !== undefined) standardSteps = String(steps || 25);
-    $('imageSteps').value = selectedVariant === 'turbo' ? '8' : standardSteps;
+    $('imageSteps').value = selectedVariant === 'flux3' ? '16' : selectedVariant === 'turbo' ? '8' : standardSteps;
     renderLoras();
   }
   function applySourceModel(job) {
@@ -58,24 +92,30 @@
     selectModelVariant(variant, variant === 'standard' ? job.steps || 25 : undefined);
   }
   function update() {
+    updateModelControls();
     const edit = $('imageMode').value === 'edit';
     $('promptLabel').textContent = edit ? '③ 要修改與保留的內容' : '圖片描述';
     $('referenceSection').classList.toggle('hidden', !edit);
     $('editingSize').classList.toggle('hidden', !edit);
     $('generationSize').classList.toggle('hidden', edit);
     $('imageSeed').disabled = $('imageSeedAuto').checked;
-    updateModelControls();
-    $('imageLora').disabled = selectedVariant === 'turbo' || submitting;
-    $('imageLoraStrength').disabled = selectedVariant === 'turbo' || !selectedLora || !loraSupported || submitting;
+    $('imageWidth').disabled = edit || submitting; $('imageHeight').disabled = edit || submitting;
+    $('imageLora').disabled = selectedVariant !== 'standard' || submitting;
+    $('imageLoraStrength').disabled = selectedVariant !== 'standard' || !selectedLora || !loraSupported || submitting;
     $('referenceFiles').disabled = uploading || submitting;
+    $('referenceFiles').multiple = selectedVariant !== 'flux3';
+    $('referenceStatus').textContent = edit && refs.length > referenceLimit() ? `目前保留 ${refs.length} 張參考圖；${selectedVariant === 'flux3' ? 'FLUX 3 本版只支援 1 張主圖，請移除多餘圖片，或切換 Qwen 使用多圖編輯。' : '最多可使用 10 張，請移除多餘圖片。'}` : '';
     $('generateImage').disabled = !selectedModelReady() || uploading || submitting || (edit && refs.length === 0) ||
+      (edit && refs.length > referenceLimit()) ||
       (selectedVariant === 'standard' && Boolean(selectedLora) && (!loraSupported || !availableLoras.includes(selectedLora)));
   }
   function saveDraft() {
+    rememberQwenSettings();
     const data = {refs};
     for (const id of fields) data[id] = $(id).type === 'checkbox' ? $(id).checked : $(id).value;
     data.imageLora = selectedLora;
     data.standardImageSteps = standardSteps;
+    data.qwenModelSettings = {...qwenSettings};
     try { localStorage.setItem(draftKey, JSON.stringify(data)); } catch {}
   }
   function renderRefs() {
@@ -87,8 +127,9 @@
     for (const id of fields) if (draft[id] !== undefined) { if ($(id).type === 'checkbox') $(id).checked = draft[id] === true; else $(id).value = draft[id]; }
     selectedLora = typeof draft.imageLora === 'string' ? draft.imageLora : '';
     selectedVariant = variantOf(draft.imageModel);
+    qwenSettings = normaliseQwenSettings(draft.qwenModelSettings || {mode:draft.imageMode,transparent:draft.imageTransparent,referenceResolution:draft.referenceResolution,editTemplate:draft.editTemplate});
     standardSteps = String(draft.standardImageSteps ?? (selectedVariant === 'standard' ? draft.imageSteps || 25 : 25));
-    $('imageSteps').value = selectedVariant === 'turbo' ? '8' : standardSteps;
+    $('imageSteps').value = selectedVariant === 'flux3' ? '16' : selectedVariant === 'turbo' ? '8' : standardSteps;
     refs = Array.isArray(draft.refs) ? draft.refs.filter(r => /^[a-f0-9]{32}$/.test(r.id)).slice(0,10) : [];
   } catch {}
   for (const id of fields) $(id).addEventListener('input', () => {
@@ -108,7 +149,7 @@
   });
   async function uploadFiles(files) {
     if (uploading || submitting || !files.length) return;
-    if (files.length + refs.length > 10) { $('formMessage').textContent = '最多只能使用 10 張參考圖片。'; return; }
+    if (files.length + refs.length > referenceLimit()) { $('formMessage').textContent = selectedVariant === 'flux3' ? 'FLUX 3 本版只支援 1 張主圖；請先移除現有圖片，或切換 Qwen 使用多圖編輯。' : '最多只能使用 10 張參考圖片。'; return; }
     if (files.some(file => !/\.(png|jpe?g|webp|bmp)$/i.test(file.name))) { $('formMessage').textContent = '請使用 PNG、JPEG、WebP 或 BMP 圖片。'; return; }
     uploading = true; update();
     try {
@@ -127,6 +168,7 @@
   $('referenceDrop').addEventListener('drop', async event => { event.preventDefault(); $('referenceDrop').classList.remove('dragging'); await uploadFiles([...event.dataTransfer.files]); });
   $('insertTemplate').addEventListener('click', () => {
     const key = $('editTemplate').value, text = templates[key]; if (!text) return;
+    if (selectedVariant === 'flux3' && ['style','cutout'].includes(key)) { $('formMessage').textContent='FLUX 3 本版提供單張一般圖片編輯；多圖風格參考與透明去背請切換 Qwen。'; return; }
     if (key === 'style' && refs.length < 2) { $('formMessage').textContent='風格參考需要圖 1 主圖和圖 2 風格圖。'; return; }
     const combined = [$('imagePrompt').value.trim(),text].filter(Boolean).join('\n');
     if(combined.length > 8000) { $('formMessage').textContent='描述已超過 8,000 字元，請先精簡。'; return; }
@@ -138,13 +180,13 @@
     $('imageLora').innerHTML = '<option value="">不使用 LoRA</option>' + availableLoras.map(n=>`<option value="${escape(n)}">${escape(H3LoraHelp.label(H3LoraHelp.item(loraCatalog,n,{model:'qwen'})))}</option>`).join('') +
       (selectedLora && !availableLoras.includes(selectedLora) ? `<option value="${escape(selectedLora)}">未提供：${escape(selectedLora)}</option>` : '');
     $('imageLora').value=selectedLora;
-    const turbo = selectedVariant === 'turbo';
-    $('loraStatus').textContent = turbo ? 'Turbo 已含加速，回原版可使用 LoRA；原版的 LoRA 選擇與強度已保留。' : !loraSupported ? '此後端尚未提供 LoRA 支援；請更新並重啟 Studio／檢查引擎。' :
+    const turbo = selectedVariant === 'turbo', flux = selectedVariant === 'flux3';
+    $('loraStatus').textContent = flux ? 'FLUX 3 本版未提供 LoRA；Qwen 的 LoRA 選擇與強度已保留。' : turbo ? 'Turbo 已含加速，回原版可使用 LoRA；原版的 LoRA 選擇與強度已保留。' : !loraSupported ? '此後端尚未提供 LoRA 支援；請更新並重啟 Studio／檢查引擎。' :
       selectedLora && !availableLoras.includes(selectedLora) ? '原本選擇的 LoRA 不在目前引擎，請重新選擇後生成。' :
       availableLoras.length ? `目前引擎提供 ${availableLoras.length} 個專用資料夾中的 LoRA；請確認作者標示的基礎模型與觸發詞。` : '目前引擎尚未安裝 Qwen-Image-2.1 專用 LoRA，可直接使用基礎模型。';
     $('imageLoraHelp').innerHTML = selectedLora ? H3LoraHelp.html(H3LoraHelp.item(loraCatalog,selectedLora,{model:'qwen'})) : '';
     $('imageLoraCatalog').innerHTML = loraCatalog.items.length ? `<details class="lora-catalog"><summary>查看全部 ${loraCatalog.items.length} 個圖片 LoRA 的用途</summary><div class="lora-catalog-list">${loraCatalog.items.map(item=>H3LoraHelp.html(item)).join('')}</div></details>` : '';
-    $('imageLoraHelp').classList.toggle('hidden', turbo); $('imageLoraCatalog').classList.toggle('hidden', turbo);
+    $('imageLoraHelp').classList.toggle('hidden', turbo || flux); $('imageLoraCatalog').classList.toggle('hidden', turbo || flux);
     update();
   }
   async function checkStatus() {
@@ -152,9 +194,9 @@
     try {
       const result = await api('/api/images/status'); ready = result.ready === true; engineError = result.error || '';
       modelVariantSupported = result.model_variant_supported === true;
-      modelVariants = Array.isArray(result.variants) ? result.variants.filter(item => item && ['standard','turbo'].includes(item.id)) : [];
+      modelVariants = Array.isArray(result.variants) ? result.variants.filter(item => item && ['standard','turbo','flux3'].includes(item.id)) : [];
       loraSupported = result.lora_supported === true; loraCatalog = H3LoraHelp.catalog(result,{model:'qwen'}); availableLoras = loraCatalog.names; renderLoras();
-      $('engineStatus').textContent = ready ? 'Qwen-Image-2.1 圖片模型已就緒' : '圖片引擎尚未就緒';
+      $('engineStatus').textContent = ready ? '圖片引擎已有可用模型' : '圖片引擎尚未就緒';
       const available = modelVariants.filter(item => item.ready === true).map(item => modelLabels[item.id]);
       $('engineDetail').textContent = result.error || `${result.mode === 'remote' ? '共用遠端' : '本機'}引擎 · ${modelVariantSupported ? available.join('／') || '模型尚未就緒' : '原版官方 INT8 模型'} · 圖片與影片依佇列順序處理`;
     } catch (error) { ready = false; engineError = error.message; $('engineStatus').textContent = '暫時無法檢查引擎'; $('engineDetail').textContent = error.message; }
@@ -207,12 +249,12 @@
     if (submitting || uploading) return;
     if (!selectedModelReady()) { $('formMessage').textContent = $('imageModelStatus').textContent; return; }
     if ($('generateImage').disabled) return;
-    const turbo = selectedVariant === 'turbo';
-    const payload = {name:$('imageName').value, mode:$('imageMode').value, ...(modelVariantSupported ? {model_variant:selectedVariant} : {}), prompt:$('imagePrompt').value,
-      width:Number($('imageWidth').value),height:Number($('imageHeight').value),steps:turbo ? 8 : Number($('imageSteps').value),
-      seed:Number($('imageSeed').value),seed_auto:$('imageSeedAuto').checked,transparent:$('imageTransparent').checked,
-      lora_name:turbo ? '' : selectedLora,lora_strength:turbo ? 0 : Number($('imageLoraStrength').value),
-      reference_resolution:Number($('referenceResolution').value),image_asset_ids:$('imageMode').value === 'edit' ? refs.map(r=>r.id) : []};
+    const turbo = selectedVariant === 'turbo', flux = selectedVariant === 'flux3';
+    const payload = {name:$('imageName').value, mode:flux ? 'edit' : $('imageMode').value, ...(modelVariantSupported ? {model_variant:selectedVariant} : {}), prompt:$('imagePrompt').value,
+      width:flux ? 1024 : Number($('imageWidth').value),height:flux ? 1024 : Number($('imageHeight').value),steps:flux ? 16 : turbo ? 8 : Number($('imageSteps').value),
+      seed:Number($('imageSeed').value),seed_auto:$('imageSeedAuto').checked,transparent:flux ? false : $('imageTransparent').checked,
+      lora_name:turbo || flux ? '' : selectedLora,lora_strength:turbo || flux ? 0 : Number($('imageLoraStrength').value),
+      reference_resolution:flux ? 1024 : Number($('referenceResolution').value),image_asset_ids:flux || $('imageMode').value === 'edit' ? refs.map(r=>r.id) : []};
     submitting = true; update();
     try {
       const job = await api('/api/images/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -266,31 +308,31 @@
         // Polling can replace the visible jobs while the reference is imported.
         const currentSource=jobs.find(j=>j.id === button.dataset.continue), source=currentSource ? {...currentSource} : null;
         const asset=await api(`/api/images/jobs/${button.dataset.continue}/reference`,{method:'POST'});
-        refs=[asset]; $('imageMode').value='edit';
-        $('imagePrompt').value=''; $('imageSeedAuto').checked=true;
+        refs=[asset];
         if(source) {
           applySourceModel(source); $('editTemplate').value='';
           $('imageName').value=source.name.slice(0,74)+' · 編輯';
-          $('imageTransparent').checked=source.transparent === true;
-          $('referenceResolution').value=source.reference_resolution || 1024;
+          $('imageTransparent').checked=selectedVariant !== 'flux3' && source.transparent === true;
+          $('referenceResolution').value=selectedVariant === 'flux3' ? 1024 : source.reference_resolution || 1024;
         }
+        $('imageMode').value='edit'; $('imagePrompt').value=''; $('imageSeedAuto').checked=true;
         renderRefs(); $('imagePrompt').focus();
         $('formMessage').textContent=`已將此結果設為唯一主圖，使用${modelLabels[selectedVariant]}；請描述下一步要修改的內容。`;
       }
       if (button.dataset.reference) {
         uploading=true; update();
-        if (refs.length >= 10) throw new Error('參考圖已達 10 張，請先移除一張。');
+        if (refs.length >= referenceLimit()) throw new Error(selectedVariant === 'flux3' ? 'FLUX 3 本版只支援 1 張主圖；可用「以此圖繼續編輯」替換主圖，或切換 Qwen 使用多圖編輯。' : '參考圖已達 10 張，請先移除一張。');
         refs.push(await api(`/api/images/jobs/${button.dataset.reference}/reference`,{method:'POST'}));
         $('imageMode').value = 'edit'; renderRefs(); $('imagePrompt').focus();
       }
       if (button.dataset.reuse) {
         const job = jobs.find(j=>j.id === button.dataset.reuse);
         if (!job || job.mode === 'upscale') return;
-        $('imageMode').value = job.mode; $('imageName').value = job.name; $('imagePrompt').value = job.original_prompt || job.prompt;
-        $('imageWidth').value = job.width; $('imageHeight').value = job.height;
-        $('imageSeed').value = job.seed; $('imageSeedAuto').checked = false; $('imageTransparent').checked = job.transparent;
         applySourceModel(job);
-        $('referenceResolution').value = job.reference_resolution || 1024; refs = (job.image_asset_ids || []).map(id=>({id})); renderRefs();
+        $('imageMode').value = selectedVariant === 'flux3' ? 'edit' : job.mode; $('imageName').value = job.name; $('imagePrompt').value = job.original_prompt || job.prompt;
+        if (selectedVariant !== 'flux3') { $('imageWidth').value = job.width; $('imageHeight').value = job.height; }
+        $('imageSeed').value = job.seed; $('imageSeedAuto').checked = false; $('imageTransparent').checked = selectedVariant !== 'flux3' && job.transparent === true;
+        $('referenceResolution').value = selectedVariant === 'flux3' ? 1024 : job.reference_resolution || 1024; refs = (job.image_asset_ids || []).map(id=>({id})); renderRefs();
         $('imagePrompt').focus(); $('formMessage').textContent = `已套用${modelLabels[selectedVariant]}原設定及固定 Seed；按生成才會建立新工作。`;
       }
     } catch(error) { $('formMessage').textContent = error.message; }
