@@ -396,6 +396,133 @@ class ScriptVideoAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(child["input"]["project"]["content"], project["content"])
         self.assertEqual(self.manager.get_project(project["id"]), project)
 
+    async def test_explicit_manuscript_without_idea_preserves_text_and_selected_video_model(self):
+        content = '阿青拿起行李，停下看向列車。\n他輕聲說：「等我一下。」隨後登車。'
+        project = await self.project(idea="", content=content, video_settings={
+            "aspect_ratio": "9:16", "megapixels": 0.4, "video_model": "fasth3_omni_nvfp4"})
+        pipeline = await self.start_pipeline(project, source_mode="manuscript", project_revision=project["revision"])
+        self.assertEqual(pipeline["stage"], "storyboard")
+        result = await self.wait_pipeline(pipeline)
+
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertEqual(result["source_mode"], "manuscript")
+        self.assertEqual(self.chat_actions, ["storyboard"])
+        self.assertIsNone(result["screenplay_job_id"])
+        self.assertIsNone(result["source_job_id"])
+        self.assertFalse(result["automatic_source"])
+        self.assertEqual(result["snapshot"]["content"], content)
+        self.assertEqual(result["snapshot"]["idea"], "")
+        self.assertEqual(result["snapshot"]["character_references"], project["character_references"])
+        self.assertEqual(result["video_settings"], project["video_settings"])
+        child = self.manager.get_job(result["storyboard_job_id"])
+        self.assertEqual(child["input"]["project"]["content"], content)
+        self.assertEqual(child["input"]["project"]["video_settings"], project["video_settings"])
+        self.assertEqual(self.manager.get_project(project["id"]), project)
+        plans = self.renderer.plans[result["shortfilm_id"]]
+        self.assertTrue(all(plan["payload"]["video_model"] == "fasth3_omni_nvfp4" for plan in plans))
+
+    async def test_explicit_manuscript_rejects_blank_content_even_when_an_idea_exists(self):
+        project = await self.project(idea="一名旅人趕上最後一班列車。", content=" \n\t ")
+        response = await self.client.post("/api/scripts/video-pipelines", json={
+            "project_id": project["id"], "source_mode": "manuscript"})
+        self.assertEqual(response.status, 400, await response.text())
+        self.assertIn("編輯稿", (await response.json())["error"])
+        self.assertEqual(self.pipeline_manager.list_pipelines(), [])
+        self.assertEqual(self.renderer.preflight_calls, [])
+        self.assertEqual(self.chat_requests, [])
+        self.assertEqual(self.renderer.render_calls, [])
+
+    async def test_manuscript_source_rejects_ambiguous_or_unknown_sources(self):
+        project = await self.project(content="阿青登車。")
+        cases = ({"source_mode": "manuscript", "source_job_id": "a" * 32},
+                 {"source_mode": "manuscript", "source_job_id": None},
+                 {"source_mode": "screenplay"}, {"source_mode": None},
+                 {"source_mode": True}, {"source_mode": {"mode": "manuscript"}})
+        for fields in cases:
+            with self.subTest(fields=fields):
+                response = await self.client.post("/api/scripts/video-pipelines", json={"project_id": project["id"], **fields})
+                self.assertEqual(response.status, 400, await response.text())
+        with self.assertRaises(script_video.ScriptVideoError):
+            await self.pipeline_manager.start({"project_id": project["id"], "source_mode": "manuscript"}, allow_active_source=True)
+        self.assertEqual(self.pipeline_manager.list_pipelines(), [])
+        self.assertEqual(self.chat_requests, [])
+
+    async def test_manuscript_revision_prevents_sending_a_different_saved_draft(self):
+        project = await self.project(content="送出前確認的編輯稿。")
+        response = await self.client.put(f"/api/scripts/projects/{project['id']}", json={
+            "revision": project["revision"], "content": "其他分頁更新的編輯稿。"})
+        self.assertEqual(response.status, 200, await response.text())
+        response = await self.client.post("/api/scripts/video-pipelines", json={
+            "project_id": project["id"], "source_mode": "manuscript", "project_revision": project["revision"]})
+        self.assertEqual(response.status, 409, await response.text())
+        self.assertEqual(self.pipeline_manager.list_pipelines(), [])
+        self.assertEqual(self.renderer.preflight_calls, [])
+        self.assertEqual(self.chat_requests, [])
+
+    async def test_manuscript_revision_rejects_invalid_types_and_legacy_source(self):
+        project = await self.project(content="阿青登車。")
+        for revision in (True, None, "1", 1.0, 0, -1):
+            with self.subTest(revision=revision):
+                response = await self.client.post("/api/scripts/video-pipelines", json={
+                    "project_id": project["id"], "source_mode": "manuscript", "project_revision": revision})
+                self.assertEqual(response.status, 400, await response.text())
+        response = await self.client.post("/api/scripts/video-pipelines", json={
+            "project_id": project["id"], "project_revision": project["revision"]})
+        self.assertEqual(response.status, 400, await response.text())
+        self.assertEqual(self.chat_requests, [])
+
+    async def test_manuscript_timeline_and_picture_validation_precede_generation(self):
+        for fields in ({"content": "0–15 秒：超出十秒預算。"},
+                       {"content": "普通文字編輯稿。", "character_references": []}):
+            with self.subTest(fields=fields):
+                project = await self.project(idea="", **fields)
+                response = await self.client.post("/api/scripts/video-pipelines", json={
+                    "project_id": project["id"], "source_mode": "manuscript"})
+                self.assertEqual(response.status, 400, await response.text())
+        self.assertEqual(self.pipeline_manager.list_pipelines(), [])
+        self.assertEqual(self.chat_requests, [])
+        self.assertEqual(self.renderer.render_calls, [])
+
+    async def test_manuscript_resume_keeps_frozen_text_after_editor_is_cleared(self):
+        content = "阿青拿起行李，走向列車。"
+        self.renderer.fail_render_number = 2
+        project = await self.project(idea="", content=content)
+        failed = await self.wait_pipeline(await self.start_pipeline(project, source_mode="manuscript"))
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(self.chat_actions, ["storyboard"])
+        response = await self.client.put(f"/api/scripts/projects/{project['id']}", json={
+            "revision": project["revision"], "content": "", "idea": "另一個全新故事。"})
+        self.assertEqual(response.status, 200, await response.text())
+        current = await response.json()
+        self.renderer.fail_render_number = None
+
+        response = await self.client.post(f"/api/scripts/video-pipelines/{failed['id']}/resume")
+        self.assertEqual(response.status, 202, await response.text())
+        result = await self.wait_pipeline(await response.json())
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertEqual(result["source_mode"], "manuscript")
+        self.assertEqual(result["snapshot"]["content"], content)
+        self.assertEqual(self.chat_actions, ["storyboard"])
+        self.assertIsNone(result["screenplay_job_id"])
+        self.assertEqual(self.manager.get_project(project["id"]), current)
+
+    async def test_manuscript_missing_frozen_text_never_falls_back_to_screenplay(self):
+        project = await self.project(content="原始編輯稿。")
+        with patch.object(self.pipeline_manager, "_launch"):
+            pipeline = await self.start_pipeline(project, source_mode="manuscript")
+        record = self.pipeline_manager.pipelines[pipeline["id"]]
+        record["snapshot"]["content"] = " \n "
+        self.pipeline_manager.cancel_events[pipeline["id"]] = asyncio.Event()
+        await self.pipeline_manager._run(pipeline["id"])
+        result = self.pipeline_manager.get_pipeline(pipeline["id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("編輯稿", result["error"])
+        self.assertEqual(self.chat_requests, [])
+        self.assertEqual(self.renderer.render_calls, [])
+        response = await self.client.post(f"/api/scripts/video-pipelines/{pipeline['id']}/resume")
+        self.assertEqual(response.status, 400, await response.text())
+        self.assertEqual(self.chat_requests, [])
+
     async def test_completed_source_uses_its_content_with_current_saved_cards(self):
         project = await self.project(content="原始編輯稿。")
         source = await self.complete(await self.submit(project))
@@ -742,6 +869,7 @@ class ScriptVideoAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         status = await response.json()
         self.assertTrue(status["video_pipelines_supported"])
+        self.assertTrue(status["manuscript_video_supported"])
         self.assertFalse(status["video_ready"])
         self.assertEqual(status["video_error"], "test engine offline")
         self.assertEqual(self.renderer.preflight_calls, [])

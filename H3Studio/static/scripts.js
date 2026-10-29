@@ -351,6 +351,7 @@ if (typeof document !== "undefined") {
   Object.assign(state, { videoHistoryScope: "all", historyVideos: [], selectedHistoryVideoId: null, historyPreviewVideo: null, historyPreviewError: "", videoHistoryStatus: "loading", videoHistoryError: "", videoHistoryWarning: "", videoHistoryBusy: false });
   Object.assign(state, { lorasSupported: false, lorasSupportKnown: false, lorasSaveWaiting: false, loraCatalog: { names: [], items: [], recommended_items: [], builtin_items: [] }, loraCatalogReady: false, loraCatalogBusy: false, loraCatalogError: "", loraCatalogSerial: 0, loraControls: [] });
   Object.assign(state, { videoModelSupported: false, videoModels: [], videoModelTouched: false });
+  Object.assign(state, { manuscriptVideoSupported: false });
 
   function message(text, error = false, kind = "") {
     state.messageKind = kind;
@@ -659,6 +660,9 @@ if (typeof document !== "undefined") {
 
   function updateControls() {
     const busy = state.loading || state.saving || state.referencesSaveWaiting || state.skillsSaveWaiting || state.lorasSaveWaiting || state.starting || state.pipelineStarting;
+    $("scriptStartFromIdea").disabled = busy;
+    $("scriptStartFromManuscript").disabled = busy;
+    $("scriptManuscriptSettings").disabled = busy;
     $("scriptProjects").disabled = busy || state.importing;
     $("newScriptProject").disabled = busy || state.importing;
     $("applyMonkeyScriptExample").disabled = busy || state.importing;
@@ -705,8 +709,17 @@ if (typeof document !== "undefined") {
     const previewOption = Array.from($("scriptVideoSource").options).find(option => option.value === "preview");
     if (previewOption) previewOption.disabled = !selectedVideoSourceJob();
     if ($("scriptVideoSource").value === "preview" && !selectedVideoSourceJob()) $("scriptVideoSource").value = "current";
-    $("startScriptVideoPipeline").disabled = busy || state.settingsSaving || !state.videoPipelinesSupported || !state.videoReady || Boolean(videoModelError) || !state.ready || writingSkillNeedsCheck() || Boolean(state.conflict) || activePipeline || activeForProject;
-    $("startScriptVideoPipeline").textContent = state.pipelineStarting ? "正在啟動製作…" : "劇本 → 自動生成影片";
+    const manuscriptSource = $("scriptVideoSource").value === "manuscript";
+    const pipelineUnavailable = busy || state.settingsSaving || !state.videoPipelinesSupported || !state.videoReady || Boolean(videoModelError) || !state.ready || writingSkillNeedsCheck() || Boolean(state.conflict) || activePipeline || activeForProject;
+    $("startScriptVideoPipeline").disabled = pipelineUnavailable || manuscriptSource && (!state.manuscriptVideoSupported || !selectedVideoProject.content.trim());
+    $("startScriptVideoPipeline").textContent = state.pipelineStarting ? "正在啟動製作…" : manuscriptSource ? "用編輯稿產生影片 →" : "劇本 → 自動生成影片";
+    $("startManuscriptVideo").disabled = pipelineUnavailable || !state.manuscriptVideoSupported || !selectedVideoProject.content.trim();
+    $("startManuscriptVideo").textContent = state.pipelineStarting ? "正在啟動製作…" : "用編輯稿產生影片 →";
+    $("scriptStartFromIdea").setAttribute("aria-pressed", String($("scriptVideoSource").value === "current"));
+    $("scriptStartFromManuscript").setAttribute("aria-pressed", String(manuscriptSource));
+    const manuscriptSupportHint = "目前主機尚未確認支援直接使用編輯稿；請重新啟動更新後的 Studio，再按「重新檢查」。稿件會保留。";
+    $("scriptVideoSourceHint").textContent = manuscriptSource ? state.manuscriptVideoSupported ? "直接使用已儲存的編輯稿，跳過 AI 寫稿；故事想法可留白。接續建立分鏡與影片。" : manuscriptSupportHint : $("scriptVideoSource").value === "preview" ? "使用目前選擇的已完成劇本，保留編輯區的內容。" : "有編輯稿時直接接續分鏡；只有故事想法時先編寫劇本。";
+    $("scriptManuscriptHint").textContent = !state.manuscriptVideoSupported ? manuscriptSupportHint : selectedVideoProject.content.trim() ? "會先儲存這份編輯稿，再直接建立分鏡與影片；不必填寫故事想法。請確認片長、參考圖與影片設定。" : "先在上方貼上完整編輯稿，再確認目標片長、參考圖與影片設定，即可直接開始製作。";
     $("cancelScriptVideoPipeline").disabled = !state.videoPipelinesSupported || !scriptPipelinePresentation(state.pipeline).active || state.pipeline?.status === "cancelling";
     $("resumeScriptVideoPipeline").disabled = busy || !state.videoPipelinesSupported || !state.videoReady || !["failed", "cancelled", "canceled", "interrupted"].includes(state.pipeline?.status);
     for (const [id, button] of state.historyDeleteControls) button.disabled = state.loading || state.importing || state.deletingJobIds.has(id) || !scriptCanDeleteJob(state.jobs.find(job => job.id === id));
@@ -905,6 +918,7 @@ if (typeof document !== "undefined") {
       renderScriptLoras();
       if (!state.skillsSupported) { state.skillsError = ""; renderWritingSkills(); }
       state.videoPipelinesSupported = status.video_pipelines_supported === true;
+      state.manuscriptVideoSupported = status.manuscript_video_supported === true;
       state.videoReady = status.video_ready === true;
       state.videoError = typeof status.video_error === "string" ? status.video_error : "";
       state.videoModelSupported = status.video_model_supported === true;
@@ -922,6 +936,7 @@ if (typeof document !== "undefined") {
       state.ready = false;
       state.visionReady = false;
       state.videoReady = false;
+      state.manuscriptVideoSupported = false;
       state.videoModelSupported = false;
       state.videoModels = [];
       $("scriptEngineDot").className = "script-dot unavailable";
@@ -1022,6 +1037,14 @@ if (typeof document !== "undefined") {
   function selectedVideoSourceJob() {
     const job = state.job;
     return job && !state.deletingJobIds.has(job.id) && job.project_id === state.project.id && ["screenplay", "rewrite"].includes(job.action) && scriptJobPresentation(job).canApply ? job : null;
+  }
+
+  function chooseVideoSource(source, focusTarget = "") {
+    if (state.loading || state.saving || state.referencesSaveWaiting || state.skillsSaveWaiting || state.lorasSaveWaiting || state.starting || state.pipelineStarting) return false;
+    $("scriptVideoSource").value = source;
+    updateControls();
+    if (focusTarget) { $(focusTarget).scrollIntoView({ behavior: "smooth", block: "center" }); $(focusTarget).focus({ preventScroll: true }); }
+    return true;
   }
 
   function videoPreflight(project) {
@@ -1146,7 +1169,7 @@ if (typeof document !== "undefined") {
     $("scriptVideoPipelineDetail").classList.toggle("error", pipeline?.status === "failed");
     $("scriptVideoPipelineProgress").value = view.progress; $("scriptVideoPipelineProgressText").textContent = `${Math.round(view.progress)}%`;
     const steps = $("scriptVideoStageList"); steps.replaceChildren(); const ordered = ["screenplay", "storyboard", "import", "render", "assemble"], current = pipeline?.status === "completed" ? ordered.length : ordered.indexOf(pipeline?.stage);
-    for (const [index, stage] of ordered.entries()) { const item = document.createElement("li"); item.textContent = SCRIPT_PIPELINE_STAGES[stage]; item.className = index < current ? "done" : index === current ? "current" : "pending"; steps.append(item); }
+    for (const [index, stage] of ordered.entries()) { const item = document.createElement("li"); const usesManuscript = stage === "screenplay" && pipeline?.source_mode === "manuscript"; item.textContent = usesManuscript ? "使用編輯稿" : SCRIPT_PIPELINE_STAGES[stage]; item.className = usesManuscript || index < current ? "done" : index === current ? "current" : "pending"; steps.append(item); }
     $("cancelScriptVideoPipeline").classList.toggle("hidden", !view.active); $("resumeScriptVideoPipeline").classList.toggle("hidden", !["failed", "cancelled", "canceled", "interrupted"].includes(pipeline?.status));
     $("scriptVideoResumeHint").classList.toggle("hidden", !["failed", "cancelled", "canceled", "interrupted"].includes(pipeline?.status));
     $("openScriptPipelineShortfilm").classList.toggle("hidden", !pipeline?.shortfilm_id); if (pipeline?.shortfilm_id) $("openScriptPipelineShortfilm").href = `/?workspace=shortfilm&project=${encodeURIComponent(pipeline.shortfilm_id)}`;
@@ -1184,17 +1207,20 @@ if (typeof document !== "undefined") {
     if (state.loading || state.saving || state.starting || state.pipelineStarting || state.settingsSaving || state.conflict) return;
     if ([...state.jobs, ...state.activeJobs].some(job => job.project_id === state.project.id && scriptJobPresentation(job).active)) { message("目前劇本還在生成中，請等待完成後再開始影片流程。", true); return; }
     if (state.pipelines.some(item => item.project_id === state.project.id && scriptPipelinePresentation(item).active)) { message("這份劇本已有製作中的影片流程，可在右側查看進度。", true); return; }
-    const initial = readProject(), source = $("scriptVideoSource").value === "preview" ? selectedVideoSourceJob() : null;
-    if ($("scriptVideoSource").value === "preview" && !source) { message("請選擇目前劇本已完成的完整劇本或潤飾結果，再使用預覽稿製作。", true); return; }
+    const sourceMode = $("scriptVideoSource").value, initial = readProject(), source = sourceMode === "preview" ? selectedVideoSourceJob() : null, initialGeneration = state.generation;
+    if (sourceMode === "preview" && !source) { message("請選擇目前劇本已完成的完整劇本或潤飾結果，再使用預覽稿製作。", true); return; }
+    if (sourceMode === "manuscript" && !state.manuscriptVideoSupported) { message("目前主機尚未確認支援直接使用編輯稿；請重新啟動更新後的 Studio，再按「重新檢查」。稿件會保留。", true); return; }
+    if (sourceMode === "manuscript" && !initial.content.trim()) { $("scriptContent").focus(); message("請先在編輯稿貼上完整劇本。直接使用編輯稿時，故事想法可留白。", true); return; }
     if (!source && !initial.idea.trim() && !initial.content.trim()) { message("請先填寫故事想法或編輯稿，再開始自動製作。", true); return; }
     const error = videoPreflight(initial); if (error) { message(error, true); return; }
     state.pipelineStarting = true; updateControls();
     try {
       if (state.dirty || !state.project.id || writingSkillNeedsCheck() || JSON.stringify(initial.video_settings) !== JSON.stringify(normalizeScriptVideoSettings(state.project.video_settings))) { if (!await saveProject()) return; }
+      if (initialGeneration !== state.generation || sourceMode !== $("scriptVideoSource").value || state.dirty || scriptProjectSignature(readProject()) !== scriptProjectSignature(state.project)) { message("稿件或製作來源已變更，尚未開始影片製作。請檢查目前內容後再按一次。", true); return; }
       const projectId = state.project.id, generation = state.generation;
-      const pipeline = await api("/api/scripts/video-pipelines", { method: "POST", body: JSON.stringify({ project_id: projectId, ...(source ? { source_job_id: source.id } : {}) }) });
+      const pipeline = await api("/api/scripts/video-pipelines", { method: "POST", body: JSON.stringify({ project_id: projectId, ...(sourceMode === "manuscript" ? { source_mode: "manuscript", project_revision: state.project.revision } : {}), ...(source ? { source_job_id: source.id } : {}) }) });
       state.pipelinesRevision++; upsertPipeline(pipeline);
-      if (generation === state.generation && state.project.id === projectId) { state.selectedPipelineId = pipeline.id; state.pipeline = pipeline; renderPipelines(); message("自動影片製作已開始。劇本、分鏡與影片會接續完成，原編輯稿保留。"); }
+      if (generation === state.generation && state.project.id === projectId) { state.selectedPipelineId = pipeline.id; state.pipeline = pipeline; renderPipelines(); message(sourceMode === "manuscript" ? "已使用編輯稿開始製作，直接接續分鏡與影片。原稿與本次使用的版本均會保留。" : "自動影片製作已開始。劇本、分鏡與影片會接續完成，原編輯稿保留。"); }
     } catch (error) { message(error.message, true); }
     finally { state.pipelineStarting = false; updateControls(); }
   }
@@ -1453,6 +1479,10 @@ if (typeof document !== "undefined") {
   }
 
   function bindEvents() {
+    $("scriptStartFromIdea").addEventListener("click", () => chooseVideoSource("current", "scriptIdea"));
+    $("scriptStartFromManuscript").addEventListener("click", () => chooseVideoSource("manuscript", "scriptContent"));
+    $("scriptManuscriptSettings").addEventListener("click", () => chooseVideoSource("manuscript", "scriptVideoModel"));
+    $("startManuscriptVideo").addEventListener("click", () => { if (chooseVideoSource("manuscript")) return startVideoPipeline(); });
     for (const id of Object.values(fieldIds)) $(id).addEventListener("input", markDirty);
     for (const [field, id] of Object.entries(videoFieldIds)) $(id).addEventListener("change", () => { if (field === "video_model") state.videoModelTouched = true; markDirty(); renderScriptLoras(); updateControls(); });
     $("scriptWritingSkill").addEventListener("change", markDirty);

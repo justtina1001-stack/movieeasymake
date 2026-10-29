@@ -56,6 +56,7 @@ function fixture(handler, { confirm = () => true, referencesSupported = true, re
   elements.get('scriptGenre').add(new Option('劇情', '劇情'));
   elements.get('scriptVideoSource').value = 'current';
   elements.get('scriptVideoSource').add(new Option('編輯稿／故事想法', 'current'));
+  elements.get('scriptVideoSource').add(new Option('直接使用編輯稿 · 跳過 AI 寫稿', 'manuscript'));
   elements.get('scriptVideoSource').add(new Option('目前選擇的已完成劇本', 'preview'));
   const actions = ['outline', 'screenplay', 'rewrite', 'storyboard'].map(action => { const element = new Element(); element.dataset.scriptAction = action; return element; });
   class TestFormData { constructor() { this.entries = []; } append(...entry) { this.entries.push(entry); } }
@@ -545,7 +546,7 @@ test('old short-cut validation failures show a recovery hint without changing th
     ui.state.job = { ...ui.state.job, error, action: 'storyboard', status: 'failed', ...change }; ui.renderPreview();
     assert.doesNotMatch(elements.get('scriptJobDetail').textContent, /短切鏡需合併/);
   }
-  assert.match(html, /scripts\.js\?v=20261027-fasth3/);
+  assert.match(html, /scripts\.js\?v=20261029-manuscript/);
 });
 
 function cameraCorrection(overrides = {}) { return { scene_index: 0, shot_index: 0, original_camera: '35mm low-angle tracking shot', original_camera_detail: '鏡頭跟隨主角前進', camera: 'custom', camera_detail: '35mm low-angle tracking shot\n鏡頭跟隨主角前進', ...overrides }; }
@@ -1220,6 +1221,76 @@ test('one-click video uses saved current manuscript by default and preserves it 
   assert.equal(ui.state.pipeline.id, pipeline.id); assert.equal(ui.state.dirty, false);
 });
 
+test('paste manuscript entry focuses the editor without changing any story settings or starting work', async () => {
+  const { ui, elements, calls, stored } = fixture(); prepareVideo(ui); ui.bindEvents();
+  elements.get('scriptContent').value = '自己貼上的完整劇本'; ui.markDirty();
+  const before = JSON.stringify(ui.readProject()), drafts = stored.get('h3studio.scripts.draft.this-tab');
+  await elements.get('scriptStartFromManuscript').click();
+  assert.equal(elements.get('scriptVideoSource').value, 'manuscript');
+  assert.equal(elements.get('scriptContent').focused, true);
+  assert.equal(elements.get('scriptStartFromManuscript').attributes['aria-pressed'], 'true');
+  assert.equal(JSON.stringify(ui.readProject()), before); assert.equal(stored.get('h3studio.scripts.draft.this-tab'), drafts); assert.equal(calls.length, 0);
+  await elements.get('scriptStartFromIdea').click();
+  assert.equal(elements.get('scriptVideoSource').value, 'current'); assert.equal(elements.get('scriptIdea').focused, true);
+  assert.equal(JSON.stringify(ui.readProject()), before); assert.equal(calls.length, 0);
+});
+
+test('direct editor button sends an explicit manuscript snapshot with revision and no story idea or preview dependency', async () => {
+  const pipeline = pipelineRecord({ source_mode: 'manuscript', stage: 'storyboard' });
+  const { ui, elements, calls } = fixture(async () => response(pipeline));
+  prepareVideo(ui, { idea: '', content: '0–15秒：紅色機器人揮手說「你好」。' }); ui.state.manuscriptVideoSupported = true;
+  ui.bindEvents(); ui.renderPreview();
+  assert.equal(elements.get('startManuscriptVideo').disabled, false);
+  await elements.get('startManuscriptVideo').click();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(JSON.parse(calls[0].options.body), { project_id: 'project-a', source_mode: 'manuscript', project_revision: 3 });
+  assert.equal(elements.get('scriptContent').value, '0–15秒：紅色機器人揮手說「你好」。'); assert.equal(elements.get('scriptIdea').value, '');
+  assert.equal(elements.get('scriptVideoStageList').children[0].textContent, '使用編輯稿'); assert.equal(elements.get('scriptVideoStageList').children[0].className, 'done');
+  assert.match(elements.get('scriptMessage').textContent, /直接接續分鏡與影片/);
+  assert.ok(calls.every(call => call.url !== '/api/scripts/jobs'));
+});
+
+test('direct manuscript never falls back to an idea on blank text, unconfirmed backend, missing reference or engine', async () => {
+  for (const scenario of ['blank', 'backend', 'reference', 'engine', 'model']) {
+    const { ui, elements, calls } = fixture(); prepareVideo(ui); ui.state.manuscriptVideoSupported = true;
+    if (scenario === 'blank') elements.get('scriptContent').value = '  \n';
+    if (scenario === 'backend') ui.state.manuscriptVideoSupported = false;
+    if (scenario === 'reference') ui.writeProject(project({ character_references: [] }));
+    if (scenario === 'engine') ui.state.videoReady = false;
+    if (scenario === 'model') ui.state.ready = false;
+    elements.get('scriptVideoSource').value = 'manuscript'; await ui.startVideoPipeline();
+    assert.equal(calls.length, 0, scenario); assert.ok(elements.get('scriptMessage').textContent.length > 0, scenario);
+    assert.equal(elements.get('scriptIdea').value, '咖啡店裡一段相遇');
+  }
+});
+
+test('direct manuscript saves pasted text before launch and protects edits or a changed source during saving', async () => {
+  for (const change of ['none', 'content', 'source']) {
+    const pending = deferred(); const pipeline = pipelineRecord({ source_mode: 'manuscript', stage: 'storyboard' });
+    const { ui, elements, calls } = fixture(async url => url.includes('/projects/') ? pending.promise : response(pipeline));
+    prepareVideo(ui, { idea: '' }); ui.state.manuscriptVideoSupported = true; ui.bindEvents();
+    elements.get('scriptContent').value = '剛貼上的新劇本'; ui.markDirty(); elements.get('scriptVideoSource').value = 'manuscript';
+    const starting = ui.startVideoPipeline();
+    assert.equal(calls.length, 1); assert.equal(calls[0].options.method, 'PUT'); const saved = JSON.parse(calls[0].options.body);
+    assert.equal(saved.content, '剛貼上的新劇本'); assert.equal(saved.idea, ''); assert.equal(elements.get('scriptVideoSource').disabled, true);
+    if (change === 'content') { elements.get('scriptContent').value = '儲存中新增的另一段'; ui.markDirty(); }
+    if (change === 'source') elements.get('scriptVideoSource').value = 'current';
+    pending.resolve(response(project({ ...saved, revision: 4 }))); await starting;
+    if (change === 'none') { assert.equal(calls.length, 2); assert.deepEqual(JSON.parse(calls[1].options.body), { project_id: 'project-a', source_mode: 'manuscript', project_revision: 4 }); }
+    else { assert.equal(calls.length, 1); assert.equal(ui.state.pipeline, null); }
+    assert.equal(elements.get('scriptContent').value, change === 'content' ? '儲存中新增的另一段' : '剛貼上的新劇本');
+  }
+});
+
+test('direct manuscript capability is explicitly advertised and a failed status check disables it', async () => {
+  let fails = false;
+  const { ui, elements } = fixture(async url => url === '/api/scripts/status' ? fails ? response({ error: '離線' }, 503) : response({ ready: true, manuscript_video_supported: true, video_pipelines_supported: true, video_ready: true }) : response({ items: [] }));
+  prepareVideo(ui, { idea: '' }); await ui.refreshEngine(); ui.renderPreview();
+  assert.equal(ui.state.manuscriptVideoSupported, true); assert.equal(elements.get('startManuscriptVideo').disabled, false);
+  fails = true; await ui.refreshEngine();
+  assert.equal(ui.state.manuscriptVideoSupported, false); assert.equal(elements.get('startManuscriptVideo').disabled, true);
+});
+
 test('selected completed screenplay or rewrite can source video without replacing a newer manuscript', async () => {
   for (const action of ['screenplay', 'rewrite']) {
     const pipeline = pipelineRecord(); const { ui, elements, calls } = fixture(async () => response(pipeline)); prepareVideo(ui);
@@ -1466,7 +1537,7 @@ test('H3 sources retain reviewed provenance and repository counts without presen
   assert.equal(rendered.children[3].rel, 'noopener noreferrer');
   assert.equal(elements.get('scriptSkillVersion').textContent, '方法版本：20261006-h3');
   assert.match(html, /Stars 為倉庫關注度，並非成片品質評分/);
-  assert.match(html, /scripts\.js\?v=20261027-fasth3/);
+  assert.match(html, /scripts\.js\?v=20261029-manuscript/);
   elements.get('scriptWritingSkill').value = 'h3-performance-beats'; ui.renderWritingSkillDetails();
   assert.match(elements.get('scriptSkillSources').children[0].children[2].textContent, /社群來源.*倉庫 ⭐ 175.*Forks 4/);
 });
@@ -1813,7 +1884,7 @@ test('history titles render literal text and invalid editor identifiers never pr
   assert.equal(card.children[0].textContent, title); assert.equal(card.children[2].children.length, 2);
   ui.selectHistoryVideo(completedVideo().id); assert.equal(elements.get('scriptHistoryVideoTitle').textContent, title);
   assert.equal(elements.get('openScriptHistoryVideoEditor').classes.has('hidden'), true); assert.doesNotMatch(source, /\.innerHTML\s*=/);
-  assert.match(html, /scripts\.css\?v=20261012-video-format/);
+  assert.match(html, /scripts\.css\?v=20261029-manuscript/);
 });
 
 function lora(overrides = {}) { return { name: 'wushu_h3_r2v_v7_2000.safetensors', strength: 0.5, enabled: true, family: 'ref2va', ...overrides }; }

@@ -147,13 +147,38 @@ class ScriptVideoManager:
             from scriptwriting import validate_script_timeline
             validate_script_timeline(snapshot["content"], snapshot["duration"])
 
+    @staticmethod
+    def _validate_manuscript(snapshot: dict[str, Any]) -> None:
+        content = snapshot.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ScriptVideoError("請先在編輯稿貼上要製作的劇本；直接製作影片不會改用故事想法編寫。")
+
+    def _validate_source(self, pipeline: dict[str, Any]) -> None:
+        if pipeline.get("source_mode") == "manuscript":
+            if pipeline.get("source_job_id") or pipeline.get("automatic_source"):
+                raise ScriptVideoError("編輯稿影片流程不能改用 AI 編寫紀錄，請保留原稿並重新開始。")
+            self._validate_manuscript(pipeline["snapshot"])
+
     async def start(self, raw: Any, *, allow_active_source: bool = False) -> dict[str, Any]:
         if self.closed:
             raise ScriptVideoError("自動影片服務正在關閉。", 503)
-        if not isinstance(raw, dict) or set(raw) - {"project_id", "source_job_id"}:
+        if not isinstance(raw, dict) or set(raw) - {"project_id", "source_job_id", "source_mode", "project_revision"}:
             raise ScriptVideoError("自動影片流程格式錯誤。")
+        manuscript = raw.get("source_mode") == "manuscript"
+        if "source_mode" in raw and not manuscript:
+            raise ScriptVideoError("不支援這個影片製作來源。")
+        if manuscript and ("source_job_id" in raw or allow_active_source):
+            raise ScriptVideoError("直接使用編輯稿時，不能同時指定 AI 編寫紀錄。")
+        if "project_revision" in raw:
+            revision = raw["project_revision"]
+            if not manuscript or isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise ScriptVideoError("編輯稿版本格式錯誤，請重新儲存後再製作影片。")
         async with self.start_lock:
             project = self.scripts.get_project(raw.get("project_id"))
+            if manuscript:
+                if "project_revision" in raw and raw["project_revision"] != project["revision"]:
+                    raise ScriptVideoError("編輯稿已有更新版本，請重新讀取並確認稿件後再製作影片。", 409)
+                self._validate_manuscript(project)
             self._check_duplicate(project["id"])
             source_id = raw.get("source_job_id")
             if source_id is not None and (not isinstance(source_id, str) or not SAFE_ID.fullmatch(source_id)):
@@ -189,6 +214,7 @@ class ScriptVideoManager:
                 "video_settings": copy.deepcopy(snapshot["video_settings"]),
                 "video_format": {**video_dimensions(snapshot["video_settings"]), "container": "mp4"},
                 "automatic_source": allow_active_source, "source_action": source.get("action") if source else None,
+                **({"source_mode": "manuscript"} if manuscript else {}),
             }
             self._save(pipeline)
             self.pipelines[pipeline["id"]] = pipeline
@@ -279,6 +305,7 @@ class ScriptVideoManager:
         pipeline = self.pipelines[pipeline_id]
         try:
             self._update(pipeline, status="running", error=None)
+            self._validate_source(pipeline)
             await self.preflight(pipeline["snapshot"])
             self._check_cancelled(pipeline_id)
             snapshot = copy.deepcopy(pipeline["snapshot"])
@@ -424,6 +451,7 @@ class ScriptVideoManager:
             if pipeline.get("status") == "completed":
                 return copy.deepcopy(pipeline)
             self._check_duplicate(pipeline["project_id"], exclude=pipeline_id)
+            self._validate_source(pipeline)
             await self.preflight(pipeline["snapshot"])
             self._update(pipeline, status="queued", error=None)
             self._launch(pipeline_id)

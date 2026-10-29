@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>腳本編寫 · MiniMax H3 Studio</title>
   <link rel="stylesheet" href="/static/styles.css?v=20261002-scripts">
-  <link rel="stylesheet" href="/static/scripts.css?v=20261012-video-format">
+  <link rel="stylesheet" href="/static/scripts.css?v=20261029-manuscript">
   <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-recommendations">
   <link rel="stylesheet" href="/static/workspace_ui.css?v=20261017-ux">
 </head>
@@ -16,8 +16,13 @@
   </header>
   <main class="script-page">
     <section class="script-intro">
-      <div><p class="eyebrow">STORY STARTS HERE</p><h1>把想法，寫成<br><span>可拍的故事。</span></h1><p>故事大綱 → 完整劇本 → 影片分鏡</p></div>
+      <div><p class="eyebrow">STORY STARTS HERE</p><h1>從想法或劇本，<br><span>開始製作影片。</span></h1><p>發展新故事，或直接使用你已完成的編輯稿。</p></div>
       <div class="script-intro-note"><span>腳本編寫</span><strong>你的創作室，<br>就在這台電腦。</strong><p>使用本機 Ollama 模型。<br>下載完成後，可離線編寫。</p></div>
+    </section>
+
+    <section class="script-entry" aria-label="選擇製作起點">
+      <button id="scriptStartFromIdea" class="script-entry-option" type="button" aria-pressed="true"><strong>從故事想法開始</strong><span>先發展大綱、編寫或潤飾劇本。</span></button>
+      <button id="scriptStartFromManuscript" class="script-entry-option" type="button" aria-pressed="false"><strong>貼上編輯稿</strong><span>已有劇本，直接接續分鏡與影片；故事想法可留白。</span></button>
     </section>
 
     <section class="script-engine" aria-label="本機模型狀態">
@@ -51,7 +56,7 @@
         <div id="scriptBriefFields">
           <label>劇本名稱<input id="scriptTitle" maxlength="120" placeholder="例如：雨停之前"></label>
           <div class="script-fields"><label>類型<select id="scriptGenre"><option value="劇情">劇情</option><option value="廣告">廣告</option><option value="喜劇">喜劇</option><option value="奇幻">奇幻</option><option value="懸疑">懸疑</option><option value="科幻">科幻</option><option value="動畫">動畫</option><option value="紀錄片">紀錄片</option><option value="其他">其他</option></select></label><label>目標片長（秒）<input id="scriptDuration" type="number" min="5" max="7200" value="15" required></label></div>
-          <label>故事想法 <span class="script-required">或直接貼上既有劇本</span><textarea id="scriptIdea" rows="5" maxlength="12000" placeholder="主角想得到什麼？誰或什麼阻止了他？故事在哪裡發生？&#10;例如：一名深夜咖啡店店員，遇到每天在同一時間出現、卻從不點咖啡的客人。"></textarea></label>
+          <label>故事想法 <span class="script-required">直接用編輯稿時可留白</span><textarea id="scriptIdea" rows="5" maxlength="12000" placeholder="主角想得到什麼？誰或什麼阻止了他？故事在哪裡發生？&#10;例如：一名深夜咖啡店店員，遇到每天在同一時間出現、卻從不點咖啡的客人。"></textarea></label>
           <section class="script-writing-skill" aria-labelledby="scriptWritingSkillTitle"><label id="scriptWritingSkillTitle" for="scriptWritingSkill">創作 Skill</label><select id="scriptWritingSkill"><option value="">不套用／保留原設定</option><option value="cinematic-story" disabled>電影敘事 · 正在讀取</option></select><p id="scriptSkillStatus" class="script-hint" role="status" aria-live="polite">正在讀取創作方法；可選擇不套用，保留原設定。</p><p id="scriptSkillSummary" class="script-skill-summary"></p><p id="scriptSkillSuitable" class="script-hint"></p><div class="script-skill-recommendation"><p id="scriptSkillRecommendation" class="script-hint"></p><button id="applyScriptSkillRecommendation" class="button ghost small" type="button" disabled>使用推薦 Skill</button></div><details id="scriptSkillDetails" class="script-skill-details hidden"><summary>查看拍攝寫作方法與來源</summary><ol id="scriptSkillGuide"></ol><h4>參考來源與授權</h4><p id="scriptSkillPopularityNote" class="script-hint">Stars 為倉庫關注度，並非成片品質評分；以下數字屬來源倉庫，不是此創作方法的評分。</p><p id="scriptSkillVersion" class="script-hint"></p><ul id="scriptSkillSources"></ul></details></section>
           <label>角色、關係與參考圖<textarea id="scriptCharacters" rows="3" maxlength="12000" placeholder="&lt;角色名稱&gt;＝圖一；&lt;角色名稱&gt;＝圖二；&lt;場景&gt;＝圖三&#10;補充角色個性、動機與關係；未提供圖片時，可只描述角色。"></textarea></label>
           <section class="script-references" aria-labelledby="scriptReferencesTitle"><div class="script-references-heading"><h3 id="scriptReferencesTitle">角色外觀對照</h3><span id="scriptReferenceCount">0 / 16</span></div><p class="script-hint">每個名稱對應一張圖片。分析後先確認外觀描述，也可手寫或修正；編劇會依名稱使用這份外觀設定。</p><div id="scriptCharacterReferences" class="script-reference-list"></div><button id="addScriptReference" class="button ghost small" type="button">＋ 新增角色／場景</button></section>
@@ -74,7 +79,8 @@
           <p id="scriptVideoFormatSummary" class="script-video-format-summary" role="status" aria-live="polite">生成 864 × 480 → 成片 864 × 480 · MP4 · 24 fps</p>
           <p class="script-hint">提高生成精細度會增加生成負擔。成片升尺度不會新增細節；影片比例與成片尺寸不同時，會補上必要黑邊以保留完整畫面。</p>
           <p id="scriptVideoFormatFutureHint" class="script-hint hidden">影片流程使用啟動時保存的格式；目前變更只供下一個新流程使用。接續仍沿用原格式。</p>
-          <label>一鍵製作來源<select id="scriptVideoSource"><option value="current">編輯稿／故事想法</option><option value="preview">目前選擇的已完成劇本</option></select></label>
+          <label>一鍵製作來源<select id="scriptVideoSource" aria-describedby="scriptVideoSourceHint"><option value="current">編輯稿／故事想法（自動判斷）</option><option value="manuscript">直接使用編輯稿 · 跳過 AI 寫稿</option><option value="preview">目前選擇的已完成劇本</option></select></label>
+          <p id="scriptVideoSourceHint" class="script-hint" role="status" aria-live="polite">有編輯稿時直接接續分鏡；只有故事想法時先編寫劇本。</p>
           <button id="startScriptVideoPipeline" class="button primary wide" type="button" disabled>劇本 → 自動生成影片</button>
           <p class="script-hint">多模態 Ref2VA · 原生品質。至少提供一張角色、場景或物件圖；每個角色需有對應圖片與外觀描述。原編輯稿與生成紀錄保留。</p>
           <p id="scriptVideoReadyStatus" class="script-hint" role="status" aria-live="polite">正在檢查自動影片功能…</p>
@@ -94,6 +100,7 @@
           <label class="script-sr-only" for="scriptContent">可自由編輯的劇本文字</label>
           <textarea id="scriptContent" spellcheck="false" maxlength="300000" placeholder="在這裡自由寫作、貼上既有劇本，或從故事設定開始生成。&#10;&#10;1. 0.0–2.0s｜深入叢林&#10;鏡頭／景別：18mm 超廣角大全景，低機位。&#10;地點：熱帶叢林。&#10;角色／位置與空間關係：主角在中央偏前，背對鏡頭。&#10;動作／表情：撥開葉片，左右好奇張望。&#10;運鏡：低機位追焦→推進。&#10;VFX：陽光體積光、葉片水珠。&#10;聲音：蟲鳴、葉片摩擦、腳步；零 BGM。&#10;對白：無。"></textarea>
           <div class="script-editor-footer"><span id="scriptWordCount">0 字</span><span id="scriptRevision">手寫與 AI 生成可以接續編輯</span></div>
+          <div class="script-manuscript-actions"><p id="scriptManuscriptHint" class="script-hint">貼上你的劇本，確認目標片長、參考圖與影片設定後，直接開始製作。會使用這份稿件建立分鏡。</p><button id="scriptManuscriptSettings" class="button ghost small" type="button">檢查素材與影片設定</button><button id="startManuscriptVideo" class="button primary" type="button" disabled>用編輯稿產生影片 →</button></div>
         </section>
 
         <section class="script-preview script-panel" aria-labelledby="scriptPreviewTitle">
@@ -114,7 +121,7 @@
     <footer class="script-page-footer">MiniMax H3 Studio <span>從文字開始，把故事帶到畫面。</span></footer>
   </main>
   <script src="/static/lora-help.js?v=20261005-lora-recommendations" defer></script>
-  <script src="/static/scripts.js?v=20261027-fasth3" defer></script>
+  <script src="/static/scripts.js?v=20261029-manuscript" defer></script>
   <script src="/static/workspace_ui.js?v=20261017-ux"></script>
 </body>
 </html>

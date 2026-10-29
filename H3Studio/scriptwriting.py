@@ -1524,6 +1524,7 @@ def register_scriptwriting_routes(app: web.Application, static_dir: Path, data_d
         value = await manager.status()
         video_status = await videos.readiness() if videos is not None else {"ready": False, "error": video_error}
         value.update(video_pipelines_supported=True, video_ready=video_status["ready"], video_error=video_status["error"])
+        value["manuscript_video_supported"] = True
         value["video_model_supported"] = video_status.get("video_model_supported") is True
         value["video_models"] = video_status.get("video_models", [])
         value["writing_skills_supported"] = True
