@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from shortfilm import flatten_shots, validate_shot_references
+from generation_review import review_digest
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
 ACTIVE = {"queued", "running"}
@@ -40,9 +41,10 @@ def generation_source(project):
 
 
 class ShortFilmBatchManager:
-    def __init__(self, app, data_dir, compile_submit, *, poll_interval=0.25):
+    def __init__(self, app, data_dir, compile_submit, *, poll_interval=0.25, prepare_review=None, submit_review=None):
         self.app = app
         self.compile_submit = compile_submit
+        self.prepare_review, self.submit_review = prepare_review, submit_review
         self.poll_interval = poll_interval
         self.directory = Path(data_dir) / "shortfilm-batches"
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -58,6 +60,7 @@ class ShortFilmBatchManager:
                     raise ValueError("invalid batch identity")
                 if value.get("status") in ACTIVE:
                     value.update(status="interrupted", error="Studio 已重新啟動。已送出的鏡頭保留，按接續可繼續後續鏡頭。", updated_at=_now())
+                    value["approved_review_id"] = None
                     self._save(value)
                 self.batches[value["id"]] = value
             except (OSError, ValueError) as error:
@@ -90,7 +93,7 @@ class ShortFilmBatchManager:
         for batch in self.batches.values():
             task = self.tasks.get(batch["id"])
             if batch["id"] != exclude and batch["project_id"] == project_id and (
-                    batch["status"] in ACTIVE or task is not None and not task.done()):
+                    batch["status"] in {*ACTIVE, "awaiting_review"} or task is not None and not task.done()):
                 raise ShortFilmBatchError("這份短片已有依序生成流程，可查看進度或先停止。", 409)
 
     def _current(self, batch):
@@ -112,7 +115,17 @@ class ShortFilmBatchManager:
     def _dispatch(self, batch):
         self.tasks[batch["id"]] = asyncio.create_task(self._run(batch["id"]))
 
-    async def start(self, project_id):
+    @staticmethod
+    def _review_flag(raw):
+        if raw is None:
+            return False
+        if (not isinstance(raw, dict) or set(raw) - {"require_prompt_review"}
+                or "require_prompt_review" in raw and not isinstance(raw["require_prompt_review"], bool)):
+            raise ShortFilmBatchError("生成稿確認選項格式錯誤。")
+        return raw.get("require_prompt_review", False)
+
+    async def start(self, project_id, raw=None):
+        review_required = self._review_flag(raw)
         async with self.lock:
             if self.closed:
                 raise ShortFilmBatchError("Studio 正在關閉，請稍後再試。", 503)
@@ -130,37 +143,57 @@ class ShortFilmBatchManager:
                      "status": "queued", "snapshot": snapshot, "shot_ids": [shot["id"] for _, shot in shots],
                      "shot_jobs": {}, "completed_shot_ids": [], "current_shot_id": None,
                      "current_shot_title": "", "progress": 0, "error": None,
-                     "created_at": now, "updated_at": now}
+                     "created_at": now, "updated_at": now, "require_prompt_review": review_required,
+                     "pending_review": None, "review": None, "approved_review_id": None}
             self._save(batch)
             self.batches[batch["id"]] = batch
             self._dispatch(batch)
             return self.get(batch["id"])
 
-    async def resume(self, batch_id):
+    async def resume(self, batch_id, raw=None):
+        review_required = self._review_flag(raw)
         async with self.lock:
             batch = self.batches[self.get(batch_id)["id"]]
             if self.closed:
                 raise ShortFilmBatchError("Studio 正在關閉，請稍後再試。", 503)
-            if batch["status"] not in {"failed", "cancelled", "interrupted"}:
+            if batch["status"] not in {"failed", "cancelled", "interrupted", "awaiting_review"}:
                 raise ShortFilmBatchError("只有已停止的依序生成可以接續。", 409)
             self._check_duplicate(batch["project_id"], exclude=batch_id)
             task = self.tasks.get(batch_id)
             if task is not None and not task.done():
                 raise ShortFilmBatchError("流程尚在停止中，請稍後再按接續。", 409)
             self._current(batch)
-            self._update(batch, status="queued", error=None)
+            self._update(batch, status="queued", error=None, approved_review_id=None,
+                         require_prompt_review=review_required or batch.get("require_prompt_review", False))
             self._dispatch(batch)
             return self.get(batch_id)
 
     async def cancel(self, batch_id):
         batch = self.batches[self.get(batch_id)["id"]]
-        if batch["status"] in ACTIVE:
+        if batch["status"] in {*ACTIVE, "awaiting_review"}:
             self._update(batch, status="cancelled", error="已停止提交後續鏡頭；目前已送出的工作仍會完成。")
             task = self.tasks.get(batch_id)
             if task is not None and not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
         return self.get(batch_id)
+
+    async def approve(self, batch_id, raw):
+        async with self.lock:
+            batch = self.batches[self.get(batch_id)["id"]]
+            review, packet = batch.get("review"), batch.get("pending_review")
+            task = self.tasks.get(batch_id)
+            if (not isinstance(raw, dict) or set(raw) != {"review_id"} or not isinstance(review, dict)
+                    or raw.get("review_id") != review.get("id") or batch["status"] != "awaiting_review"
+                    or not packet or review.get("packet_digest") != review_digest(packet)
+                    or task is not None and not task.done()):
+                raise ShortFilmBatchError("這份生成稿已失效，請重新檢查目前鏡頭。", 409)
+            if self.closed:
+                raise ShortFilmBatchError("Studio 正在關閉，請稍後再試。", 503)
+            self._current(batch)
+            self._update(batch, approved_review_id=review["id"], status="queued", error=None)
+            self._dispatch(batch)
+            return self.get(batch_id)
 
     async def _wait_job(self, batch, job_id):
         while True:
@@ -186,7 +219,26 @@ class ShortFilmBatchManager:
                 job_id = batch["shot_jobs"].get(shot["id"]) or shot.get("job_id")
                 existing = self.app["jobs"].jobs.get(job_id)
                 if existing is None or existing.get("status") not in {*VIDEO_ACTIVE, "completed"}:
-                    child = await self.compile_submit(batch["project_id"], shot["id"], batch["snapshot"])
+                    if batch.get("require_prompt_review"):
+                        if not callable(self.prepare_review) or not callable(self.submit_review):
+                            raise ShortFilmBatchError("主機尚未支援生成稿確認，請先更新 Studio。", 503)
+                        review, packet = batch.get("review"), batch.get("pending_review")
+                        if not isinstance(review, dict) or review.get("shot_id") != shot["id"] or not packet:
+                            packet = await self.prepare_review(batch["project_id"], shot["id"], batch["snapshot"])
+                            self._current(batch)
+                            review = {"id": uuid.uuid4().hex, "created_at": _now(), "shot_id": shot["id"],
+                                      "prompts": [copy.deepcopy(packet["prompt"])], "packet_digest": review_digest(packet)}
+                            self._update(batch, pending_review=packet, review=review, approved_review_id=None)
+                        if review.get("packet_digest") != review_digest(packet):
+                            raise ShortFilmBatchError("生成稿內容已變更，請開始新的影片流程。", 409)
+                        if batch.get("approved_review_id") != review["id"]:
+                            self._update(batch, status="awaiting_review")
+                            return
+                        self._current(batch)
+                        child = await self.submit_review(batch["project_id"], shot["id"], batch["snapshot"], copy.deepcopy(packet))
+                        batch.update(pending_review=None, review=None, approved_review_id=None)
+                    else:
+                        child = await self.compile_submit(batch["project_id"], shot["id"], batch["snapshot"])
                     if not isinstance(child, dict) or not SAFE_ID.fullmatch(str(child.get("id", ""))):
                         raise ShortFilmBatchError("鏡頭生成服務沒有回傳有效工作記錄。")
                     job_id = child["id"]

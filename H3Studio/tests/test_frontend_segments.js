@@ -17,15 +17,18 @@ function fixture(shots = []) {
     videoModelSupported: false, videoModelProfiles: [],
     shortFilmRecoveries: new Map(),
     getShortFilmSaveCoordinator: () => ({status: () => ({state: 'saved'})}),
-    shortFilmProjects: [], messages: [], submissions: [], waits: [], locks: [], calls: [],
+    shortFilmProjects: [], messages: [], submissions: [], waits: [], locks: [], calls: [], bodies: [], reviews: [],
+    async requestGenerationReview(compiled) { context.reviews.push(compiled); return context.reviewChoice || 'approve'; },
     $: element, structuredClone, confirm: () => true,
     toast(message) { context.messages.push(message); },
     renderShortFilmSummary() {}, renderShortFilmScenes() {}, scheduleShortFilmSave() {},
     setShortFilmBatchEditing(locked) { context.locks.push(locked); },
     activeShortFilmProject() { return context.project; },
     async saveShortFilmProject() {}, async refreshShortFilmShotStatuses() {},
-    async api(url) {
+    async api(url, options = {}) {
       context.calls.push(url);
+      if (options.body) context.bodies.push(JSON.parse(options.body));
+      if (url === '/api/scripts/status') return { prompt_review_supported: true };
       if (url.startsWith('/api/shortfilm-batches?')) return context.serverBatch ? [context.serverBatch] : [];
       if (url === '/api/shortfilms/project') return structuredClone(context.project);
       context.serverBatch = {id: 'batch', project_id: 'project', status: url.endsWith('/cancel') ? 'cancelled' : 'queued',
@@ -45,7 +48,7 @@ function fixture(shots = []) {
     },
     async waitForShortFilmJob(id) { context.waits.push(id); return {status: 'completed'}; },
   });
-  for (const name of ['videoModelSelectionError', 'shortFilmFlatten', 'shortFilmSegmentDraft', 'shortFilmSegmentPreview', 'shortFilmAliasMentioned', 'shortFilmShotAssetSelection', 'shortFilmShotReferenceUsage', 'shortFilmBatchBlockers', 'buildShortFilmSegmentRows', 'findShortFilmShot', 'renderShortFilmBatch', 'loadShortFilmBatchStatus', 'runShortFilmBatch', 'stopShortFilmBatch']) {
+  for (const name of ['videoModelSelectionError', 'shortFilmFlatten', 'shortFilmSegmentDraft', 'shortFilmSegmentPreview', 'shortFilmAliasMentioned', 'shortFilmShotAssetSelection', 'shortFilmShotReferenceUsage', 'shortFilmBatchBlockers', 'buildShortFilmSegmentRows', 'findShortFilmShot', 'renderShortFilmBatch', 'loadShortFilmBatchStatus', 'runShortFilmBatch', 'stopShortFilmBatch', 'reviewShortFilmBatchPrompt']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), context);
@@ -66,8 +69,28 @@ test('short-film batch tracking and resume use the frozen model independently of
   context.videoModelSupported=true;
   context.videoModelProfiles=[{id:'h3',ready:false,error:'H3 absent'},{id:'fasth3_omni_nvfp4',ready:true}];
   await context.runShortFilmBatch(true);
-  assert.deepEqual(context.calls,['/api/shortfilm-batches/fast-batch/resume']);
+  assert.deepEqual(context.calls,['/api/scripts/status','/api/shortfilm-batches/fast-batch/resume']);
   assert.equal(context.project.video_model,'h3');
+});
+
+test('batch requests require prompt review and a restored waiting review never submits itself', async () => {
+  const { context, element } = fixture([shot(0)]); await context.runShortFilmBatch();
+  assert.deepEqual(context.bodies[0], { require_prompt_review: true });
+  context.serverBatch = { id: 'batch', project_id: 'project', status: 'awaiting_review', current_shot_title: 'first', review: { id: 'review-1', prompts: [{ prompt: '[Video]\nA waves.', duration: 5, width: 864, height: 480, video_model: 'h3' }] } };
+  await context.loadShortFilmBatchStatus();
+  assert.equal(context.shortFilmBatchRunning, true); assert.equal(context.reviews.length, 0);
+  assert.match(element('#shortfilmBatchNote').textContent, /等待你確認/);
+  assert.equal(context.calls.some(url => url.endsWith('/approve')), false);
+});
+
+test('batch prompt approval sends only the current review id and cancellation leaves it waiting', async () => {
+  const { context } = fixture([shot(0)]);
+  const waiting = { id: 'batch', status: 'awaiting_review', review: { id: 'review-1', prompts: [{ prompt: '[Video]\nA waves.', duration: 5, width: 864, height: 480, video_model: 'h3', mapping: [{ alias: 'A' }] }] } };
+  context.renderShortFilmBatch(waiting); context.reviewChoice = 'cancel'; await context.reviewShortFilmBatchPrompt();
+  assert.equal(context.calls.length, 0); assert.equal(context.shortFilmBatch.status, 'awaiting_review');
+  context.reviewChoice = 'approve'; await context.reviewShortFilmBatchPrompt();
+  assert.deepEqual(context.calls, ['/api/shortfilm-batches/batch/approve']); assert.deepEqual(context.bodies[0], { review_id: 'review-1' });
+  assert.equal(context.reviews[0].prompt, waiting.review.prompts[0].prompt);
 });
 
 test('60 / 5 builds 12 editable rows and does not alter existing scenes', () => {
@@ -108,7 +131,7 @@ test('counts shared multiimage assets, alias matches and tail frame before submi
 test('12 shots submit one host-owned batch without browser-owned rendering', async () => {
   const {context, run} = fixture(Array.from({length: 12}, (_, i) => shot(i)));
   await run('runShortFilmBatch()');
-  assert.deepEqual(context.calls, ['/api/shortfilms/project/batch']);
+  assert.deepEqual(context.calls, ['/api/scripts/status','/api/shortfilms/project/batch']);
   assert.equal(context.submissions.length, 0);
   assert.equal(context.waits.length, 0);
   assert.equal(context.shortFilmBatchRunning, true);

@@ -11,7 +11,8 @@ _LANGUAGE_TAG = re.compile(r"^\s*\[[A-Za-z][A-Za-z -]*\]")
 _SPEECH_END = re.compile(
     r"(?:台詞|台词|對白|对白|旁白|畫外音|画外音|低聲|低声|低語|低语|大喊|喊道|喊|"
     r"說道|说道|說|说|問道|问道|問|问|回答|答道|回應|回应|自言自語|自言自语|"
-    r"喃喃自語|喃喃自语|念道|"
+    r"喃喃自語|喃喃自语|念道|輕聲細語|轻声细语|害羞道|羞澀道|羞涩道|"
+    r"輕聲道|轻声道|柔聲道|柔声道|小聲道|小声道|低聲道|低声道|"
     r"\b(?:says?|said|asks?|asked|replies|replied|shouts?|whispers?|dialogue|"
     r"voice[ -]?over|narration|narrator))$",
     re.IGNORECASE,
@@ -33,10 +34,12 @@ _NO_DIALOGUE = re.compile(r"^(?:無|无|沒有|没有|無對白|无对白|無台
 _QUOTE_PAIRS = {"「": "」", "『": "』", "“": "”", '"': '"'}
 _SILENT_HEADING = re.compile(
     r"(?:無|无|沒有|没有|不要|禁止|不需|不必|不)(?:任何|加入|新增|加上)?"
-    r"(?:對白|对白|台詞|台词|旁白|畫外音|画外音|說|说|喊|低語|低语)|"
+    r"(?:對白|对白|台詞|台词|旁白|畫外音|画外音|說|说|喊|低語|低语|輕聲細語|轻声细语|害羞道)|"
     r"\bno\s+(?:spoken\s+)?(?:dialogue|speech|narration|voice[ -]?over)\b", re.I,
 )
 _VISIBLE_TEXT = re.compile(r"字幕|字卡|招牌|標語|标语|螢幕文字|屏幕文字|\b(?:caption|subtitle|signage)\b", re.I)
+_NON_SPEECH_LABEL = re.compile(r"(?:音效|聲音|声音|環境音|环境音|運鏡|运镜|動作|动作|VFX|SFX|sound(?:scape)?|camera|effects?)\s*[:：]", re.I)
+_MIXED_HEADING = re.compile(r"(?:音效|聲音|声音|環境音|环境音|SFX|sound|effect)", re.I)
 
 
 def _speech_context(text: str) -> str:
@@ -83,6 +86,9 @@ def _speech_heading(text: str, speakers: set[str]) -> bool:
         return False
     # A label may specify the language after the speaking cue, e.g. 台詞（中文）.
     without_language = re.sub(r"[（(\[].*?[）)\]]$", "", heading).rstrip()
+    tail = re.split(r"[:：]", without_language)[-1]
+    if _MIXED_HEADING.search(tail) and re.search(r"台詞|台词|對白|对白|dialogue", tail, re.I):
+        return False
     if _SPEECH_END.search(without_language):
         return True
     return without_language in speakers or without_language in {"角色", "男主角", "女主角"}
@@ -99,15 +105,25 @@ def _unquoted_labels(text: str, speakers: set[str]) -> str:
         # A multiline sign/quotation can itself contain a line such as 台詞：… .
         inside_quote = any(start <= offset + len(line) - len(line.lstrip()) < end for start, end in quote_spans)
         match = _LABEL_LINE.match(body_line)
-        if not inside_quote and match and _speech_heading(match["head"], speakers):
+        if not inside_quote and match and _speech_heading(match["head"], speakers) and not _MIXED_HEADING.search(match["head"]):
             body = match["body"]
             pending_heading = match["head"] if not body.strip() else ""
-            if body.strip() and not body.lstrip().startswith((*_QUOTE_PAIRS, "<d>")):
+            if body.strip() and not any(opener in body for opener in _QUOTE_PAIRS) and "<d>" not in body:
                 # Keep Markdown around the line outside the model's speech tag.
                 suffix = ""
                 if match["prefix"].endswith(("**", "__")) and body.endswith(match["prefix"][-2:]):
                     suffix, body = body[-2:], body[:-2]
-                body_line = body_line[:match.start("body")] + _wrap(body, match["head"]) + suffix
+                # A mixed line can continue with a separate sound/camera field.
+                # Only the explicit speech value before that next field is spoken.
+                next_field = _NON_SPEECH_LABEL.search(body)
+                if next_field:
+                    stop = next_field.start()
+                    while stop > 0 and body[stop - 1] in " \t；;":
+                        stop -= 1
+                    spoken, remainder = body[:stop], body[stop:]
+                    body_line = body_line[:match.start("body")] + _wrap(spoken, match["head"]) + remainder + suffix
+                else:
+                    body_line = body_line[:match.start("body")] + _wrap(body, match["head"]) + suffix
         else:
             if (pending_heading and not inside_quote and body_line.strip()
                     and not re.search(r"[:：]", body_line)

@@ -175,6 +175,7 @@ class LocalRequestTests(unittest.IsolatedAsyncioTestCase):
                                                 {"base_url": str(server.make_url("/")), "model": "writer"})
             self.assertEqual(result, sent)
             self.assertEqual(calls[0]["options"]["num_gpu"], 0)
+            self.assertIs(calls[0]["think"], False)
             self.assertEqual(calls[0]["keep_alive"], 0)
             self.assertEqual(calls[0]["format"]["required"], ["0"])
             self.assertIn("H3KEEPABCDEF123456X0000X", calls[0]["format"]["properties"]["0"]["pattern"])

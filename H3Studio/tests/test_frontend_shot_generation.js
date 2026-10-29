@@ -30,7 +30,7 @@ function fixture() {
   const preparation = deferred();
   const storage = new Map(), serverRevisions = new Map(projects.map(project => [project.id, project.revision]));
   const context = vm.createContext({
-    shortFilmProjects: structuredClone(projects), activeShortFilmId: 'a', shortFilmShotRequests: new Map(),
+    shortFilmReviewCache: new Map(), async requestGenerationReview() { return context.reviewChoice || 'approve'; }, shortFilmProjects: structuredClone(projects), activeShortFilmId: 'a', shortFilmShotRequests: new Map(),
     shortFilmBatchRunning: false, shortFilmSaveTimer: null, expandedShortFilmJobIds: new Set(),
     shortFilmSaveCoordinator: null, shortFilmRecoveries: new Map(), ShortFilmPersistence, serverRevisions,
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) },
@@ -61,7 +61,7 @@ function fixture() {
     },
   });
   for (const name of ['activeShortFilmProject', 'shortFilmFlatten', 'setButtonBusy', 'saveShortFilmProject', 'shortFilmModelSaveError', 'getShortFilmSaveCoordinator', 'renderShortFilmSaveStatus',
-    'shortFilmGenerationSignature', 'renderShortFilmShotRequests', 'confirmTranslationFallback', 'compileShortFilmShot', 'refreshShortFilmShotStatuses']) {
+    'shortFilmGenerationSignature', 'renderShortFilmShotRequests', 'compileShortFilmShot', 'refreshShortFilmShotStatuses']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1, name);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), context);
@@ -111,7 +111,7 @@ test('preview prepares content without posting a render', async () => {
 });
 
 test('declining original-text generation leaves the shot editable and never posts a render', async () => {
-  const f = fixture(); f.context.confirm = () => false;
+  const f = fixture(); f.context.reviewChoice = 'cancel';
   const request = f.run('compileShortFilmShot("shot-a", true)');
   await f.flush();
   const prepared = f.result(); prepared.payload.h3_translation = {status:'unavailable'};

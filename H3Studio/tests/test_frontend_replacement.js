@@ -26,13 +26,13 @@ function fixture() {
     setMode(mode) { context.state.mode = mode; },
     async loadJobRecipe() { return context.recipe; },
     async prepareReplacementVideo() {},
-    promptKeywords: () => [], setButtonBusy() {}, async loadJobs() {}, generationPreflight: null, modeLabels: {},
+    promptKeywords: () => [], setButtonBusy() {}, async loadJobs() {}, generationPreflight: null, modeLabels: {}, async requestGenerationReview() { return 'approve'; },
   });
   const start = source.indexOf('const defaultState =');
   vm.runInContext(source.slice(start, source.indexOf('\n};', start) + 3) + '\nglobalThis.defaultState = defaultState;', context);
   context.state = structuredClone(context.defaultState);
   context.state.mode = 'replace';
-  for (const name of ['renderReplacement', 'addReplacementFiles', 'collectPayload', 'recipeAsset', 'originalGenerationRequest', 'applyJobRecipe', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'showGenerationStage', 'confirmTranslationFallback', 'renderVideo']) {
+  for (const name of ['renderReplacement', 'addReplacementFiles', 'collectPayload', 'recipeAsset', 'originalGenerationRequest', 'applyJobRecipe', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'showGenerationStage', 'renderVideo']) {
     const index = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(index, -1);
     vm.runInContext(source.slice(index, source.indexOf('\n}', index) + 2), context);

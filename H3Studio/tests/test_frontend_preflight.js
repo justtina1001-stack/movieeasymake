@@ -17,7 +17,7 @@ function fixture() {
   };
   const c = vm.createContext({
     $: element, structuredClone, state: { mode: 't2v' }, modeLabels: { t2v: '文生影片' }, generationPreflight: null,
-    videoModelSupported: false, videoModelProfiles: [],
+    videoModelSupported: false, videoModelProfiles: [], async requestGenerationReview() { return 'approve'; },
     messages: [], calls: [], input: { mode: 't2v', prompt: '角色揮手。', seed: 1 },
     collectPayload: () => ({ ...c.input }), promptKeywords: () => [], setButtonBusy() {},
     async loadJobs() {}, persistForm() {}, toast: message => c.messages.push(message),
@@ -26,13 +26,13 @@ function fixture() {
       return url === '/api/compile' ? c.compiled : { id: 'job-test' };
     },
   });
-  for (const name of ['escapeHtml', 'videoModelSelectionError', 'originalGenerationRequest', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'showGenerationStage', 'confirmTranslationFallback', 'compilePreview', 'renderVideo']) {
+  for (const name of ['escapeHtml', 'videoModelSelectionError', 'originalGenerationRequest', 'validateReplacementSourceCompilation', 'generationPreflightSignature', 'showGenerationPreflight', 'prepareGeneration', 'showGenerationStage', 'compilePreview', 'renderVideo']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), c);
   }
   c.compiled = { official_mode: 'T2VA', actual_duration: 5.1666667, asset_count: 0, prompt: 'English scene',
-    warnings: [], mapping: [], prepared_payload: { ...c.input, prompt: 'The actor waves.', h3_translation: { status: 'translated' } } };
+    review_receipt: 'receipt-one', warnings: [], mapping: [], prepared_payload: { ...c.input, prompt: 'The actor waves.', h3_translation: { status: 'translated' } } };
   return { c, element };
 }
 
@@ -57,16 +57,16 @@ test('Fast requests require explicit host support before either preview or queue
   assert.equal(c.calls[1].payload.video_model, 'fasth3_omni_nvfp4');
 });
 
-test('preview is reused after a seed change but edited creative inputs compile again', async () => {
+test('changing seed or creative inputs requires a new exact compilation', async () => {
   const { c } = fixture();
   await c.compilePreview();
   c.input.seed = 42;
   await c.renderVideo();
-  assert.deepEqual(c.calls.map(item => item.url), ['/api/compile', '/api/render']);
-  assert.equal(c.calls[1].payload.seed, 42);
+  assert.deepEqual(c.calls.map(item => item.url), ['/api/compile', '/api/compile', '/api/render']);
+  assert.equal(c.calls[2].payload.review_receipt, 'receipt-one');
   c.input.prompt = '角色坐下。';
   await c.renderVideo();
-  assert.equal(c.calls.filter(item => item.url === '/api/compile').length, 2);
+  assert.equal(c.calls.filter(item => item.url === '/api/compile').length, 3);
 });
 
 test('nonblocking warnings and material mapping use escaped content with Chinese summaries', async () => {

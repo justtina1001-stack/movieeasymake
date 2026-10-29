@@ -30,6 +30,7 @@ from script_performance import normalize_screenplay, storyboard_to_performance
 from script_video_format import ScriptVideoFormatError, normalize_video_settings
 from custom_loras import normalize_loras, validate_loras_for_family, validate_lora_requirements
 from video_models import VIDEO_MODEL_FAST
+from h3_official_policy import official_storyboard_rules, OFFICIAL_PROMPT_VERSION
 
 
 DEFAULT_SETTINGS = {
@@ -532,7 +533,7 @@ def build_messages(project: dict[str, Any], action: str, instructions: str) -> l
             "每段保留焦段、機位、位置/距離、表演、運鏡、VFX、聲音及收尾。敘述用英文，素材名稱保留原名，中文台詞不翻譯。"
             " Keep original asset names in English action. Check visible cast/count/positions/start/end state per cut. "
             "Prefer one event/reaction and few cuts unless prescribed. Show counted objects clearly; preserve events/times/dialogue without replay. "
-            "多角色台詞放action：角色名(S1) says <d>[Chinese] 原台詞</d>；角色/動物依characters順序固定S1、S2，背景不佔編號；dialogue和speaker留空，避免重複。"
+            "多角色台詞放action：角色名(S1) says <d>[Chinese] 原台詞</d>；依首次實際發聲順序配置S1、S2並跨鏡保持；不發聲的角色與背景不佔編號；dialogue和speaker留空，避免重複。"
             "文字劇本的「對白：無」代表無對白；轉成JSON時dialogue與speaker都填空字串，不把「無」當作台詞或角色；實際指定台詞仍逐字保留。"
             "單句台詞也可用dialogue及speaker，speaker須為角色/動物。type限character/creature/object/background/style/motion/effect，遺跡為background。"
             "參考圖標籤放reference，無圖片不捏造外觀。action最多5000字、camera_detail800、ending1200、場景description1800。"
@@ -562,6 +563,8 @@ def build_messages(project: dict[str, Any], action: str, instructions: str) -> l
             system += ("\n本次選用的編劇方法只提供創作建議；使用者明確的創作要求、原台詞與參考角色設定優先。"
                        "仍須遵守本次任務的片長、聲音規則及輸出格式；不要輸出方法介紹、來源清單或參考資料代替劇本或分鏡 JSON。\n"
                        + guide)
+    if action == "storyboard":
+        system += official_storyboard_rules()
     if action in {"screenplay", "rewrite"}:
         system += (
             "\n輸出格式範本（欄位名稱固定；括號內容依本次故事填寫，不照抄）：\n"
@@ -1525,6 +1528,9 @@ def register_scriptwriting_routes(app: web.Application, static_dir: Path, data_d
         video_status = await videos.readiness() if videos is not None else {"ready": False, "error": video_error}
         value.update(video_pipelines_supported=True, video_ready=video_status["ready"], video_error=video_status["error"])
         value["manuscript_video_supported"] = True
+        value["prompt_review_supported"] = True
+        value["final_review_supported"] = True
+        value["official_prompt_version"] = OFFICIAL_PROMPT_VERSION
         value["video_model_supported"] = video_status.get("video_model_supported") is True
         value["video_models"] = video_status.get("video_models", [])
         value["writing_skills_supported"] = True
@@ -1573,6 +1579,8 @@ def register_scriptwriting_routes(app: web.Application, static_dir: Path, data_d
             raw = await _payload(request)
             if isinstance(raw, dict) and "auto_video" in raw and not isinstance(raw["auto_video"], bool):
                 raise ScriptwritingError("自動生成影片選項必須是布林值。")
+            if isinstance(raw, dict) and "require_prompt_review" in raw and not isinstance(raw["require_prompt_review"], bool):
+                raise ScriptwritingError("生成稿確認選項必須是布林值。")
             if isinstance(raw, dict) and raw.get("auto_video"):
                 if raw.get("action") not in {"screenplay", "rewrite"}:
                     raise ScriptwritingError("自動生成影片僅適用編寫完整劇本或潤飾編輯稿。")
@@ -1580,7 +1588,8 @@ def register_scriptwriting_routes(app: web.Application, static_dir: Path, data_d
                 snapshot = manager.get_project(raw.get("project_id"))
                 await video_manager().preflight(snapshot)
                 value = manager.submit(raw, project_override=snapshot)
-                pipeline = await video_manager().start({"project_id": value["project_id"], "source_job_id": value["id"]}, allow_active_source=True)
+                pipeline = await video_manager().start({"project_id": value["project_id"], "source_job_id": value["id"],
+                    **({"require_prompt_review": raw["require_prompt_review"]} if "require_prompt_review" in raw else {})}, allow_active_source=True)
                 value["video_pipeline_id"] = pipeline["id"]
                 value["video_pipeline"] = pipeline
                 return web.json_response(value, status=202)
@@ -1638,7 +1647,11 @@ def register_scriptwriting_routes(app: web.Application, static_dir: Path, data_d
         return web.json_response(await video_manager().cancel(request.match_info["pipeline_id"]))
 
     async def resume_video_pipeline(request):
-        return web.json_response(await video_manager().resume(request.match_info["pipeline_id"]), status=202)
+        raw = await _payload(request) if request.can_read_body else {}
+        return web.json_response(await video_manager().resume(request.match_info["pipeline_id"], raw), status=202)
+
+    async def approve_video_pipeline(request):
+        return web.json_response(await video_manager().approve(request.match_info["pipeline_id"], await _payload(request)), status=202)
 
     app.router.add_get("/scripts", endpoint(page))
     app.router.add_get("/api/scripts/settings", endpoint(settings))
@@ -1662,6 +1675,7 @@ def register_scriptwriting_routes(app: web.Application, static_dir: Path, data_d
     app.router.add_get("/api/scripts/video-pipelines/{pipeline_id}", endpoint(video_pipeline))
     app.router.add_post("/api/scripts/video-pipelines/{pipeline_id}/cancel", endpoint(cancel_video_pipeline))
     app.router.add_post("/api/scripts/video-pipelines/{pipeline_id}/resume", endpoint(resume_video_pipeline))
+    app.router.add_post("/api/scripts/video-pipelines/{pipeline_id}/approve", endpoint(approve_video_pipeline))
 
     async def cleanup(application):
         if videos is not None:

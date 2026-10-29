@@ -73,7 +73,7 @@ function fixture(handler, { confirm = () => true, referencesSupported = true, re
   const exposed = source.replace('start().catch(error => message(error.message, true));', 'globalThis.scriptTest = { state, message, writeProject, readProject, markDirty, saveProject, switchProject, applyMonkeyExample, loadJobs, renderHistory, renderPreview, selectJob, deleteJob, changeHistoryScope, openJobProject, applyResult, restoreDraft, offerDraft, generate, crossTabChanged, saveSettings, addReference, removeReference, uploadReferenceImage, renderReferences, exportDraft, refreshEngine, renderPipelines, selectPipeline, loadPipelines, startVideoPipeline, cancelPipeline, resumePipeline, selectedVideoSourceJob, scriptVideoModelError, bindEvents, renderWritingSkills, renderWritingSkillDetails, applyWritingSkillRecommendation, loadWritingSkills, receiveVideoHistory, renderVideoHistory, selectHistoryVideo, changeVideoHistoryScope, refreshVideoHistory }; writeProject(state.project);');
   vm.runInContext(loraHelpSource, context);
   vm.runInContext(exposed.replace('globalThis.scriptTest = { state,', 'globalThis.scriptTest = { loadScriptLoras, renderScriptLoras, addScriptLora, importStoryboard, state,'), context);
-  Object.assign(context.scriptTest.state, { lorasSupported, lorasSupportKnown });
+  Object.assign(context.scriptTest.state, { lorasSupported, lorasSupportKnown, promptReviewSupported: true });
   context.scriptTest.state.referencesSupported = referencesSupported;
   context.scriptTest.state.referencesSupportKnown = referencesSupportKnown;
   Object.assign(context.scriptTest.state, { skillsSupported, skillsSupportKnown, skillsCatalogReady, writingSkills: skillsCatalogReady ? skillCatalog() : [] });
@@ -546,7 +546,7 @@ test('old short-cut validation failures show a recovery hint without changing th
     ui.state.job = { ...ui.state.job, error, action: 'storyboard', status: 'failed', ...change }; ui.renderPreview();
     assert.doesNotMatch(elements.get('scriptJobDetail').textContent, /短切鏡需合併/);
   }
-  assert.match(html, /scripts\.js\?v=20261029-manuscript/);
+  assert.match(html, /scripts\.js\?v=20261029-prompt-review/);
 });
 
 function cameraCorrection(overrides = {}) { return { scene_index: 0, shot_index: 0, original_camera: '35mm low-angle tracking shot', original_camera_detail: '鏡頭跟隨主角前進', camera: 'custom', camera_detail: '35mm low-angle tracking shot\n鏡頭跟隨主角前進', ...overrides }; }
@@ -1216,7 +1216,7 @@ test('one-click video uses saved current manuscript by default and preserves it 
   const pipeline = pipelineRecord(); const { ui, elements, calls } = fixture(async () => response(pipeline)); prepareVideo(ui);
   await ui.startVideoPipeline();
   assert.equal(calls.length, 1); assert.equal(calls[0].url, '/api/scripts/video-pipelines');
-  assert.deepEqual(JSON.parse(calls[0].options.body), { project_id: 'project-a' });
+  assert.deepEqual(JSON.parse(calls[0].options.body), { project_id: 'project-a', require_prompt_review: true });
   assert.equal(elements.get('scriptContent').value, '原始編輯稿');
   assert.equal(ui.state.pipeline.id, pipeline.id); assert.equal(ui.state.dirty, false);
 });
@@ -1243,10 +1243,10 @@ test('direct editor button sends an explicit manuscript snapshot with revision a
   assert.equal(elements.get('startManuscriptVideo').disabled, false);
   await elements.get('startManuscriptVideo').click();
   assert.equal(calls.length, 1);
-  assert.deepEqual(JSON.parse(calls[0].options.body), { project_id: 'project-a', source_mode: 'manuscript', project_revision: 3 });
+  assert.deepEqual(JSON.parse(calls[0].options.body), { project_id: 'project-a', require_prompt_review: true, source_mode: 'manuscript', project_revision: 3 });
   assert.equal(elements.get('scriptContent').value, '0–15秒：紅色機器人揮手說「你好」。'); assert.equal(elements.get('scriptIdea').value, '');
   assert.equal(elements.get('scriptVideoStageList').children[0].textContent, '使用編輯稿'); assert.equal(elements.get('scriptVideoStageList').children[0].className, 'done');
-  assert.match(elements.get('scriptMessage').textContent, /直接接續分鏡與影片/);
+  assert.match(elements.get('scriptMessage').textContent, /確認全部稿件後才生成影片/);
   assert.ok(calls.every(call => call.url !== '/api/scripts/jobs'));
 });
 
@@ -1276,7 +1276,7 @@ test('direct manuscript saves pasted text before launch and protects edits or a 
     if (change === 'content') { elements.get('scriptContent').value = '儲存中新增的另一段'; ui.markDirty(); }
     if (change === 'source') elements.get('scriptVideoSource').value = 'current';
     pending.resolve(response(project({ ...saved, revision: 4 }))); await starting;
-    if (change === 'none') { assert.equal(calls.length, 2); assert.deepEqual(JSON.parse(calls[1].options.body), { project_id: 'project-a', source_mode: 'manuscript', project_revision: 4 }); }
+    if (change === 'none') { assert.equal(calls.length, 2); assert.deepEqual(JSON.parse(calls[1].options.body), { project_id: 'project-a', require_prompt_review: true, source_mode: 'manuscript', project_revision: 4 }); }
     else { assert.equal(calls.length, 1); assert.equal(ui.state.pipeline, null); }
     assert.equal(elements.get('scriptContent').value, change === 'content' ? '儲存中新增的另一段' : '剛貼上的新劇本');
   }
@@ -1284,7 +1284,7 @@ test('direct manuscript saves pasted text before launch and protects edits or a 
 
 test('direct manuscript capability is explicitly advertised and a failed status check disables it', async () => {
   let fails = false;
-  const { ui, elements } = fixture(async url => url === '/api/scripts/status' ? fails ? response({ error: '離線' }, 503) : response({ ready: true, manuscript_video_supported: true, video_pipelines_supported: true, video_ready: true }) : response({ items: [] }));
+  const { ui, elements } = fixture(async url => url === '/api/scripts/status' ? fails ? response({ error: '離線' }, 503) : response({ ready: true, manuscript_video_supported: true, prompt_review_supported: true, video_pipelines_supported: true, video_ready: true }) : response({ items: [] }));
   prepareVideo(ui, { idea: '' }); await ui.refreshEngine(); ui.renderPreview();
   assert.equal(ui.state.manuscriptVideoSupported, true); assert.equal(elements.get('startManuscriptVideo').disabled, false);
   fails = true; await ui.refreshEngine();
@@ -1359,6 +1359,77 @@ test('pipeline stages, progress, failed details and original-settings resume con
   assert.match(html, /接續使用原設定與原參考圖/);
 });
 
+function reviewPipeline(overrides = {}) {
+  return pipelineRecord({ status: 'awaiting_review', stage: 'awaiting_review', progress: 45, review: { id: 'review-one', prompts: [{ scene_id: 'scene-one', shot_id: 'shot-one', video_model: 'fasth3_omni_nvfp4', duration: 5.167, width: 864, height: 480, mapping: [{ alias: '<hero>', picture_tags: ['<Picture 1>'] }], warnings: ['保留角色外觀'], prompt: '[Video]\n<Subject 1> waves.\n[Audio]\nHello!', h3_translation: { status: 'translated' } }] }, ...overrides });
+}
+
+test('persisted awaiting-review pipelines expose full literal prompts and never approve during polling', async () => {
+  const pipeline = reviewPipeline(), { ui, elements, calls } = fixture(async url => url === '/api/scripts/video-pipelines' ? response({ items: [pipeline] }) : response(pipeline));
+  prepareVideo(ui); ui.state.pipeline = pipeline; ui.state.selectedPipelineId = pipeline.id; await ui.loadPipelines();
+  assert.equal(scriptPipelinePresentation(pipeline).active, true);
+  assert.equal(elements.get('scriptPromptReview').classes.has('hidden'), false);
+  const text = flatText(elements.get('scriptPromptReviewList'));
+  assert.match(text, /\[Video\]/); assert.match(text, /\[Audio\]/); assert.match(text, /<Picture 1>/); assert.match(text, /864 × 480/); assert.match(text, /FastH3-Omni/);
+  assert.equal(elements.get('startManuscriptVideo').disabled, true);
+  assert.equal(calls.some(call => call.url.endsWith('/approve')), false);
+  await ui.startVideoPipeline(); assert.equal(calls.some(call => call.options?.method === 'POST'), false);
+});
+
+test('unchanged prompt review polling and original-text choice preserve card identity and reading positions', async () => {
+  const pipeline = reviewPipeline(); pipeline.review.prompts[0].h3_translation = { status: 'unavailable' };
+  const { ui, elements } = fixture(); prepareVideo(ui); ui.bindEvents(); ui.state.pipeline = pipeline; ui.renderPipelines();
+  const list = elements.get('scriptPromptReviewList'), card = list.children[0], prompt = card.children[1];
+  list.scrollTop = 360; prompt.scrollTop = 180;
+  let replacements = 0; const replace = list.replaceChildren.bind(list); list.replaceChildren = (...nodes) => { replacements++; replace(...nodes); };
+  ui.state.pipeline = JSON.parse(JSON.stringify(pipeline)); ui.state.pipeline.updated_at = '2026-10-29T10:00:00Z'; ui.renderPipelines(); ui.renderPipelines();
+  assert.strictEqual(list.children[0], card); assert.strictEqual(list.children[0].children[1], prompt); assert.equal(replacements, 0);
+  assert.equal(list.scrollTop, 360); assert.equal(prompt.scrollTop, 180);
+  await elements.get('useOriginalScriptPromptReview').click();
+  assert.strictEqual(list.children[0].children[1], prompt); assert.equal(replacements, 0);
+  assert.match(elements.get('scriptPromptReviewStatus').textContent, /已選擇使用原文/);
+  assert.equal(elements.get('approveScriptPromptReview').disabled, false);
+});
+
+test('new review content identity or selected pipeline refreshes the displayed review cards', () => {
+  const { ui, elements } = fixture(); prepareVideo(ui); ui.state.pipeline = reviewPipeline(); ui.renderPipelines();
+  const list = elements.get('scriptPromptReviewList'); let previous = list.children[0];
+  ui.state.pipeline.review.id = 'review-two'; ui.renderPipelines(); assert.notStrictEqual(list.children[0], previous); previous = list.children[0];
+  ui.state.pipeline.review.prompts[0].prompt = '[Video]\nThe new reviewed performance.'; ui.renderPipelines();
+  assert.notStrictEqual(list.children[0], previous); assert.match(flatText(list), /new reviewed performance/); previous = list.children[0];
+  ui.state.pipeline = { ...ui.state.pipeline, id: 'd'.repeat(32) }; ui.renderPipelines(); assert.notStrictEqual(list.children[0], previous);
+});
+
+test('script approval sends the exact review id once and does not save changed future manuscript settings', async () => {
+  const pending = deferred(), pipeline = reviewPipeline();
+  const { ui, elements, calls, clipboard } = fixture(async () => pending.promise); prepareVideo(ui); ui.bindEvents();
+  ui.state.pipeline = pipeline; ui.state.selectedPipelineId = pipeline.id; ui.state.pipelines = [pipeline]; ui.renderPipelines();
+  elements.get('scriptContent').value = '下一個流程的新稿'; ui.markDirty();
+  await elements.get('copyScriptPromptReview').click(); assert.match(clipboard[0], /\[Video\].*\n/);
+  const first = elements.get('approveScriptPromptReview').click(); await elements.get('approveScriptPromptReview').click();
+  assert.equal(calls.length, 1); assert.ok(calls[0].url.endsWith('/approve')); assert.deepEqual(JSON.parse(calls[0].options.body), { review_id: 'review-one' });
+  pending.resolve(response({ ...pipeline, status: 'running', stage: 'render' })); await first;
+  assert.equal(elements.get('scriptContent').value, '下一個流程的新稿'); assert.equal(ui.state.dirty, true); assert.equal(elements.get('scriptPromptReview').classes.has('hidden'), true);
+});
+
+test('script original-text fallback requires a separate inline choice before final approval', async () => {
+  const pipeline = reviewPipeline(); pipeline.review.prompts[0].h3_translation = { status: 'unavailable', reason_code: 'timeout' };
+  const { ui, elements, calls } = fixture(async () => response({ ...pipeline, status: 'running' })); prepareVideo(ui); ui.bindEvents(); ui.state.pipeline = pipeline; ui.state.selectedPipelineId = pipeline.id; ui.renderPipelines();
+  assert.equal(elements.get('approveScriptPromptReview').disabled, true);
+  await elements.get('approveScriptPromptReview').click(); assert.equal(calls.length, 0);
+  await elements.get('useOriginalScriptPromptReview').click(); assert.equal(elements.get('approveScriptPromptReview').disabled, false);
+  await elements.get('approveScriptPromptReview').click(); assert.equal(calls.length, 1);
+});
+
+test('old hosts cannot silently skip full prompt review for one-click automatic writing or resume', async () => {
+  for (const action of ['start', 'auto', 'resume']) {
+    const { ui, calls } = fixture(); prepareVideo(ui); ui.state.promptReviewSupported = false; ui.state.autoVideo = true;
+    if (action === 'start') await ui.startVideoPipeline();
+    if (action === 'auto') await ui.generate('screenplay');
+    if (action === 'resume') { ui.state.pipeline = pipelineRecord({ status: 'interrupted' }); await ui.resumePipeline(); }
+    assert.equal(calls.length, 0, action);
+  }
+});
+
 test('only completed local pipeline results become playable and polling does not restart playback', () => {
   const url = `/api/editor/exports/${'d'.repeat(32)}/file`;
   assert.equal(scriptPipelineVideoUrl(pipelineRecord({ status: 'completed', video_url: url })), url);
@@ -1387,7 +1458,7 @@ test('resume uses the original pipeline without saving changed manuscript or sub
   const previous = pipelineRecord({ status: 'interrupted', stage: 'render' }); const { ui, elements, calls } = fixture(async () => response(pipelineRecord({ stage: 'render' }))); prepareVideo(ui);
   elements.get('scriptContent').value = '新的原稿仍未儲存'; ui.markDirty(); ui.state.pipeline = previous; ui.state.selectedPipelineId = previous.id;
   await ui.resumePipeline();
-  assert.equal(calls.length, 1); assert.equal(calls[0].url, `/api/scripts/video-pipelines/${previous.id}/resume`); assert.equal(calls[0].options.body, '{}');
+  assert.equal(calls.length, 1); assert.equal(calls[0].url, `/api/scripts/video-pipelines/${previous.id}/resume`); assert.equal(calls[0].options.body, JSON.stringify({ require_prompt_review: true }));
   assert.equal(elements.get('scriptContent').value, '新的原稿仍未儲存'); assert.equal(ui.state.dirty, true);
   assert.match(elements.get('scriptMessage').textContent, /原設定.*新的流程/);
 });
@@ -1537,7 +1608,7 @@ test('H3 sources retain reviewed provenance and repository counts without presen
   assert.equal(rendered.children[3].rel, 'noopener noreferrer');
   assert.equal(elements.get('scriptSkillVersion').textContent, '方法版本：20261006-h3');
   assert.match(html, /Stars 為倉庫關注度，並非成片品質評分/);
-  assert.match(html, /scripts\.js\?v=20261029-manuscript/);
+  assert.match(html, /scripts\.js\?v=20261029-prompt-review/);
   elements.get('scriptWritingSkill').value = 'h3-performance-beats'; ui.renderWritingSkillDetails();
   assert.match(elements.get('scriptSkillSources').children[0].children[2].textContent, /社群來源.*倉庫 ⭐ 175.*Forks 4/);
 });
@@ -1884,7 +1955,7 @@ test('history titles render literal text and invalid editor identifiers never pr
   assert.equal(card.children[0].textContent, title); assert.equal(card.children[2].children.length, 2);
   ui.selectHistoryVideo(completedVideo().id); assert.equal(elements.get('scriptHistoryVideoTitle').textContent, title);
   assert.equal(elements.get('openScriptHistoryVideoEditor').classes.has('hidden'), true); assert.doesNotMatch(source, /\.innerHTML\s*=/);
-  assert.match(html, /scripts\.css\?v=20261029-manuscript/);
+  assert.match(html, /scripts\.css\?v=20261029-prompt-review/);
 });
 
 function lora(overrides = {}) { return { name: 'wushu_h3_r2v_v7_2000.safetensors', strength: 0.5, enabled: true, family: 'ref2va', ...overrides }; }
@@ -2281,7 +2352,7 @@ test('resume uses its frozen format without saving or sending the edited future 
   const previous=pipelineRecord({status:'interrupted',video_settings:frozen});
   const {ui,elements,calls}=fixture(async()=>response({...previous,status:'running'})); prepareVideo(ui,{video_settings:edited}); ui.markDirty();
   ui.state.pipeline=previous; ui.state.selectedPipelineId=previous.id; await ui.resumePipeline();
-  assert.equal(calls.length,1); assert.equal(calls[0].options.body,'{}'); assert.ok(calls[0].url.endsWith('/resume'));
+  assert.equal(calls.length,1); assert.equal(calls[0].options.body,JSON.stringify({require_prompt_review:true})); assert.ok(calls[0].url.endsWith('/resume'));
   assert.deepEqual(JSON.parse(JSON.stringify(ui.readProject().video_settings)),edited);
   assert.match(elements.get('scriptVideoPipelineDetail').textContent,/生成 640 × 1152 → 成片 720 × 1280/);
 });
@@ -2295,7 +2366,7 @@ test('Fast resume uses its frozen model and omits retained H3 adapters from its 
   Object.assign(ui.state, { videoModelSupported: true, videoModels: [{ id: 'h3', ready: false, error: 'H3 absent' }, { id: 'fasth3_omni_nvfp4', ready: true, modes: ['r2v'] }] });
   ui.state.pipeline = previous; ui.state.selectedPipelineId = previous.id;
   await ui.resumePipeline();
-  assert.equal(calls.length, 1); assert.ok(calls[0].url.endsWith('/resume')); assert.equal(calls[0].options.body, '{}');
+  assert.equal(calls.length, 1); assert.ok(calls[0].url.endsWith('/resume')); assert.equal(calls[0].options.body, JSON.stringify({ require_prompt_review: true }));
   assert.equal(ui.readProject().video_settings.video_model, undefined);
   assert.equal(ui.readProject().custom_loras[0].family, 'fl2va');
 });

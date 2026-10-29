@@ -396,6 +396,74 @@ class ScriptVideoAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(child["input"]["project"]["content"], project["content"])
         self.assertEqual(self.manager.get_project(project["id"]), project)
 
+    async def test_final_prompt_review_waits_before_any_video_then_approves_exact_plan(self):
+        project = await self.project(idea="", content="阿青走上列車。")
+        initial = await self.start_pipeline(project, source_mode="manuscript", require_prompt_review=True)
+        waiting = await self.wait_pipeline(initial, statuses=("awaiting_review", "failed"))
+        self.assertEqual(waiting["status"], "awaiting_review", waiting.get("error"))
+        self.assertEqual(self.renderer.render_calls, [])
+        self.assertEqual(self.chat_actions, ["storyboard"])
+        self.assertEqual(len(waiting["review"]["prompts"]), 2)
+        for item, prompt in zip(waiting["render_plan"], waiting["review"]["prompts"]):
+            self.assertEqual(prompt["prompt"], item["compiled"]["prompt"])
+            self.assertEqual(prompt["seed"], item["compiled"]["seed"])
+        persisted = json.loads((self.pipeline_manager.directory / f"{waiting['id']}.json").read_text(encoding="utf8"))
+        self.assertEqual(persisted["review"], waiting["review"])
+        response = await self.client.put(f"/api/scripts/projects/{project['id']}", json={
+            "revision": project["revision"], "content": "之後編輯的另一版稿件。",
+            "character_references": [{**self.reference, "appearance": "之後改成紅色外套。"}]})
+        self.assertEqual(response.status, 200, await response.text())
+        edited = await response.json()
+        response = await self.client.post(f"/api/scripts/video-pipelines/{waiting['id']}/approve", json={"review_id": waiting["review"]["id"]})
+        self.assertEqual(response.status, 202, await response.text())
+        result = await self.wait_pipeline(await response.json())
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertEqual(result["render_plan"], waiting["render_plan"])
+        self.assertEqual(result["snapshot"]["content"], project["content"])
+        self.assertEqual(result["snapshot"]["character_references"], project["character_references"])
+        self.assertEqual(self.manager.get_project(project["id"]), edited)
+        self.assertEqual(self.chat_actions, ["storyboard"])
+
+    async def test_review_rejects_wrong_id_source_changes_and_duplicate_start(self):
+        project = await self.project(content="阿青走上列車。")
+        waiting = await self.wait_pipeline(await self.start_pipeline(project, require_prompt_review=True), statuses=("awaiting_review", "failed"))
+        self.assertEqual(waiting["status"], "awaiting_review", waiting.get("error"))
+        response = await self.client.post("/api/scripts/video-pipelines", json={"project_id": project["id"]})
+        self.assertEqual(response.status, 409)
+        response = await self.client.post(f"/api/scripts/video-pipelines/{waiting['id']}/approve", json={"review_id": "wrong"})
+        self.assertEqual(response.status, 409)
+        imported = self.app["shortfilms"].get(waiting["shortfilm_id"])
+        imported["scenes"][0]["shots"][0]["action"] = "Different movement."
+        self.app["shortfilms"].update(imported["id"], imported)
+        response = await self.client.post(f"/api/scripts/video-pipelines/{waiting['id']}/approve", json={"review_id": waiting["review"]["id"]})
+        self.assertEqual(response.status, 409, await response.text())
+        self.assertEqual(self.renderer.render_calls, [])
+
+    async def test_review_survives_restart_and_resume_still_waits_for_confirmation(self):
+        project = await self.project(content="阿青走上列車。")
+        waiting = await self.wait_pipeline(await self.start_pipeline(project, require_prompt_review=True), statuses=("awaiting_review", "failed"))
+        self.assertEqual(waiting["status"], "awaiting_review", waiting.get("error"))
+        restarted = script_video.ScriptVideoManager(self.app, self.manager, self.root)
+        self.assertEqual(restarted.get_pipeline(waiting["id"])["status"], "awaiting_review")
+        resumed = await restarted.resume(waiting["id"], {"require_prompt_review": True})
+        await restarted.tasks[resumed["id"]]
+        self.assertEqual(restarted.get_pipeline(waiting["id"])["status"], "awaiting_review")
+        self.assertEqual(self.renderer.render_calls, [])
+        self.assertEqual(self.chat_actions, ["storyboard"])
+        await restarted.close()
+
+    async def test_legacy_interrupted_pipeline_upgrades_to_review_before_new_gpu_job(self):
+        self.renderer.fail_render_number = 1
+        project = await self.project(content="阿青走上列車。")
+        failed = await self.wait_pipeline(await self.start_pipeline(project))
+        self.assertEqual(failed["status"], "failed")
+        calls = len(self.renderer.render_calls)
+        response = await self.client.post(f"/api/scripts/video-pipelines/{failed['id']}/resume", json={"require_prompt_review": True})
+        self.assertEqual(response.status, 202, await response.text())
+        waiting = await self.wait_pipeline(await response.json(), statuses=("awaiting_review", "failed"))
+        self.assertEqual(waiting["status"], "awaiting_review", waiting.get("error"))
+        self.assertEqual(len(self.renderer.render_calls), calls)
+
     async def test_explicit_manuscript_without_idea_preserves_text_and_selected_video_model(self):
         content = '阿青拿起行李，停下看向列車。\n他輕聲說：「等我一下。」隨後登車。'
         project = await self.project(idea="", content=content, video_settings={

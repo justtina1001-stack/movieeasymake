@@ -179,7 +179,7 @@ class ShortFilmContinuityTests(unittest.TestCase):
         shot["camera"] = "static"
         shot["camera_detail"] = "Keep the camera on the doorway through the last cut."
         payload, compiled = self.compiled(project, scene, shot)
-        self.assertIn(action, payload["prompt"])
+        self.assertIn(action.replace("角色A說：", "角色A (S1)說："), payload["prompt"])
         self.assertIn(shot["camera_detail"], payload["prompt"])
         self.assertNotIn("The camera remains in a stable Static Shot", compiled.prompt)
         self.assertNotIn("Opening framing: medium shot", compiled.prompt)

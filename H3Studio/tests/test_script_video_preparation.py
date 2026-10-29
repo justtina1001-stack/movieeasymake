@@ -2,10 +2,11 @@
 import copy
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from tests import test_script_video_compiler_resume as frozen
 from scriptwriting import ScriptwritingError
+from generation_review import review_digest
 
 
 class PreparedPipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -59,6 +60,37 @@ class PreparedPipelineTests(unittest.IsolatedAsyncioTestCase):
         await fixture.renderer.render_shot(fixture.project_id, fixture.scene_id, fixture.shot_id,
             fixture.pipeline_id, expected_payload=manifest["payload"])
         self.assertEqual(self.prepare.await_count, 3)
+
+    async def test_reviewed_submission_uses_frozen_compilation_without_compiler_or_translator(self):
+        fixture = self.fixture
+        manifest = await self.plan()
+        fixture.pipeline.update(require_prompt_review=True,
+            review={"id": "approved", "plan_digest": review_digest(fixture.pipeline["render_plan"])},
+            approved_review_id="approved")
+        with patch("script_video_renderer.compile_request", side_effect=AssertionError("must use reviewed compilation")):
+            await fixture.renderer.render_shot(fixture.project_id, fixture.scene_id, fixture.shot_id,
+                fixture.pipeline_id, expected_payload=manifest["payload"])
+        compiled, submitted = fixture.jobs.create.call_args.args
+        self.assertEqual(compiled.prompt, manifest["compiled"]["prompt"])
+        self.assertEqual(compiled.seed, manifest["compiled"]["seed"])
+        self.assertEqual(submitted, manifest["prepared_payload"])
+        self.assertEqual(self.prepare.await_count, 2)
+
+    async def test_unapproved_or_corrupt_review_never_prepares_again_or_submits(self):
+        fixture = self.fixture
+        manifest = await self.plan()
+        fixture.pipeline.update(require_prompt_review=True,
+            review={"id": "waiting", "plan_digest": review_digest(fixture.pipeline["render_plan"])})
+        with self.assertRaises(ScriptwritingError):
+            await fixture.renderer.render_shot(fixture.project_id, fixture.scene_id, fixture.shot_id,
+                fixture.pipeline_id, expected_payload=manifest["payload"])
+        fixture.pipeline["approved_review_id"] = "waiting"
+        fixture.pipeline["render_plan"][1]["prepared_source_digest"] = "invalid"
+        with self.assertRaises(ScriptwritingError):
+            await fixture.renderer.render_shot(fixture.project_id, fixture.scene_id, fixture.shot_id,
+                fixture.pipeline_id, expected_payload=manifest["payload"])
+        self.assertEqual(self.prepare.await_count, 2)
+        fixture.jobs.create.assert_not_called()
 
 
 if __name__ == "__main__":

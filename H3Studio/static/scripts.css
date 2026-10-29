@@ -23,6 +23,10 @@
 .script-manuscript-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; padding-top: 15px; margin-top: 15px; border-top: 1px solid var(--line); }
 .script-manuscript-actions > p { flex: 1 1 100%; margin: 0 0 3px; }
 .script-manuscript-actions > .button { white-space: normal; }
+.script-prompt-review > h2 { font-size: 18px; margin: 0; }
+.script-prompt-review-shot { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+.script-prompt-review-shot > h3 { margin: 0 0 10px; font-size: 13px; color: var(--cyan); }
+.script-prompt-review-shot > pre { padding: 15px; border: 1px solid var(--line); border-radius: 9px; background: rgba(0,0,0,.2); white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 12px; line-height: 1.9; }
 .script-engine { border: 1px solid var(--line); border-radius: 14px; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; gap: 20px; background: rgba(255,255,255,.018); }
 .script-engine-status { display: flex; align-items: center; gap: 13px; min-width: 0; }
 .script-dot { width: 8px; height: 8px; flex: 0 0 auto; background: var(--muted); border-radius: 50%; }

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from custom_loras import normalize_loras
 from dialogue import format_dialogue
+from h3_prompt_format import number_speakers
 from domain import FL_ONLY_QUALITY_MODES, QUALITY_MODES
 from video_models import VIDEO_MODEL_FAST, normalize_video_model
 
@@ -511,7 +512,20 @@ def _speaker_ids(project: dict[str, Any]) -> dict[str, str]:
         asset["alias"] for asset in project.get("assets", [])
         if asset.get("type") in {"character", "creature"}
     ]
-    return {alias: f"S{index}" for index, alias in enumerate(speakers, start=1)}
+    fragments = []
+    for _, shot in flatten_shots(project):
+        for key in ("action", "ending"):
+            fragments.append(format_dialogue(shot.get(key, ""), speakers=speakers))
+        if shot.get("dialogue"):
+            speaker = shot.get("speaker_alias", "")
+            spoken = format_dialogue(shot["dialogue"], dialogue_field=True)
+            fragments.append(f"{speaker} says {spoken}")
+    assigned = {}
+    try:
+        number_speakers("\n".join(fragments), tuple(speakers), assigned)
+    except ValueError as error:
+        raise ShortFilmError(str(error)) from error
+    return assigned
 
 
 def _action_visual_directions(action: str, speakers: tuple[str, ...]) -> str:
@@ -604,7 +618,16 @@ def compile_shot_payload(
     location = ", ".join(value for value in [scene["location"], scene["time_of_day"]] if value) or "the established story location"
     style = project["style"] or "cinematic visual storytelling with coherent lighting"
     speaker_ids = _speaker_ids(project)
-    visual_action = _action_visual_directions(shot["action"], tuple(speaker_ids))
+    all_character_names = tuple(asset["alias"] for asset in project["assets"]
+                                if asset["type"] in {"character", "creature"})
+    visual_action = _action_visual_directions(shot["action"], all_character_names)
+    try:
+        action_text = number_speakers(format_dialogue(shot["action"], speakers=all_character_names),
+                                      all_character_names, dict(speaker_ids))
+        ending_text = number_speakers(format_dialogue(shot["ending"], speakers=all_character_names),
+                                      all_character_names, dict(speaker_ids))
+    except ValueError as error:
+        raise ShortFilmError(str(error)) from error
     next_cut = next((match for match in re.finditer(r"\[Shot\s*([1-9]\d*)\b[^\]]*\]", visual_action, re.I) if int(match.group(1)) > 1), None)
     multiple_cuts = next_cut is not None
     opening_action = visual_action[:next_cut.start()] if next_cut else visual_action
@@ -691,9 +714,9 @@ def compile_shot_payload(
         continuity_sentence,
         reference_start_sentence,
         storyboard_sentence,
-        shot["action"],
+        action_text,
         dialogue,
-        shot["ending"],
+        ending_text,
     ] if part).replace("  ", " ")
 
     references = [{
@@ -748,7 +771,7 @@ def compile_shot_payload(
         "references": references,
         "storyboards": [{
             "duration": shot["duration"],
-            "description": shot["action"],
+            "description": action_text,
             "camera": camera,
             "dialogue": dialogue.strip(),
             "sound": shot["sound"],

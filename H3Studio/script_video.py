@@ -14,6 +14,11 @@ from typing import Any
 from custom_loras import normalize_loras, validate_loras_for_family, validate_lora_requirements
 from script_video_format import normalize_video_settings, video_dimensions
 from video_models import VIDEO_MODEL_FAST
+from dataclasses import asdict
+from domain import compile_request
+from generation_review import compiled_from_review, prompt_review_item, review_digest
+from h3_prompt_translation import payload_digest
+from shortfilm_batch import generation_source
 
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -65,6 +70,8 @@ class ScriptVideoManager:
                 raise ScriptVideoError(f"自動影片流程 {path.name} 格式錯誤；請保留資料並檢查。", 500)
             if value.get("status") in ACTIVE:
                 value.update(status="interrupted", error="Studio 重新啟動，自動影片流程已暫停；按接續可保留已完成片段。", updated_at=utc_now())
+                if value.get("require_prompt_review"):
+                    value["approved_review_id"] = None
                 _atomic_json(path, value)
             self.pipelines[path.stem] = value
 
@@ -107,7 +114,7 @@ class ScriptVideoManager:
         for item in self.pipelines.values():
             task = self.tasks.get(item["id"])
             if (item["id"] != exclude and item.get("project_id") == project_id
-                    and (item.get("status") in ACTIVE or task is not None and not task.done())):
+                    and (item.get("status") in {*ACTIVE, "awaiting_review"} or task is not None and not task.done())):
                 raise ScriptVideoError("這份劇本已有自動影片流程正在執行，請等待完成或取消後再試。", 409)
 
     def _check_snapshot(self, snapshot: dict[str, Any]) -> None:
@@ -162,8 +169,10 @@ class ScriptVideoManager:
     async def start(self, raw: Any, *, allow_active_source: bool = False) -> dict[str, Any]:
         if self.closed:
             raise ScriptVideoError("自動影片服務正在關閉。", 503)
-        if not isinstance(raw, dict) or set(raw) - {"project_id", "source_job_id", "source_mode", "project_revision"}:
+        if not isinstance(raw, dict) or set(raw) - {"project_id", "source_job_id", "source_mode", "project_revision", "require_prompt_review"}:
             raise ScriptVideoError("自動影片流程格式錯誤。")
+        if "require_prompt_review" in raw and not isinstance(raw["require_prompt_review"], bool):
+            raise ScriptVideoError("生成稿確認選項格式錯誤。")
         manuscript = raw.get("source_mode") == "manuscript"
         if "source_mode" in raw and not manuscript:
             raise ScriptVideoError("不支援這個影片製作來源。")
@@ -215,6 +224,8 @@ class ScriptVideoManager:
                 "video_format": {**video_dimensions(snapshot["video_settings"]), "container": "mp4"},
                 "automatic_source": allow_active_source, "source_action": source.get("action") if source else None,
                 **({"source_mode": "manuscript"} if manuscript else {}),
+                "require_prompt_review": raw.get("require_prompt_review", False),
+                "review": None, "approved_review_id": None,
             }
             self._save(pipeline)
             self.pipelines[pipeline["id"]] = pipeline
@@ -359,6 +370,34 @@ class ScriptVideoManager:
                 # Freeze all validated raw requests before submitting the first GPU job.
                 self._update(pipeline, render_plan=copy.deepcopy(plan))
             plan = pipeline["render_plan"]
+            if pipeline.get("require_prompt_review"):
+                prompts = []
+                titles = {(scene["id"], shot["id"]): (scene.get("title"), shot.get("title"))
+                          for scene in (pipeline.get("shortfilm_snapshot") or {}).get("scenes", [])
+                          for shot in scene.get("shots", [])}
+                for item in plan:
+                    if "prepared_payload" not in item:
+                        prepare = getattr(renderer, "_prepare_payload", None)
+                        prepared = await prepare(copy.deepcopy(item["payload"])) if callable(prepare) else copy.deepcopy(item["payload"])
+                        item["prepared_payload"] = prepared
+                        item["compiled"] = asdict(compile_request(prepared))
+                    prepared = item["prepared_payload"]
+                    item.setdefault("prepared_source_digest", payload_digest(item["payload"]))
+                    if "compiled" not in item:
+                        item["compiled"] = asdict(compile_request(prepared))
+                    compiled = compiled_from_review(item["compiled"])
+                    scene_title, shot_title = titles.get((item["scene_id"], item["shot_id"]), (None, None))
+                    prompts.append(prompt_review_item(compiled, scene_id=item["scene_id"], shot_id=item["shot_id"],
+                                                     title=shot_title, scene_title=scene_title, prepared=prepared))
+                digest = review_digest(plan)
+                review = pipeline.get("review")
+                if not isinstance(review, dict) or review.get("plan_digest") != digest:
+                    review = {"id": uuid.uuid4().hex, "created_at": utc_now(), "plan_digest": digest, "prompts": prompts}
+                    self._update(pipeline, render_plan=copy.deepcopy(plan), review=review, approved_review_id=None)
+                if pipeline.get("approved_review_id") != review["id"]:
+                    self._update(pipeline, status="awaiting_review", stage="awaiting_review", progress=29)
+                    return
+                self._check_review_source(pipeline)
             self._update(pipeline, stage="render", progress=30)
             manager = self.app.get("jobs")
             for index, item in enumerate(plan):
@@ -425,7 +464,7 @@ class ScriptVideoManager:
         self.get_pipeline(pipeline_id)
         pipeline = self.pipelines[pipeline_id]
         task = self.tasks.get(pipeline_id)
-        if pipeline.get("status") not in ACTIVE and (task is None or task.done()):
+        if pipeline.get("status") not in {*ACTIVE, "awaiting_review"} and (task is None or task.done()):
             return copy.deepcopy(pipeline)
         self.cancel_events.setdefault(pipeline_id, asyncio.Event()).set()
         try:
@@ -434,11 +473,34 @@ class ScriptVideoManager:
             if task is not None and not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
-            if pipeline.get("status") in ACTIVE:
+            if pipeline.get("status") in {*ACTIVE, "awaiting_review"}:
                 self._update(pipeline, status="cancelled", error="自動影片流程已取消，已完成片段仍保留。")
         return copy.deepcopy(pipeline)
 
-    async def resume(self, pipeline_id: str) -> dict[str, Any]:
+    def _check_review_source(self, pipeline):
+        current = self.app["shortfilms"].get(pipeline["shortfilm_id"])
+        if generation_source(current) != generation_source(pipeline["shortfilm_snapshot"]):
+            raise ScriptVideoError("分鏡或素材已修改，請開始新的流程並重新檢查生成稿。", 409)
+
+    async def approve(self, pipeline_id: str, raw: Any) -> dict[str, Any]:
+        async with self.start_lock:
+            pipeline = self.pipelines[self.get_pipeline(pipeline_id)["id"]]
+            review = pipeline.get("review")
+            if (not isinstance(raw, dict) or set(raw) != {"review_id"} or not isinstance(review, dict)
+                    or raw.get("review_id") != review.get("id") or pipeline.get("status") != "awaiting_review"
+                    or review.get("plan_digest") != review_digest(pipeline.get("render_plan"))):
+                raise ScriptVideoError("這份生成稿已失效，請重新檢查目前的生成稿。", 409)
+            if self.closed:
+                raise ScriptVideoError("自動影片服務正在關閉。", 503)
+            task = self.tasks.get(pipeline_id)
+            if task is not None and not task.done():
+                raise ScriptVideoError("生成稿仍在準備，請稍後再確認。", 409)
+            self._check_review_source(pipeline)
+            self._update(pipeline, approved_review_id=review["id"], status="queued", error=None)
+            self._launch(pipeline_id)
+            return copy.deepcopy(pipeline)
+
+    async def resume(self, pipeline_id: str, raw: Any = None) -> dict[str, Any]:
         if self.closed:
             raise ScriptVideoError("自動影片服務正在關閉。", 503)
         async with self.start_lock:
@@ -450,10 +512,16 @@ class ScriptVideoManager:
                 raise ScriptVideoError("自動影片流程仍在執行。", 409)
             if pipeline.get("status") == "completed":
                 return copy.deepcopy(pipeline)
+            if raw is not None:
+                if (not isinstance(raw, dict) or set(raw) - {"require_prompt_review"}
+                        or "require_prompt_review" in raw and not isinstance(raw["require_prompt_review"], bool)):
+                    raise ScriptVideoError("生成稿確認選項格式錯誤。")
+                if raw.get("require_prompt_review"):
+                    pipeline["require_prompt_review"] = True
             self._check_duplicate(pipeline["project_id"], exclude=pipeline_id)
             self._validate_source(pipeline)
             await self.preflight(pipeline["snapshot"])
-            self._update(pipeline, status="queued", error=None)
+            self._update(pipeline, status="queued", error=None, approved_review_id=None)
             self._launch(pipeline_id)
             return copy.deepcopy(pipeline)
 

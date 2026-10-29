@@ -209,13 +209,13 @@ function scriptPreviewData(job, requestedView = "readable") {
   return { supported, readableReady, view, text: view === "readable" ? readable : raw, readableLabel, note };
 }
 
-const SCRIPT_PIPELINE_STAGES = { queued: "排隊", screenplay: "編寫劇本", storyboard: "建立分鏡", import: "建立短片", render: "生成影片", assemble: "組合影片", completed: "影片完成" };
+const SCRIPT_PIPELINE_STAGES = { queued: "排隊", screenplay: "編寫劇本", storyboard: "建立分鏡", import: "建立短片", compile: "整理生成稿", awaiting_review: "等待確認生成稿", render: "生成影片", assemble: "組合影片", completed: "影片完成" };
 
 function scriptPipelinePresentation(pipeline) {
   if (!pipeline) return { label: "尚未開始", stage: "準備角色與劇本", active: false, progress: 0 };
-  const statuses = { queued: "已排入流程", pending: "已排入流程", running: "正在製作", cancelling: "正在取消", completed: "影片完成", failed: "製作失敗", cancelled: "已取消", canceled: "已取消", interrupted: "重新啟動後中斷" };
+  const statuses = { queued: "已排入流程", pending: "已排入流程", running: "正在製作", awaiting_review: "等待確認稿件", cancelling: "正在取消", completed: "影片完成", failed: "製作失敗", cancelled: "已取消", canceled: "已取消", interrupted: "重新啟動後中斷" };
   const progress = Number(pipeline.progress);
-  return { label: statuses[pipeline.status] || "確認流程狀態中", stage: SCRIPT_PIPELINE_STAGES[pipeline.stage] || pipeline.stage || "準備流程", active: ["queued", "pending", "running", "cancelling"].includes(pipeline.status), progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0 };
+  return { label: statuses[pipeline.status] || "確認流程狀態中", stage: SCRIPT_PIPELINE_STAGES[pipeline.stage] || pipeline.stage || "準備流程", active: ["queued", "pending", "running", "awaiting_review", "cancelling"].includes(pipeline.status), progress: Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0 };
 }
 
 function scriptPipelineVideoUrl(pipeline) {
@@ -352,6 +352,7 @@ if (typeof document !== "undefined") {
   Object.assign(state, { lorasSupported: false, lorasSupportKnown: false, lorasSaveWaiting: false, loraCatalog: { names: [], items: [], recommended_items: [], builtin_items: [] }, loraCatalogReady: false, loraCatalogBusy: false, loraCatalogError: "", loraCatalogSerial: 0, loraControls: [] });
   Object.assign(state, { videoModelSupported: false, videoModels: [], videoModelTouched: false });
   Object.assign(state, { manuscriptVideoSupported: false });
+  Object.assign(state, { promptReviewSupported: false, pipelineReviewApproving: false, pipelineOriginalChoiceId: null, pipelineReviewRenderedKey: null });
 
   function message(text, error = false, kind = "") {
     state.messageKind = kind;
@@ -710,7 +711,7 @@ if (typeof document !== "undefined") {
     if (previewOption) previewOption.disabled = !selectedVideoSourceJob();
     if ($("scriptVideoSource").value === "preview" && !selectedVideoSourceJob()) $("scriptVideoSource").value = "current";
     const manuscriptSource = $("scriptVideoSource").value === "manuscript";
-    const pipelineUnavailable = busy || state.settingsSaving || !state.videoPipelinesSupported || !state.videoReady || Boolean(videoModelError) || !state.ready || writingSkillNeedsCheck() || Boolean(state.conflict) || activePipeline || activeForProject;
+    const pipelineUnavailable = busy || state.settingsSaving || !state.videoPipelinesSupported || !state.promptReviewSupported || !state.videoReady || Boolean(videoModelError) || !state.ready || writingSkillNeedsCheck() || Boolean(state.conflict) || activePipeline || activeForProject;
     $("startScriptVideoPipeline").disabled = pipelineUnavailable || manuscriptSource && (!state.manuscriptVideoSupported || !selectedVideoProject.content.trim());
     $("startScriptVideoPipeline").textContent = state.pipelineStarting ? "正在啟動製作…" : manuscriptSource ? "用編輯稿產生影片 →" : "劇本 → 自動生成影片";
     $("startManuscriptVideo").disabled = pipelineUnavailable || !state.manuscriptVideoSupported || !selectedVideoProject.content.trim();
@@ -722,6 +723,9 @@ if (typeof document !== "undefined") {
     $("scriptManuscriptHint").textContent = !state.manuscriptVideoSupported ? manuscriptSupportHint : selectedVideoProject.content.trim() ? "會先儲存這份編輯稿，再直接建立分鏡與影片；不必填寫故事想法。請確認片長、參考圖與影片設定。" : "先在上方貼上完整編輯稿，再確認目標片長、參考圖與影片設定，即可直接開始製作。";
     $("cancelScriptVideoPipeline").disabled = !state.videoPipelinesSupported || !scriptPipelinePresentation(state.pipeline).active || state.pipeline?.status === "cancelling";
     $("resumeScriptVideoPipeline").disabled = busy || !state.videoPipelinesSupported || !state.videoReady || !["failed", "cancelled", "canceled", "interrupted"].includes(state.pipeline?.status);
+    const scriptReviewNeedsOriginal = state.pipeline?.review?.prompts?.some(item => item.h3_translation?.status === "unavailable");
+    $("approveScriptPromptReview").disabled = state.pipelineReviewApproving || !state.promptReviewSupported || state.pipeline?.status !== "awaiting_review" || !state.pipeline?.review?.id || !state.pipeline?.review?.prompts?.length || scriptReviewNeedsOriginal && state.pipelineOriginalChoiceId !== state.pipeline.review.id;
+    $("approveScriptPromptReview").textContent = state.pipelineReviewApproving ? "正在確認並送出…" : "確認全部稿件並生成";
     for (const [id, button] of state.historyDeleteControls) button.disabled = state.loading || state.importing || state.deletingJobIds.has(id) || !scriptCanDeleteJob(state.jobs.find(job => job.id === id));
     $("importScriptStoryboard").textContent = state.importing ? "正在建立分鏡…" : "建立短片分鏡 →";
     $("saveScriptCopy").disabled = busy;
@@ -919,6 +923,7 @@ if (typeof document !== "undefined") {
       if (!state.skillsSupported) { state.skillsError = ""; renderWritingSkills(); }
       state.videoPipelinesSupported = status.video_pipelines_supported === true;
       state.manuscriptVideoSupported = status.manuscript_video_supported === true;
+      state.promptReviewSupported = status.prompt_review_supported === true;
       state.videoReady = status.video_ready === true;
       state.videoError = typeof status.video_error === "string" ? status.video_error : "";
       state.videoModelSupported = status.video_model_supported === true;
@@ -937,6 +942,7 @@ if (typeof document !== "undefined") {
       state.visionReady = false;
       state.videoReady = false;
       state.manuscriptVideoSupported = false;
+      state.promptReviewSupported = false;
       state.videoModelSupported = false;
       state.videoModels = [];
       $("scriptEngineDot").className = "script-dot unavailable";
@@ -1049,6 +1055,7 @@ if (typeof document !== "undefined") {
 
   function videoPreflight(project) {
     if (!state.videoPipelinesSupported) return "目前 Studio 尚未提供自動影片功能，請重新啟動更新後的 Studio，再按「重新檢查」。";
+    if (!state.promptReviewSupported) return "目前主機尚未提供完整生成稿確認功能。請更新並重新啟動 Studio，再重新檢查；影片尚未送出。";
     if (!state.ready) return "本機劇本模型尚未就緒，請先重新檢查模型。";
     if (!state.videoReady) return state.videoError || "影片引擎尚未就緒，請先在影片工作室檢查連線與模型。";
     const modelError = scriptVideoModelError(project); if (modelError) return modelError;
@@ -1075,6 +1082,51 @@ if (typeof document !== "undefined") {
     const index = state.pipelines.findIndex(item => item.id === pipeline.id);
     if (index < 0) state.pipelines.unshift(pipeline); else state.pipelines[index] = pipeline;
     cacheHistoryVideos([pipeline]);
+  }
+
+  function scriptPromptReviewText(review, startIndex = 0) {
+    return (review?.prompts || []).map((item, index) => {
+      const materials = (item.mapping || []).map(mapping => `${mapping.alias || "參考素材"} → ${[mapping.subject_tag, ...(mapping.picture_tags || []), ...(mapping.video_tags || []), ...(mapping.video_audio_tags || []), mapping.audio_tag].filter(Boolean).join("、") || "文字設定"}`).join("\n") || "依本鏡保存的參考素材";
+      return `鏡頭 ${index + 1 + startIndex} · ${item.scene_title || item.scene_id || ""}／${item.shot_title || item.shot_id || ""}\n模型：${scriptVideoModelLabel(item.video_model || "h3")} · ${item.duration ?? "?"} 秒 · ${item.width || "?"} × ${item.height || "?"} · Seed：${item.seed ?? "依保存設定"}\n素材對應：\n${materials}\n${item.warnings?.length ? `提醒：${item.warnings.join("；")}\n` : ""}\n${item.prompt || ""}`;
+    }).join("\n\n────────────────\n\n");
+  }
+
+  function renderScriptPromptReview() {
+    const pipeline = state.pipeline, review = pipeline?.review;
+    const visible = pipeline?.status === "awaiting_review" && Array.isArray(review?.prompts);
+    $("scriptPromptReview").classList.toggle("hidden", !visible);
+    const list = $("scriptPromptReviewList");
+    if (!visible) {
+      if (state.pipelineReviewRenderedKey !== null) { list.replaceChildren(); state.pipelineReviewRenderedKey = null; }
+      return;
+    }
+    const renderedKey = JSON.stringify({ pipeline_id: pipeline.id, review_id: review.id, prompts: review.prompts });
+    if (state.pipelineReviewRenderedKey !== renderedKey) {
+      list.replaceChildren();
+      for (const [index, item] of review.prompts.entries()) {
+        const card = document.createElement("article"), heading = document.createElement("h3"), prompt = document.createElement("pre");
+        card.className = "script-prompt-review-shot"; heading.textContent = `鏡頭 ${index + 1} · ${item.shot_title || item.shot_id || "生成稿"}`;
+        prompt.textContent = scriptPromptReviewText({ prompts: [item] }, index); card.append(heading, prompt); list.append(card);
+      }
+      state.pipelineReviewRenderedKey = renderedKey;
+    }
+    $("scriptPromptReviewStatus").textContent = state.promptReviewSupported ? `共 ${review.prompts.length} 份生成稿。尚未開始影片生成；重新整理頁面後仍會等待確認。` : "主機尚未確認支援稿件確認，請更新後重新檢查。";
+    const needsOriginal = review.prompts.some(item => item.h3_translation?.status === "unavailable");
+    $("useOriginalScriptPromptReview").classList.toggle("hidden", !needsOriginal);
+    if (needsOriginal) $("scriptPromptReviewStatus").textContent += state.pipelineOriginalChoiceId === review.id ? " 已選擇使用原文，請確認完整稿件後再生成。" : " 部分鏡頭英文整理未完成，目前顯示原文；請明確選擇使用原文後再確認，或取消流程調整後重新製作。";
+  }
+
+  async function approveScriptPromptReview() {
+    const pipeline = state.pipeline;
+    if (state.pipelineReviewApproving || !state.promptReviewSupported || pipeline?.status !== "awaiting_review" || !pipeline.review?.id || !pipeline.review.prompts?.length || pipeline.review.prompts.some(item => item.h3_translation?.status === "unavailable") && state.pipelineOriginalChoiceId !== pipeline.review.id) return;
+    const id = pipeline.id, reviewId = pipeline.review.id; state.pipelineReviewApproving = true; updateControls();
+    try {
+      const result = await api(`/api/scripts/video-pipelines/${encodeURIComponent(id)}/approve`, { method: "POST", body: JSON.stringify({ review_id: reviewId }) });
+      state.pipelinesRevision++; upsertPipeline(result);
+      if (state.selectedPipelineId === id) { state.pipeline = result; renderPipelines(); }
+      message("已確認本次完整生成稿，影片將依確認的稿件與設定製作。");
+    } catch (error) { message(error.message, true); }
+    finally { state.pipelineReviewApproving = false; updateControls(); }
   }
 
   function cacheHistoryVideos(items) {
@@ -1168,7 +1220,7 @@ if (typeof document !== "undefined") {
     if (pipeline) $("scriptVideoPipelineDetail").textContent += ` · ${scriptVideoModelLabel(scriptPipelineVideoModel(pipeline))} · ${scriptVideoFormatLabel(scriptPipelineVideoFormat(pipeline))}`;
     $("scriptVideoPipelineDetail").classList.toggle("error", pipeline?.status === "failed");
     $("scriptVideoPipelineProgress").value = view.progress; $("scriptVideoPipelineProgressText").textContent = `${Math.round(view.progress)}%`;
-    const steps = $("scriptVideoStageList"); steps.replaceChildren(); const ordered = ["screenplay", "storyboard", "import", "render", "assemble"], current = pipeline?.status === "completed" ? ordered.length : ordered.indexOf(pipeline?.stage);
+    const steps = $("scriptVideoStageList"); steps.replaceChildren(); const ordered = ["screenplay", "storyboard", "import", "awaiting_review", "render", "assemble"], current = pipeline?.status === "completed" ? ordered.length : ordered.indexOf(pipeline?.stage);
     for (const [index, stage] of ordered.entries()) { const item = document.createElement("li"); const usesManuscript = stage === "screenplay" && pipeline?.source_mode === "manuscript"; item.textContent = usesManuscript ? "使用編輯稿" : SCRIPT_PIPELINE_STAGES[stage]; item.className = usesManuscript || index < current ? "done" : index === current ? "current" : "pending"; steps.append(item); }
     $("cancelScriptVideoPipeline").classList.toggle("hidden", !view.active); $("resumeScriptVideoPipeline").classList.toggle("hidden", !["failed", "cancelled", "canceled", "interrupted"].includes(pipeline?.status));
     $("scriptVideoResumeHint").classList.toggle("hidden", !["failed", "cancelled", "canceled", "interrupted"].includes(pipeline?.status));
@@ -1178,6 +1230,7 @@ if (typeof document !== "undefined") {
     if (url) { if (video.dataset.pipelineUrl !== url) { video.src = url; video.dataset.pipelineUrl = url; } $("downloadScriptPipelineVideo").href = `${url}${url.includes("?") ? "&" : "?"}download=1`; }
     else if (video.dataset.pipelineUrl) { video.pause?.(); video.removeAttribute("src"); video.dataset.pipelineUrl = ""; video.load?.(); }
     renderVideoHistory();
+    renderScriptPromptReview();
     updateControls();
   }
 
@@ -1218,9 +1271,9 @@ if (typeof document !== "undefined") {
       if (state.dirty || !state.project.id || writingSkillNeedsCheck() || JSON.stringify(initial.video_settings) !== JSON.stringify(normalizeScriptVideoSettings(state.project.video_settings))) { if (!await saveProject()) return; }
       if (initialGeneration !== state.generation || sourceMode !== $("scriptVideoSource").value || state.dirty || scriptProjectSignature(readProject()) !== scriptProjectSignature(state.project)) { message("稿件或製作來源已變更，尚未開始影片製作。請檢查目前內容後再按一次。", true); return; }
       const projectId = state.project.id, generation = state.generation;
-      const pipeline = await api("/api/scripts/video-pipelines", { method: "POST", body: JSON.stringify({ project_id: projectId, ...(sourceMode === "manuscript" ? { source_mode: "manuscript", project_revision: state.project.revision } : {}), ...(source ? { source_job_id: source.id } : {}) }) });
+      const pipeline = await api("/api/scripts/video-pipelines", { method: "POST", body: JSON.stringify({ project_id: projectId, require_prompt_review: true, ...(sourceMode === "manuscript" ? { source_mode: "manuscript", project_revision: state.project.revision } : {}), ...(source ? { source_job_id: source.id } : {}) }) });
       state.pipelinesRevision++; upsertPipeline(pipeline);
-      if (generation === state.generation && state.project.id === projectId) { state.selectedPipelineId = pipeline.id; state.pipeline = pipeline; renderPipelines(); message(sourceMode === "manuscript" ? "已使用編輯稿開始製作，直接接續分鏡與影片。原稿與本次使用的版本均會保留。" : "自動影片製作已開始。劇本、分鏡與影片會接續完成，原編輯稿保留。"); }
+      if (generation === state.generation && state.project.id === projectId) { state.selectedPipelineId = pipeline.id; state.pipeline = pipeline; renderPipelines(); message(sourceMode === "manuscript" ? "已使用編輯稿開始整理分鏡與完整生成稿；確認全部稿件後才生成影片。原稿與本次使用的版本均會保留。" : "已開始整理劇本、分鏡與完整生成稿；等待你確認稿件後才開始生成影片，原編輯稿保留。"); }
     } catch (error) { message(error.message, true); }
     finally { state.pipelineStarting = false; updateControls(); }
   }
@@ -1233,6 +1286,7 @@ if (typeof document !== "undefined") {
   }
 
   async function resumePipeline() {
+    if (!state.promptReviewSupported) { message("主機尚未提供完整生成稿確認功能，請更新並重新檢查後再接續。", true); return; }
     const pipeline = state.pipeline; if (!pipeline || !["failed", "cancelled", "canceled", "interrupted"].includes(pipeline.status) || state.pipelineStarting || state.loading || state.saving) return;
     if (!state.videoPipelinesSupported || !state.videoReady) { message(state.videoError || "影片引擎尚未就緒，請先重新檢查。", true); return; }
     const settings = pipeline.video_settings || pipeline.snapshot?.video_settings || pipeline.snapshot?.project?.video_settings;
@@ -1243,7 +1297,7 @@ if (typeof document !== "undefined") {
     const loraError = scriptLoraSelectionError(loras, { video: true, catalog: state.loraCatalog }); if (loraError) { message(loraError, true); return; }
     state.pipelineStarting = true; updateControls();
     try {
-      const result = await api(`/api/scripts/video-pipelines/${encodeURIComponent(pipeline.id)}/resume`, { method: "POST", body: "{}" }); state.pipelinesRevision++; upsertPipeline(result); if (state.selectedPipelineId === pipeline.id) { state.pipeline = result; renderPipelines(); } message("已使用原設定接續影片製作，完成的片段會保留。修改圖片或劇本後，請開始新的流程。");
+      const result = await api(`/api/scripts/video-pipelines/${encodeURIComponent(pipeline.id)}/resume`, { method: "POST", body: JSON.stringify({ require_prompt_review: true }) }); state.pipelinesRevision++; upsertPipeline(result); if (state.selectedPipelineId === pipeline.id) { state.pipeline = result; renderPipelines(); } message("已使用原設定接續影片製作，完成的片段會保留。修改圖片或劇本後，請開始新的流程。");
     } catch (error) { message(error.message, true); }
     finally { state.pipelineStarting = false; updateControls(); }
   }
@@ -1373,12 +1427,12 @@ if (typeof document !== "undefined") {
       }
       const projectId = state.project.id;
       const generation = state.generation;
-      const job = await api("/api/scripts/jobs", { method: "POST", body: JSON.stringify({ project_id: projectId, action, ...(autoVideo ? { auto_video: true } : {}), ...(action === "appearance" ? { reference_id: referenceId } : { instructions: $("scriptInstructions").value }) }) });
+      const job = await api("/api/scripts/jobs", { method: "POST", body: JSON.stringify({ project_id: projectId, action, ...(autoVideo ? { auto_video: true, require_prompt_review: true } : {}), ...(action === "appearance" ? { reference_id: referenceId } : { instructions: $("scriptInstructions").value }) }) });
       accepted = true;
       state.jobsRevision++;
       state.jobs.unshift(job);
       if (generation === state.generation && state.project.id === projectId) { state.selectedJobId = job.id; state.job = job; renderHistory(); renderPreview(); message(`${SCRIPT_ACTIONS[action]}已加入本機生成佇列。你可以繼續修改${action === "appearance" ? "外觀描述" : "編輯稿"}。`); }
-      if (generation === state.generation && job.video_pipeline_id) { state.pipelinesRevision++; await selectPipeline(job.video_pipeline_id); message("劇本生成後將接續製作多模態影片；原編輯稿與各階段記錄會保留。"); }
+      if (generation === state.generation && job.video_pipeline_id) { state.pipelinesRevision++; await selectPipeline(job.video_pipeline_id); message("劇本生成後會先整理分鏡與完整生成稿；等待你確認後才生成影片。原編輯稿與各階段記錄會保留。"); }
     } catch (error) { if (!accepted && requestGeneration === state.generation) { state.previewRequestFailed = true; renderPreview(); } message(error.message, true); }
     finally { state.starting = false; updateControls(); }
   }
@@ -1479,6 +1533,10 @@ if (typeof document !== "undefined") {
   }
 
   function bindEvents() {
+    $("useOriginalScriptPromptReview").addEventListener("click", () => { if (state.pipeline?.review?.id) { state.pipelineOriginalChoiceId = state.pipeline.review.id; renderScriptPromptReview(); updateControls(); } });
+    $("approveScriptPromptReview").addEventListener("click", approveScriptPromptReview);
+    $("returnScriptPromptReview").addEventListener("click", () => { $("scriptContent").scrollIntoView({ behavior: "smooth", block: "center" }); $("scriptContent").focus({ preventScroll: true }); });
+    $("copyScriptPromptReview").addEventListener("click", async () => { try { await navigator.clipboard.writeText(scriptPromptReviewText(state.pipeline?.review)); message("已複製全部完整生成稿與素材對應。"); } catch (_) { message("無法自動複製，請選取稿件文字複製。", true); } });
     $("scriptStartFromIdea").addEventListener("click", () => chooseVideoSource("current", "scriptIdea"));
     $("scriptStartFromManuscript").addEventListener("click", () => chooseVideoSource("manuscript", "scriptContent"));
     $("scriptManuscriptSettings").addEventListener("click", () => chooseVideoSource("manuscript", "scriptVideoModel"));

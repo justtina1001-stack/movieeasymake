@@ -1,5 +1,22 @@
 # H3 Studio writing Skills
 
+## Official generation format
+
+The creative methods below are separate from the mandatory generation-format
+contract. Every AI storyboard conversion uses the shared rules in
+`h3_official_policy.py`; quick, short-film and script-to-video compilation share
+the same shot, dialogue and reference validation. A selected creative method
+does not disable that contract.
+
+The complete upstream [h3-prompt-writing Skill](official_h3_prompt/SKILL.md),
+[base guide](official_h3_prompt/references/base-en.txt) and
+[full-reference guide](official_h3_prompt/references/ref-en.txt) are bundled
+unchanged at revision `199b7d0e1fd95e7b3eafa8c15eca692534142427`. Their pinned
+URLs and SHA-256 values are recorded in [sources.json](official_h3_prompt/sources.json).
+The existing [MiniMax H3 license notice](licenses/minimax-h3-community.txt)
+applies. These documents are reviewed reference material; the application does
+not execute upstream agent tools or call the hosted H3-Context-IR service.
+
 These sixteen methods are local adaptations written for H3 Studio, informed
 by the open-source craft references below. They are not eleven upstream plugins
 and do not run their code, install dependencies or call their paid APIs. The

@@ -221,7 +221,7 @@ test("voice controls initially wait for readiness and load the updated frontend"
     assert.match(html, new RegExp(`id="${id}"`));
   }
   assert.match(html, /<script\b[^>]*\bsrc="\/static\/app\.js\?v=[A-Za-z0-9][A-Za-z0-9._-]*"[^>]*>\s*<\/script>/);
-  assert.match(html, /\/static\/app\.js\?v=20261027-fasth3/);
+  assert.match(html, /\/static\/app\.js\?v=20261029-prompt-review/);
   assert.match(source, /const voiceModelSelection = \{ custom: "custom_1_7b", design: "design", clone: "clone_1_7b" \}/);
   const voiceSection = html.slice(html.indexOf('id="voiceModal"'), html.indexOf('id="toast"'));
   assert.match(voiceSection, /id="voiceModelChoice"/);

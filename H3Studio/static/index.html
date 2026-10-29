@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261013-generation-stages">
+  <link rel="stylesheet" href="/static/styles.css?v=20261029-prompt-review">
   <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-recommendations">
   <link rel="stylesheet" href="/static/workspace_ui.css?v=20261017-ux">
 </head>
@@ -311,7 +311,7 @@
             <strong>尚未分析來源影片</strong><span>上傳後會顯示尺寸、時長、音軌與預計片段數。</span>
           </div>
           <div class="replacement-batch-options">
-            <label class="check-option"><input id="replacementAutoSplit" type="checkbox" checked><span><strong>處理完整來源影片</strong><small>超過 15 秒時，自動切割、逐段替換並合併成完整影片。</small></span></label>
+            <label class="check-option"><input id="replacementAutoSplit" type="checkbox" checked><span><strong>處理完整來源影片</strong><small>超過 15 秒時先切割來源；每段完整生成稿均需你確認後才替換，完成後合併成完整影片。</small></span></label>
             <label class="check-option"><input id="replacementContinuity" type="checkbox" checked><span><strong>跨段連續性保護</strong><small>使用 0.5 秒重疊動作與上一段角色結果，降低接縫跳動。</small></span></label>
             <label>切段策略<select id="replacementSplitStrategy"><option value="smart">智慧切點（建議）</option><option value="balanced">平均切段</option></select></label>
             <label>完成影片聲音<select id="replacementAudioMode"><option value="original">完整保留原影片聲音（建議）</option><option value="generated">使用各段 AI 生成聲音</option><option value="mute">靜音輸出</option></select></label>
@@ -384,7 +384,7 @@
             <button id="compileButton" class="button secondary wide" type="button">預覽編譯提示詞</button>
             <button id="renderButton" class="button primary wide" type="button"><span>開始生成影片</span><i>→</i></button>
             <p id="generationPreparationStatus" class="render-note hidden" role="status" aria-live="polite"></p>
-            <p id="renderNote" class="render-note">工作會依序進入本機 GPU 佇列。</p>
+            <p id="renderNote" class="render-note">檢查完整生成稿並確認後，才會加入影片工作佇列。</p>
           </section>
 
           <section id="compileSummaryPanel" class="panel hidden" aria-live="polite">
@@ -394,7 +394,7 @@
             <div id="compileWarnings" class="shortfilm-warnings hidden"></div>
           </section>
           <section id="compiledPanel" class="panel compiled-panel hidden">
-            <div class="mini-title"><h3>編譯後提示詞</h3><button id="copyCompiled" class="text-button" type="button">複製</button></div>
+            <div class="mini-title"><h3>實際送給模型的稿件</h3><button id="copyCompiled" class="text-button" type="button">複製</button></div>
             <pre id="compiledPrompt"></pre>
           </section>
         </div>
@@ -492,7 +492,7 @@
                 <div id="sfSegmentRows" class="sf-segment-rows"></div>
                 <p id="sfSegmentSummary" class="render-note" role="status" aria-live="polite"></p>
                 <button id="sfAppendSegments" class="button secondary wide" type="button">加入連續分鏡（尚不生成）</button>
-                <p class="render-note">加入後按右側「依序生成未完成鏡頭」。請保持此瀏覽器分頁與 Studio／引擎開啟；失敗會停止後續送出，修正後可接續未完成段落。5 秒為模型請求時長，實際片長可能因幀數略有差異；此功能不會自動合併成單一影片。</p>
+                <p class="render-note">加入後按右側「依序生成未完成鏡頭」。主機先整理每鏡完整生成稿，等待你逐鏡確認後才生成；關閉頁面後可回來確認，Studio／引擎需保持開啟。失敗會停止後續送出，修正後可接續未完成段落。5 秒為模型請求時長，實際片長可能因幀數略有差異；此功能不會自動合併成單一影片。</p>
               </details>
               <div id="shortfilmSceneList" class="shortfilm-scene-list"></div>
               <div id="shortfilmSceneEmpty" class="empty-state compact"><span>⌁</span><strong>尚未建立場次</strong><p>新增場次後，再安排其中的鏡頭。</p></div>
@@ -513,8 +513,9 @@
                 <div id="shortfilmWarnings" class="shortfilm-warnings"><p>建立鏡頭後會顯示規則檢查。</p></div>
                 <button id="runShortfilmBatch" class="button primary wide" type="button"><span>依序生成未完成鏡頭</span></button>
                 <button id="resumeShortfilmBatch" class="button secondary wide hidden" type="button">接續原設定</button>
+                <button id="reviewShortfilmBatch" class="button primary wide hidden" type="button">檢查本鏡完整生成稿</button>
                 <button id="stopShortfilmBatch" class="button ghost wide hidden" type="button">停止後續鏡頭</button>
-                <p id="shortfilmBatchNote" class="render-note">連戲鏡頭會等待上一鏡完成並擷取尾幀。關閉瀏覽頁面後仍會依序製作；Studio 主機需保持執行。</p>
+                <p id="shortfilmBatchNote" class="render-note">連戲鏡頭會等待上一鏡完成並擷取尾幀。每鏡完整稿均需確認後才生成；關閉頁面後可再回來確認。</p>
               </section>
 
               <section id="shortfilmCompiledPanel" class="panel compiled-panel hidden">
@@ -892,6 +893,14 @@ non_diegetic_music: ...</pre></div>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <dialog id="generationReviewDialog" class="generation-review-dialog" aria-labelledby="generationReviewTitle" aria-describedby="generationReviewLanguageStatus">
+    <div class="generation-review-heading"><div><p class="eyebrow">REVIEW BEFORE GENERATION</p><h2 id="generationReviewTitle">生成前確認</h2></div><button id="closeGenerationReview" class="icon-button" type="button" aria-label="返回修改">×</button></div>
+    <p id="generationReviewLanguageStatus" class="render-note" role="status" aria-live="polite"></p>
+    <div id="generationReviewFallback" class="generation-review-fallback hidden"><button id="retryGenerationReview" class="button secondary small" type="button">重試英文整理</button><button id="useOriginalGenerationReview" class="button secondary small" type="button">使用原文，繼續確認</button></div>
+    <pre id="generationReviewSummary" class="generation-review-summary"></pre>
+    <h3 id="generationReviewPromptTitle">實際送給模型的稿件</h3><pre id="generationReviewPrompt" class="generation-review-prompt" tabindex="0"></pre>
+    <div class="generation-review-actions"><button id="copyGenerationReview" class="button ghost" type="button">複製完整稿件</button><button id="cancelGenerationReview" class="button secondary" type="button">返回修改</button><button id="approveGenerationReview" class="button primary" type="button">確認稿件並生成</button></div>
+  </dialog>
   <div id="faceRepairModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="faceRepairTitle">
     <div class="modal-backdrop" data-close-face-repair></div>
     <section class="modal-card">
@@ -916,7 +925,7 @@ non_diegetic_music: ...</pre></div>
   <script src="/static/lora-help.js?v=20261005-lora-recommendations"></script>
   <script src="/static/shortfilm_persistence.js?v=20261017-ux"></script>
   <script src="/static/audio_workspace.js?v=20261017-ux"></script>
-  <script src="/static/app.js?v=20261027-fasth3"></script>
+  <script src="/static/app.js?v=20261029-prompt-review"></script>
   <script src="/static/face-repair.js?v=20260917-face-repair"></script>
   <script src="/static/workspace_ui.js?v=20261017-ux"></script>
 </body>

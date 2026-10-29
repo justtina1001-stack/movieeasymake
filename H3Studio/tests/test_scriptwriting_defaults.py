@@ -227,10 +227,11 @@ class ContextBudgetTests(unittest.TestCase):
                 with self.subTest(has_manuscript=bool(content), action=action):
                     messages = build_messages(project, action, project["instructions"])
                     before = copy.deepcopy(messages)
-                    fitted = fit_context_settings(messages, settings)
+                    fitted = fit_context_settings(messages, settings, action=action)
                     self.assertEqual(messages, before)
                     self.assertEqual(settings, initial_settings)
-                    self.assertEqual(fitted["num_ctx"], 8192)
+                    self.assertGreaterEqual(fitted["num_ctx"], 8192)
+                    self.assertLessEqual(fitted["num_ctx"], 16384)
                     self.assertGreaterEqual(fitted["num_predict"], 1024)
                     self.assertLessEqual(fitted["num_predict"], 4096)
                     validate_context(messages, fitted)
@@ -238,7 +239,8 @@ class ContextBudgetTests(unittest.TestCase):
                     self.assertEqual(body["instructions"], project["instructions"])
                     if content:
                         self.assertEqual(body["existing_script"], manuscript)
-                        self.assertLess(fitted["num_predict"], 4096)
+                        if action != "storyboard":
+                            self.assertLess(fitted["num_predict"], 4096)
                     for key in ("base_url", "model", "temperature"):
                         self.assertEqual(fitted[key], settings[key])
 

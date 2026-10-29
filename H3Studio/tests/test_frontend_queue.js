@@ -52,6 +52,13 @@ test('engine waiting overrides misleading running status and percentages without
   assert.equal(context.job.progress, 5);
 });
 
+test('a replacement waiting for prompt approval never claims to be sampling or queued on the GPU', () => {
+  const { context } = fixture(waitingQueue());
+  const view = context.queueJobPresentation({id:'video',status:'awaiting_review',progress:30});
+  assert.equal(view.label, '等待確認稿件'); assert.match(view.detail, /確認前不會開始/); assert.equal(view.waiting, true);
+  assert.equal(context.statusLabel('awaiting_review'), '等待確認稿件');
+});
+
 test('the next engine job shows pending rank 1 and running work ahead separately', () => {
   const { context, run } = fixture(waitingQueue());
   Object.assign(context.sharedQueueData.jobs.video, { position: 1, ahead_count: 1 });

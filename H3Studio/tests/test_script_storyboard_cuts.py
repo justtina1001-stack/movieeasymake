@@ -288,7 +288,7 @@ class StoryboardCutPackingTests(unittest.TestCase):
             imported = manager.import_shortfilm("fixture")["project"]
             scene, clip = imported["scenes"][0], imported["scenes"][0]["shots"][1]
             payload, _ = compile_shot_payload(imported, scene["id"], clip["id"])
-            self.assertIn("小白 (S3) says <d>[Chinese] 汪！</d>", payload["prompt"])
+            self.assertIn("小白 (S1) says <d>[Chinese] 汪！</d>", payload["prompt"])
 
     def test_parse_and_import_compile_fifteen_seconds_with_all_references_and_speech(self):
         original = storyboard()

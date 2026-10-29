@@ -86,12 +86,12 @@ class OfficialPromptTests(unittest.TestCase):
         self.assertNotIn("<Picture 2>: fully_preserved", c.prompt)
 
     def test_overlapping_names_sign_text_speech_and_existing_tags_are_preserved(self):
-        prompt = '[Shot 1] Alex walks alongside Al. Alex says: "Alex and Al!" A sign reads "Alex". <Subject 9> stays visible.'
+        prompt = '[Shot 1] Alex walks alongside Al. Alex says: "Alex and Al!" A sign reads "Alex". <Subject 2> stays visible.'
         c = compile_request(request("r2v", prompt=prompt, references=[character("Alex"), character("Al")]))
         self.assertIn("<Subject 1>（Alex） walks alongside <Subject 2>（Al）", c.prompt)
         self.assertIn("<d>[English] Alex and Al!</d>", c.prompt)
         self.assertIn('A sign reads "Alex"', c.prompt)
-        self.assertIn("<Subject 9> stays visible", c.prompt)
+        self.assertIn("<Subject 2> stays visible", c.prompt)
         self.assertNotIn("（<Subject", c.prompt)
 
     def test_named_speakers_keep_ids_across_main_text_and_storyboards(self):

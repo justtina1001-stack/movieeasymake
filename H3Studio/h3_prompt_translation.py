@@ -5,6 +5,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import re
 import secrets
 import time
@@ -15,12 +16,14 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from dialogue import format_dialogue
+from h3_prompt_format import normalize_prompt_source
 
 
 _NON_ENGLISH = re.compile(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
 _LOCKED = (
     r"<d>.*?</d>|<(?:Subject|Picture|Video|Audio)\s+\d+>|<scenetrans>|<cutoff>|H3KEEP[A-F0-9]{12}X+\d{4}X|"
-    r"\(S\d+\)|\[Shot\s+\d+(?:[^\]]*)\]|"
+    r"\(S\d+\)|\[Shot\s+\d+(?:[^\]]*)\](?:\s+At\s+\d+:\d{2}\.\d{3},)?|"
+    r"(?:subject_definitions|summary|retention_analysis|integrated_multimodal_description|detailed_description|overall_soundscape|non_diegetic_music):|"
     r'"(?:\\.|[^"\\])*"|「[^」]*」|『[^』]*』|“[^”]*”|'
     r"(?<!\w)'(?:\\.|[^'\\])*'(?!\w)|\d+(?:[.:]\d+)*"
 )
@@ -155,11 +158,17 @@ def _restore(translated: Any, original: str, protected: dict[str, str]) -> str:
 def _fields(payload: dict) -> list[tuple[dict, str, str]]:
     """Mutable locations containing directions; aliases and dialogue fields stay original."""
     result = []
+    mode = payload.get("mode")
+    reference_mode = mode in {None, "r2v", "replace", "popup_panel", "mg_animation"}
     for key in ("prompt", "shortfilm_summary", "shortfilm_soundscape", "shortfilm_music",
                 "overall_soundscape", "non_diegetic_music", "summary", "reference_style", "replacement_target"):
+        if key in {"summary", "reference_style"} and not reference_mode:
+            continue
+        if key == "replacement_target" and mode not in {None, "replace"}:
+            continue
         if isinstance(payload.get(key), str) and payload[key].strip():
             result.append((payload, key, key))
-    for index, reference in enumerate(payload.get("references") or []):
+    for index, reference in enumerate((payload.get("references") or []) if reference_mode else []):
         if isinstance(reference, dict) and isinstance(reference.get("description"), str):
             result.append((reference, "description", f"references.{index}.description"))
     for index, shot in enumerate(payload.get("storyboards") or []):
@@ -168,7 +177,7 @@ def _fields(payload: dict) -> list[tuple[dict, str, str]]:
         for key in ("description", "camera", "sound", "motion_beats", "effects"):
             if isinstance(shot.get(key), str):
                 result.append((shot, key, f"storyboards.{index}.{key}"))
-    for key, value in (payload.get("mg_animation") or {}).items():
+    for key, value in ((payload.get("mg_animation") or {}) if payload.get("mode") == "mg_animation" else {}).items():
         if isinstance(value, str) and _NON_ENGLISH.search(value):
             result.append((payload["mg_animation"], key, f"mg_animation.{key}"))
     return result
@@ -260,7 +269,7 @@ class H3PromptTranslator:
             schema = {"type": "object", "properties": properties, "required": list(values),
                       "additionalProperties": False}
             wire = {
-                "model": model, "stream": False, "format": schema, "keep_alive": 0,
+                "model": model, "stream": False, "think": False, "format": schema, "keep_alive": 0,
                 "messages": [{"role": "system", "content": _SYSTEM + "\nMandatory tokens by field: "
                               + json.dumps(protected_tokens)},
                              {"role": "user", "content": json.dumps(values, ensure_ascii=False)}],
@@ -305,39 +314,56 @@ class H3PromptTranslator:
         payload = copy.deepcopy(raw)
         manager = self.app.get("scriptwriting")
         settings = getattr(manager, "settings", None)
-        # Embedded callers with no writer keep their established deterministic contract.
-        if not isinstance(settings, dict):
-            return payload
-        if self._reuse_fallback_handoff(payload, settings):
+        if isinstance(settings, dict) and self._reuse_fallback_handoff(payload, settings):
             return payload
         aliases = [str(item.get("alias", "")) for item in payload.get("references") or [] if isinstance(item, dict)]
         speakers = [str(item.get("alias", "")) for item in payload.get("references") or []
                     if isinstance(item, dict) and item.get("type") in {"character", "creature"}]
         source_prompt = payload.get("prompt")
+        normalized_sources = {}
         if isinstance(source_prompt, str):
-            payload["prompt"] = format_dialogue(source_prompt, speakers=speakers)
+            from domain import FPS, aligned_frame_count
+            try:
+                requested = float(payload.get("duration", 5))
+            except (ValueError, TypeError, OverflowError):
+                requested = 5.0
+            if not math.isfinite(requested):
+                requested = 5.0
+            requested = min(15.0, max(5.0, requested))
+            payload["prompt"] = normalize_prompt_source(source_prompt, aligned_frame_count(requested) / FPS,
+                                                        speakers=speakers, timeline_duration=requested)
+            if payload["prompt"] != source_prompt:
+                normalized_sources["prompt"] = source_prompt
         for shot in payload.get("storyboards") or []:
             if isinstance(shot, dict) and isinstance(shot.get("description"), str):
                 shot["description"] = format_dialogue(shot["description"], speakers=speakers)
+        # Deterministic shot/dialogue normalization also applies when no writer is configured.
+        if not isinstance(settings, dict):
+            if normalized_sources:
+                payload["h3_translation"] = {"status": "not_needed", "source_texts": normalized_sources}
+            return payload
         pending = []
         for container, key, path in _fields(payload):
             masked, protected = _mask(container[key], aliases)
             if _NON_ENGLISH.search(masked):
                 pending.append((container, key, path, masked, protected))
         if not pending:
+            if normalized_sources:
+                payload["h3_translation"] = {"status": "not_needed", "source_texts": normalized_sources}
             return payload
         warnings = [value for value in payload.get("h3_preparation_warnings") or []
                     if value not in {_WARNING, "已保留原文敘述；目前關閉自動英文整理。"}]
         if payload.get("translate_directions") is False:
             warnings.append("已保留原文敘述；目前關閉自動英文整理。")
             payload.update(h3_preparation_warnings=list(dict.fromkeys(warnings)),
-                           h3_translation={"status": "disabled"})
+                           h3_translation={"status": "disabled", **({"source_texts": normalized_sources} if normalized_sources else {})})
             return payload
         original = {path: container[key] for container, key, path, _, _ in pending}
         if source_prompt is not None and "prompt" in original:
             original["prompt"] = source_prompt
+        original.update(normalized_sources)
         settings = copy.deepcopy(settings)
-        cache_prefix = (settings.get("base_url"), settings.get("model"), "h3-translation-v1")
+        cache_prefix = (settings.get("base_url"), settings.get("model"), "h3-translation-v2-official")
         started_at = time.monotonic()
         try:
             async with self._lock:

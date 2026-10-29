@@ -58,6 +58,7 @@ from face_repair import repair_capabilities, repair_options
 from qwen_image import register_image_routes
 from scriptwriting import register_scriptwriting_routes
 from script_video_renderer import ScriptVideoRenderer
+from generation_review import GenerationReviewStore, GenerationReviewError, compiled_from_review, prompt_review_item, review_digest
 from setup_scriptwriting import start_managed_server as start_scriptwriting_server
 from video_editor import register_editor_routes
 from editor_media_io import register_editor_media_io
@@ -127,7 +128,7 @@ def studio_source_fingerprint(root: Path) -> str:
     writing_skills = root / "writing_skills"
     if writing_skills.is_dir():
         files.extend(path for path in writing_skills.rglob("*")
-                     if path.is_file() and path.suffix.lower() in {".md", ".json"})
+                     if path.is_file() and path.suffix.lower() in {".md", ".json", ".txt"})
     fingerprint = hashlib.sha256()
     for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
         content = path.read_bytes()
@@ -1288,6 +1289,8 @@ class JobManager:
             if job.get("status") in {"queued", "preparing", "running"}:
                 job["status"] = "interrupted"
                 job["error"] = "工具上次關閉時工作尚未完成。"
+                if job.get("require_prompt_review"):
+                    job["approved_review_id"] = None
             job.setdefault("name", "")
             job.setdefault("video_model", VIDEO_MODEL_H3)
             job.setdefault("favorite", False)
@@ -1382,6 +1385,7 @@ class JobManager:
         raw_request: dict[str, Any],
         source_info: dict[str, Any],
         segments: list[dict[str, Any]],
+        *, require_prompt_review: bool = False,
     ) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
         job = {
@@ -1410,6 +1414,8 @@ class JobManager:
             "source_info": source_info,
             "segments": [{**segment, "status": "waiting", "child_job_id": None} for segment in segments],
             "active_child_id": None,
+            "require_prompt_review": require_prompt_review,
+            "pending_review": None, "review": None, "approved_review_id": None,
             "created_at": utc_now(),
             "updated_at": utc_now(),
         }
@@ -1866,10 +1872,34 @@ class JobManager:
                     child_payload = self._replacement_child_payload(
                         raw_request, parent, segment, previous_continuity_asset or None
                     )
-                    child_payload = await asyncio.to_thread(
-                        prepare_media_payload, child_payload, self.assets, probe_video, normalize_h3_reference_video,
-                    )
-                    compiled = compile_request(child_payload)
+                    if parent.get("require_prompt_review"):
+                        source_digest = review_digest(child_payload)
+                        packet, review = parent.get("pending_review"), parent.get("review")
+                        if not isinstance(packet, dict) or not isinstance(review, dict):
+                            prepared_child = await asyncio.to_thread(
+                                prepare_media_payload, child_payload, self.assets, probe_video, normalize_h3_reference_video)
+                            compiled = compile_request(prepared_child)
+                            packet = {"prepared_payload": prepared_child, "compiled": asdict(compiled),
+                                      "source_digest": source_digest, "segment_index": position}
+                            review = {"id": uuid.uuid4().hex, "created_at": utc_now(), "packet_digest": review_digest(packet),
+                                      "prompts": [prompt_review_item(compiled, title=f"第 {position + 1}/{len(segments)} 段", prepared=prepared_child)]}
+                            self.update(parent_id, pending_review=packet, review=review, approved_review_id=None)
+                        if (packet.get("segment_index") != position or packet.get("source_digest") != source_digest
+                                or review.get("packet_digest") != review_digest(packet)):
+                            raise GenerationReviewError("分段素材或生成稿已變更，請重新建立角色替換流程。")
+                        if parent.get("approved_review_id") != review["id"]:
+                            self.update(parent_id, status="awaiting_review", active_child_id=None,
+                                        current_node=f"第 {position + 1}/{len(segments)} 段已準備好，等待確認生成稿")
+                            return
+                        child_payload = copy.deepcopy(packet["prepared_payload"])
+                        compiled = compiled_from_review(packet["compiled"])
+                        for asset_id in required_asset_ids(compiled):
+                            self.assets.path_for(asset_id)
+                    else:
+                        child_payload = await asyncio.to_thread(
+                            prepare_media_payload, child_payload, self.assets, probe_video, normalize_h3_reference_video,
+                        )
+                        compiled = compile_request(child_payload)
                     child = self.create(
                         compiled,
                         child_payload,
@@ -1880,7 +1910,8 @@ class JobManager:
                     child_id = child["id"]
                     segment["child_job_id"] = child_id
                     segment["status"] = "queued"
-                    self.update(parent_id, segments=segments, active_child_id=child_id)
+                    self.update(parent_id, segments=segments, active_child_id=child_id,
+                                pending_review=None, review=None, approved_review_id=None)
                     prompt_path = JOB_DIR / f"{parent_id}.prompt.txt"
                     if not prompt_path.exists():
                         prompt_path.write_text(compiled.prompt, encoding="utf-8")
@@ -1980,7 +2011,31 @@ class JobManager:
                 **self.finish_timing(parent_id),
             )
 
-    async def resume_batch(self, job_id: str) -> dict[str, Any]:
+    async def approve_replacement_review(self, job_id: str, raw: Any) -> dict[str, Any]:
+        job = self.jobs.get(job_id)
+        task = self.tasks.get(job_id)
+        review, packet = (job or {}).get("review"), (job or {}).get("pending_review")
+        if (not job or job.get("batch_type") != "replace_long" or job.get("status") != "awaiting_review"
+                or not isinstance(raw, dict) or set(raw) != {"review_id"} or not isinstance(review, dict)
+                or raw.get("review_id") != review.get("id") or not packet
+                or review.get("packet_digest") != review_digest(packet) or task and not task.done()):
+            raise GenerationReviewError("這份分段生成稿已失效，請重新檢查目前稿件。")
+        raw_request = json.loads((JOB_DIR / f"{job_id}.request.json").read_text(encoding="utf-8"))
+        position = packet["segment_index"]
+        segment = job["segments"][position]
+        previous = job["segments"][position - 1] if position else {}
+        source = self._replacement_child_payload(raw_request, job, segment, previous.get("continuity_asset_id"))
+        if packet.get("source_digest") != review_digest(source):
+            raise GenerationReviewError("分段素材或原始設定已改變，請重新建立角色替換流程。")
+        self.cancel_events[job_id] = asyncio.Event()
+        self.update(job_id, status="queued", approved_review_id=review["id"], error=None)
+        self.tasks[job_id] = asyncio.create_task(self._run_replacement_batch(job_id, raw_request))
+        return job
+
+    async def resume_batch(self, job_id: str, raw: Any = None) -> dict[str, Any]:
+        if raw is not None and (not isinstance(raw, dict) or set(raw) - {"require_prompt_review"}
+                or "require_prompt_review" in raw and not isinstance(raw["require_prompt_review"], bool)):
+            raise RequestError("生成稿確認選項格式錯誤。")
         job = self.jobs.get(job_id)
         if not job or job.get("batch_type") != "replace_long":
             raise RequestError("這筆工作不是可接續的長片角色替換工作。")
@@ -1994,7 +2049,9 @@ class JobManager:
             raise RequestError("找不到這筆長片工作的原始設定。")
         raw_request = json.loads(request_path.read_text(encoding="utf-8"))
         self.cancel_events[job_id] = asyncio.Event()
-        self.update(job_id, status="queued", error=None, current_node="準備接續未完成片段")
+        self.update(job_id, status="queued", error=None, current_node="準備接續未完成片段",
+                    require_prompt_review=job.get("require_prompt_review", False) or bool((raw or {}).get("require_prompt_review")),
+                    approved_review_id=None)
         self.tasks[job_id] = asyncio.create_task(self._run_replacement_batch(job_id, raw_request))
         return self.jobs[job_id]
 
@@ -2094,7 +2151,7 @@ class JobManager:
         if self.jobs[job_id].get("status") == "running" and prompt_id:
             await self.comfy.interrupt(prompt_id)
         self.cancel_events.setdefault(job_id, asyncio.Event()).set()
-        if self.jobs[job_id].get("status") in {"queued", "preparing", "running", "interrupted"}:
+        if self.jobs[job_id].get("status") in {"queued", "preparing", "running", "interrupted", "awaiting_review"}:
             self.update(
                 job_id,
                 status="cancelled",
@@ -2123,7 +2180,7 @@ class JobManager:
                 break
             related_ids = expanded
 
-        active_statuses = {"queued", "preparing", "running"}
+        active_statuses = {"queued", "preparing", "running", "awaiting_review"}
         for related_id in related_ids:
             related = self.jobs.get(related_id) or {}
             task = self.tasks.get(related_id)
@@ -2253,6 +2310,8 @@ def create_app() -> web.Application:
     app["voice_jobs"] = voice_jobs
     app["shared_gateway"] = gateway
     app["shortfilms"] = shortfilms
+    reviews = GenerationReviewStore()
+    app["generation_reviews"] = reviews
 
     async def prepare_generation_payload(payload: dict[str, Any]) -> dict[str, Any]:
         prepared = await asyncio.to_thread(
@@ -2701,16 +2760,21 @@ def create_app() -> web.Application:
             "shortfilm_scene_title": scene.get("title") or "場次",
             "shortfilm_shot_title": shot.get("title") or "鏡頭",
         })
+        source_payload = copy.deepcopy(raw_payload)
         raw_payload = await prepare_generation_payload(raw_payload)
         compiled = compile_request(raw_payload)
         for asset_id in required_asset_ids(compiled):
             assets.path_for(asset_id)
         data = asdict(compiled)
         data["asset_count"] = len(required_asset_ids(compiled))
+        receipt = reviews.issue(source_payload, raw_payload, compiled, context={
+            "shortfilm_project_id": project_id, "source": generation_source(project)})
+        data.update(receipt)
         return {
             "project": project,
             "payload": raw_payload,
             "compiled": data,
+            **receipt,
             "warnings": list(dict.fromkeys([*project_warnings(project), *warnings, *compiled.warnings,
                                             *(raw_payload.get("h3_preparation_warnings") or [])])),
         }
@@ -2735,7 +2799,26 @@ def create_app() -> web.Application:
         return jobs.create(compile_request(prepared), prepared)
 
     app["compile_submit_shortfilm"] = compile_submit_shortfilm
-    shortfilm_batches = ShortFilmBatchManager(app, DATA_DIR, compile_submit_shortfilm)
+    async def prepare_shortfilm_review(project_id, shot_id, snapshot):
+        data = await compile_shortfilm_payload(project_id, shot_id, {"prepare_continuity": True}, snapshot)
+        if generation_source(shortfilms.get(project_id)) != generation_source(snapshot):
+            raise ShortFilmBatchError("專案設定已改變，請開始新的影片流程。", 409)
+        prepared = data["payload"]
+        compiled = compile_request(prepared)
+        return {"prepared_payload": prepared, "compiled": asdict(compiled),
+                "prompt": prompt_review_item(compiled, scene_id=prepared.get("shortfilm_scene_id"), shot_id=shot_id,
+                                             title=prepared.get("shortfilm_shot_title"), prepared=prepared)}
+
+    async def submit_shortfilm_review(project_id, shot_id, snapshot, packet):
+        if generation_source(shortfilms.get(project_id)) != generation_source(snapshot):
+            raise ShortFilmBatchError("專案設定已改變，請開始新的影片流程。", 409)
+        compiled = compiled_from_review(packet["compiled"])
+        for asset_id in required_asset_ids(compiled):
+            assets.path_for(asset_id)
+        return jobs.create(compiled, copy.deepcopy(packet["prepared_payload"]))
+
+    shortfilm_batches = ShortFilmBatchManager(app, DATA_DIR, compile_submit_shortfilm,
+        prepare_review=prepare_shortfilm_review, submit_review=submit_shortfilm_review)
     app["shortfilm_batches"] = shortfilm_batches
 
     async def list_shortfilm_batches(request: web.Request) -> web.Response:
@@ -2743,7 +2826,8 @@ def create_app() -> web.Application:
 
     async def start_shortfilm_batch(request: web.Request) -> web.Response:
         try:
-            return web.json_response(await shortfilm_batches.start(request.match_info["project_id"]), status=202)
+            raw = await request.json() if request.can_read_body else {}
+            return web.json_response(await shortfilm_batches.start(request.match_info["project_id"], raw), status=202)
         except (ShortFilmBatchError, ShortFilmError, RequestError, OSError, ValueError) as error:
             return json_response_error(error, 409)
 
@@ -2751,15 +2835,19 @@ def create_app() -> web.Application:
         try:
             if request.match_info["action"] == "cancel":
                 result = await shortfilm_batches.cancel(request.match_info["batch_id"])
+            elif request.match_info["action"] == "approve":
+                result = await shortfilm_batches.approve(request.match_info["batch_id"], await request.json())
             else:
-                result = await shortfilm_batches.resume(request.match_info["batch_id"])
+                raw = await request.json() if request.can_read_body else {}
+                result = await shortfilm_batches.resume(request.match_info["batch_id"], raw)
             return web.json_response(result, status=202)
         except (ShortFilmBatchError, ShortFilmError, RequestError, OSError, ValueError) as error:
             return json_response_error(error, 409)
 
     async def compile_api(request: web.Request) -> web.Response:
         try:
-            payload = await prepare_generation_payload(await request.json())
+            source_payload = await request.json()
+            payload = await prepare_generation_payload(source_payload)
             compiled = compile_request(payload)
             for asset_id in required_asset_ids(compiled):
                 assets.path_for(asset_id)
@@ -2770,6 +2858,11 @@ def create_app() -> web.Application:
             data = asdict(compiled)
             data["asset_count"] = len(required_asset_ids(compiled))
             data["prepared_payload"] = payload
+            data.update(reviews.issue(source_payload, payload, compiled))
+            media = payload.get("media_preflight") or {}
+            source_info = (media.get("videos") or {}).get(media.get("replacement_source_asset_id")) or {}
+            if compiled.mode == "replace" and payload.get("replacement_auto_split", True) and float(source_info.get("duration") or 0) > 15:
+                data["review_kind"] = "replacement_plan"
             data["warnings"] = list(dict.fromkeys([*compiled.warnings,
                                                   *(payload.get("h3_preparation_warnings") or [])]))
             return web.json_response(data)
@@ -2820,10 +2913,28 @@ def create_app() -> web.Application:
         except (RequestError, ValueError, OSError, json.JSONDecodeError) as error:
             return json_response_error(error)
 
+    def check_review_context(context):
+        if context.get("shortfilm_project_id"):
+            try:
+                current = shortfilms.get(context["shortfilm_project_id"])
+            except ValueError as error:
+                raise GenerationReviewError("短片已移除，請重新檢查生成稿。") from error
+            if generation_source(current) != context["source"]:
+                raise GenerationReviewError("短片內容或素材已變更，請重新檢查生成稿。")
+
     async def render(request: web.Request) -> web.Response:
+        review_token = None
+        context = {}
         try:
-            payload = await prepare_generation_payload(await request.json())
-            compiled = compile_request(payload)
+            submitted = await request.json()
+            if isinstance(submitted, dict) and "review_receipt" in submitted:
+                review_token, reviewed = reviews.claim(submitted)
+                context = reviewed.get("context") or {}
+                check_review_context(context)
+                payload, compiled = reviewed["prepared"], reviewed["compiled"]
+            else:
+                payload = await prepare_generation_payload(submitted)
+                compiled = compile_request(payload)
             for asset_id in required_asset_ids(compiled):
                 assets.path_for(asset_id)
             if compiled.continuation_source_asset:
@@ -2839,13 +2950,21 @@ def create_app() -> web.Application:
                     source_id, payload.get("replacement_split_strategy") != "balanced"
                 )
                 if float(prepared["source"]["duration"]) > 15:
+                    check_review_context(context)
                     job = jobs.create_replacement_batch(
-                        compiled, payload, prepared["source"], prepared["segments"]
+                        compiled, payload, prepared["source"], prepared["segments"], require_prompt_review=review_token is not None
                     )
+                    reviews.consume(review_token)
                     return web.json_response(job, status=202)
+            check_review_context(context)
             job = jobs.create(compiled, payload)
+            reviews.consume(review_token)
             return web.json_response(job, status=202)
+        except GenerationReviewError as error:
+            reviews.release(review_token)
+            return json_response_error(error, 409)
         except (RequestError, json.JSONDecodeError, OSError, ValueError) as error:
+            reviews.release(review_token)
             return json_response_error(error)
 
     async def list_jobs(request: web.Request) -> web.Response:
@@ -2905,8 +3024,15 @@ def create_app() -> web.Application:
 
     async def resume_job(request: web.Request) -> web.Response:
         try:
-            return web.json_response(await jobs.resume_batch(request.match_info["job_id"]), status=202)
+            raw = await request.json() if request.can_read_body else {}
+            return web.json_response(await jobs.resume_batch(request.match_info["job_id"], raw), status=202)
         except (RequestError, OSError, json.JSONDecodeError) as error:
+            return json_response_error(error, 409)
+
+    async def approve_job_review(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(await jobs.approve_replacement_review(request.match_info["job_id"], await request.json()), status=202)
+        except (GenerationReviewError, RequestError, OSError, ValueError) as error:
             return json_response_error(error, 409)
 
     async def delete_job(request: web.Request) -> web.Response:
@@ -3309,7 +3435,7 @@ def create_app() -> web.Application:
     app.router.add_post("/api/shortfilms/{project_id}/shots/{shot_id}/compile", compile_shortfilm_shot)
     app.router.add_get("/api/shortfilm-batches", list_shortfilm_batches)
     app.router.add_post("/api/shortfilms/{project_id}/batch", start_shortfilm_batch)
-    app.router.add_post("/api/shortfilm-batches/{batch_id}/{action:cancel|resume}", control_shortfilm_batch)
+    app.router.add_post("/api/shortfilm-batches/{batch_id}/{action:cancel|resume|approve}", control_shortfilm_batch)
     app.router.add_post("/api/shortfilms/{project_id}/segments", append_shortfilm_segments)
     app.router.add_get("/api/shortfilms/{project_id}/jobs", list_shortfilm_jobs)
     app.router.add_post("/api/compile", compile_api)
@@ -3320,6 +3446,7 @@ def create_app() -> web.Application:
     app.router.add_delete("/api/jobs/{job_id}", delete_job)
     app.router.add_post("/api/jobs/{job_id}/cancel", cancel_job)
     app.router.add_post("/api/jobs/{job_id}/resume", resume_job)
+    app.router.add_post("/api/jobs/{job_id}/approve", approve_job_review)
     app.router.add_post("/api/jobs/{job_id}/rename", rename_job)
     app.router.add_post("/api/jobs/{job_id}/favorite", favorite_job)
     app.router.add_get("/api/jobs/{job_id}/recipe", job_recipe)

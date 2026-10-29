@@ -1,0 +1,22 @@
+{
+  "repository": "https://github.com/MiniMax-AI/MiniMax-H3",
+  "revision": "199b7d0e1fd95e7b3eafa8c15eca692534142427",
+  "license_notice": "../licenses/minimax-h3-community.txt",
+  "files": {
+    "SKILL.md": {
+      "source": "https://raw.githubusercontent.com/MiniMax-AI/MiniMax-H3/199b7d0e1fd95e7b3eafa8c15eca692534142427/skills/h3-prompt-writing/SKILL.md",
+      "sha256": "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0",
+      "bytes": 2623
+    },
+    "references/base-en.txt": {
+      "source": "https://raw.githubusercontent.com/MiniMax-AI/MiniMax-H3/199b7d0e1fd95e7b3eafa8c15eca692534142427/skills/h3-prompt-writing/references/base-en.txt",
+      "sha256": "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc",
+      "bytes": 15773
+    },
+    "references/ref-en.txt": {
+      "source": "https://raw.githubusercontent.com/MiniMax-AI/MiniMax-H3/199b7d0e1fd95e7b3eafa8c15eca692534142427/skills/h3-prompt-writing/references/ref-en.txt",
+      "sha256": "1e574f356716ad55612247ffb7bbccbcdb484ad96599d63c7dca1af186b1fab7",
+      "bytes": 23553
+    }
+  }
+}

@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import aiohttp
+from dataclasses import asdict
+from generation_review import compiled_from_review, review_digest
 
 from domain import compile_request, required_asset_ids, validate_runtime_inventory
 from scriptwriting import ScriptwritingError, local_base_url
@@ -137,9 +139,9 @@ class ScriptVideoRenderer:
                 self.app["assets"].path_for(asset_id)
             validate_runtime_inventory(compiled, inventory)
             manifest = {"scene_id": scene["id"], "shot_id": shot["id"], "payload": raw}
-            if prepared != raw:
-                manifest["prepared_payload"] = prepared
-                manifest["prepared_source_digest"] = payload_digest(raw)
+            manifest["compiled"] = asdict(compiled)
+            manifest["prepared_payload"] = prepared
+            manifest["prepared_source_digest"] = payload_digest(raw)
             manifests.append(manifest)
         return manifests
 
@@ -251,8 +253,21 @@ class ScriptVideoRenderer:
                 prepared = copy.deepcopy(candidate)
                 break
         if prepared is None:
+            if pipeline.get("require_prompt_review"):
+                raise ScriptwritingError("已確認的生成稿資料不完整，請重新建立流程。", 409)
             prepared = await self._prepare_payload(raw)
-        compiled = compile_request(prepared)
+        if pipeline.get("require_prompt_review"):
+            review = pipeline.get("review") or {}
+            if (not review.get("id") or pipeline.get("approved_review_id") != review["id"]
+                    or review.get("plan_digest") != review_digest(pipeline.get("render_plan"))):
+                raise ScriptwritingError("請先檢查並確認生成稿，再生成影片。", 409)
+            manifest = next((item for item in pipeline.get("render_plan", [])
+                             if item.get("scene_id") == scene_id and item.get("shot_id") == shot_id and item.get("payload") == raw), None)
+            if not manifest or not isinstance(manifest.get("compiled"), dict) or prepared != manifest.get("prepared_payload"):
+                raise ScriptwritingError("已確認的生成稿資料不完整，請重新建立流程。", 409)
+            compiled = compiled_from_review(manifest["compiled"])
+        else:
+            compiled = compile_request(prepared)
         for asset_id in required_asset_ids(compiled):
             self.app["assets"].path_for(asset_id)
         video = self.app["jobs"].create(compiled, prepared)

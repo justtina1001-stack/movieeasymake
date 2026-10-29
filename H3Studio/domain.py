@@ -5,7 +5,8 @@ import re
 from dataclasses import dataclass, field
 from custom_loras import normalize_loras, active_loras, required_lora_trigger_specs, validate_lora_requirements
 from dialogue import format_dialogue, visual_direction_text
-from h3_prompt_format import base_prompt as format_base_prompt, combine_storyboards, cut_time, language_warning, number_speakers, rewrite_aliases, unpack_prompt
+from h3_prompt_format import base_prompt as format_base_prompt, combine_storyboards, cut_time, language_warning, number_speakers, rewrite_aliases, unpack_prompt, parse_prompt_sections, has_unassigned_dialogue
+from h3_prompt_references import validate_reference_sections, validate_uploaded_labels
 from typing import Any
 from video_models import FASTH3_FILENAME, FASTH3_STEPS, VIDEO_MODEL_FAST, VIDEO_MODEL_H3, normalize_video_model, video_model_profiles
 
@@ -572,15 +573,28 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         raise RequestError("請輸入影片敘述。")
     prompt_profile = _clean_text(payload.get("prompt_profile"))
     shortfilm_reference_continuity = prompt_profile == "shortfilm" and mode == "r2v"
-    base_prompt, embedded_soundscape, embedded_music = unpack_prompt(base_prompt)
+    try:
+        structured_sections = parse_prompt_sections(base_prompt)
+        base_prompt, embedded_soundscape, embedded_music = unpack_prompt(base_prompt)
+    except ValueError as error:
+        raise RequestError(str(error)) from error
+    if structured_sections:
+        full_reference = "subject_definitions" in structured_sections
+        if full_reference and mode != "r2v":
+            raise RequestError("完整 Ref2VA 六段提示詞請使用多模態參考模式；特殊模板請只貼影片敘述，以免覆寫原有規則。")
+        if not full_reference and reference_mode:
+            raise RequestError("目前選擇多模態參考模式，完整提示詞需使用 Ref2VA 六段；也可以只貼演出敘述交由工具編譯。")
     warnings = [str(value) for value in (payload.get("h3_preparation_warnings") or [])]
+    warning_reference_fields = ("summary", "reference_style", "shortfilm_summary") if reference_mode else ()
+    warning_fields = (*warning_reference_fields, "shortfilm_soundscape", "shortfilm_music", "overall_soundscape", "non_diegetic_music",
+                      *(("replacement_target",) if mode == "replace" else ()))
     user_directions = "\n".join([base_prompt, *[
-        _clean_text(item.get("description")) for item in (payload.get("references") or [])
-    ], *[_clean_text(payload.get(key)) for key in ("summary", "reference_style", "shortfilm_summary", "shortfilm_soundscape", "shortfilm_music", "overall_soundscape", "non_diegetic_music", "replacement_target")], *[
+        _clean_text(item.get("description")) for item in ((payload.get("references") or []) if reference_mode else [])
+    ], *[_clean_text(payload.get(key)) for key in warning_fields], *[
         _clean_text(shot.get(key)) for shot in (payload.get("storyboards") or [])
         for key in ("description", "camera", "sound", "motion_beats", "effects")
-    ], *[value for value in (payload.get("mg_animation") or {}).values() if isinstance(value, str)]])
-    alias_names = {_clean_text(item.get("alias")): "" for item in (payload.get("references") or []) if _clean_text(item.get("alias"))}
+    ], *[value for value in ((payload.get("mg_animation") or {}) if mode == "mg_animation" else {}).values() if isinstance(value, str)]])
+    alias_names = {_clean_text(item.get("alias")): "" for item in ((payload.get("references") or []) if reference_mode else []) if _clean_text(item.get("alias"))}
     if language_warning(rewrite_aliases(user_directions, alias_names)) and not warnings:
         warnings.append("部分畫面描述仍為中文；官方 H3 格式建議使用英文描述，對白與畫面文字會保留原文。")
 
@@ -877,7 +891,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             timeline = _mg_animation_description(payload, aliases, length / FPS)
             rewritten_prompt = timeline + "\nAdditional user direction: " + re.sub(r"^\s*\[Shot 1\]\s*", "", rewritten_prompt)
         try:
-            narrative, final_shot = combine_storyboards(rewritten_prompt, shot_lines, length / FPS)
+            narrative, final_shot = combine_storyboards(rewritten_prompt, shot_lines, length / FPS,
+                                                       timeline_duration=requested_duration,
+                                                       allow_repeated_opening=prompt_profile == "shortfilm")
         except ValueError as error:
             raise RequestError(str(error)) from error
         retention: list[str] = []
@@ -964,6 +980,27 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             "overall_soundscape:\n" + soundscape,
             "non_diegetic_music:\n" + music,
         ])
+        if structured_sections:
+            try:
+                validate_reference_sections(structured_sections, mapping, pictures=len(reference_images),
+                                            videos=len(reference_videos),
+                                            audios=sum(reference_video_use_audio) + len(reference_audios))
+            except ValueError as error:
+                raise RequestError(str(error)) from error
+            preserved = dict(structured_sections)
+            # Only narrative syntax is normalized. Never replace the user's
+            # definitions/summary/retention with the compiler's generic policy.
+            tagged_speakers = tuple(item["subject_tag"] for item in mapping
+                                   if item.get("subject_tag") and item["type"] in {"character", "creature"})
+            prefix = preserved["subject_definitions"] + "\n"
+            try:
+                numbered = number_speakers(prefix + narrative, tagged_speakers, speaker_ids)
+            except ValueError as error:
+                raise RequestError(str(error)) from error
+            if not numbered.startswith(prefix):
+                raise RequestError("subject_definitions 含有無法歸屬的台詞；請將實際發話移到 detailed_description，保留原定義。")
+            preserved["detailed_description"] = numbered[len(prefix):]
+            final_prompt = "\n\n".join(f"{key}:\n{value}" for key, value in preserved.items())
         official_mode = "Ref2VA"
     else:
         shot_lines, storyboard_images, storyboard_guides = _storyboard_text(storyboards, {}, speakers, speaker_ids)
@@ -971,7 +1008,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         if storyboard_images:
             raise RequestError("中間分鏡圖片需要使用多模態參考模式；此模式仍可使用純文字分鏡。")
         try:
-            narrative, final_shot = combine_storyboards(base_prompt, shot_lines, length / FPS)
+            narrative, final_shot = combine_storyboards(base_prompt, shot_lines, length / FPS,
+                                                       timeline_duration=requested_duration,
+                                                       allow_repeated_opening=prompt_profile == "shortfilm")
         except ValueError as error:
             raise RequestError(str(error)) from error
         if mode == "extend":
@@ -983,7 +1022,19 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         if motion_direction and prompt_profile != "shortfilm":
             narrative += "\n" + motion_direction
         soundscape, music = _sound_sections(payload, base_prompt, embedded_soundscape, embedded_music, mode)
+        if structured_sections:
+            soundscape, music = structured_sections["overall_soundscape"], structured_sections["non_diegetic_music"]
         final_prompt, official_mode = format_base_prompt(narrative, soundscape, music, first=bool(first_image), last=bool(last_image), duration=length / FPS, final_shot=final_shot)
+
+    try:
+        validate_uploaded_labels(final_prompt, mapping,
+                                 pictures=len(reference_images) if reference_mode else int(bool(first_image)) + int(bool(last_image)),
+                                 videos=len(reference_videos), audios=sum(reference_video_use_audio) + len(reference_audios))
+    except ValueError as error:
+        raise RequestError(str(error)) from error
+
+    if has_unassigned_dialogue(final_prompt):
+        warnings.append("部分台詞無法確定發話來源，尚未配置穩定的 (Sx) 聲源編號；請在台詞前寫明角色名稱加 says／whispers，或使用「旁白：」，避免台詞換人。")
 
     return CompiledRequest(
         mode=mode,

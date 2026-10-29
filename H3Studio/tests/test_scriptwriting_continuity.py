@@ -70,16 +70,17 @@ class ScriptContinuityInstructionsTests(unittest.TestCase):
         self.assertNotIn("腳印", json.dumps(body, ensure_ascii=False))
         self.assertIn("This adds no footprints", messages[0]["content"])
 
-    def test_default_budget_fits_without_losing_original_eight_cut_example(self):
+    def test_conversion_budget_fits_official_rules_without_losing_original_eight_cut_example(self):
         from test_scriptwriting_defaults import example_manuscript, ui_example_project
         project = ui_example_project()
         project["content"] = example_manuscript(project)
         original = copy.deepcopy(project)
         messages = build_messages(project, "storyboard", project["instructions"])
-        settings = fit_context_settings(messages, DEFAULT_SETTINGS)
+        settings = fit_context_settings(messages, DEFAULT_SETTINGS, action="storyboard")
         validate_context(messages, settings)
         self.assertGreaterEqual(settings["num_predict"], 1024)
-        self.assertEqual(settings["num_ctx"], 8192)
+        self.assertGreaterEqual(settings["num_ctx"], 8192)
+        self.assertLessEqual(settings["num_ctx"], 16384)
         self.assertEqual(project, original)
 
     def test_genre_methods_do_not_invent_an_unrequested_pursuer(self):

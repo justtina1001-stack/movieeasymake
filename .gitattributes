@@ -5,6 +5,8 @@
 *.html text eol=lf
 *.md text eol=lf
 *.json text eol=lf
+# Keep the vendored official guide bytes consistent with their SHA-256 manifest.
+H3Studio/writing_skills/official_h3_prompt/references/*.txt text eol=lf
 # Preserve CRLF in Git blobs and download archives as well as working trees.
 # cmd.exe can fail to locate batch subroutine labels in LF-only scripts.
 *.bat -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

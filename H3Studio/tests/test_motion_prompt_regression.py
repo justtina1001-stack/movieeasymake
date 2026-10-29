@@ -66,12 +66,13 @@ class MotionPromptRegressionTests(unittest.TestCase):
         self.assertIn("[Shot 2] At 00:01.500, End", result)
         self.assertEqual(count, 2)
 
-    def test_untimed_or_inline_prose_does_not_invent_cuts(self):
-        for prompt in ("#### **鏡頭 2：沒有時間**\nDragon moves.",
-                       "The sign describes 鏡頭 2：Other（3–7秒） in prose."):
-            result, count = normalize_shots(prompt, 15)
-            self.assertEqual(result, "[Shot 1] " + prompt)
-            self.assertEqual(count, 1)
+    def test_incomplete_heading_is_rejected_while_inline_prose_does_not_invent_cuts(self):
+        with self.assertRaisesRegex(ValueError, "時間碼"):
+            normalize_shots("#### **鏡頭 2：沒有時間**\nDragon moves.", 15)
+        prompt = "The sign describes 鏡頭 2：Other（3–7秒） in prose."
+        result, count = normalize_shots(prompt, 15)
+        self.assertEqual(result, "[Shot 1] " + prompt)
+        self.assertEqual(count, 1)
 
     def test_invalid_explicit_heading_timeline_is_rejected(self):
         for second in ("#### **鏡頭 3：Skipped（3–7秒）**",

@@ -81,6 +81,8 @@ let toastTimer;
 let engineStartingAt = 0;
 let keyframePrepareVersion = 0;
 let generationPreflight = null;
+let generationReview = null;
+const shortFilmReviewCache = new Map();
 let connectionSettings = null;
 const connectionUrlMemory = H3AudioWorkspace.createConnectionMemory();
 let audioWorkspace = null;
@@ -2007,9 +2009,7 @@ function validateReplacementSourceCompilation(payload, compiled) {
 }
 
 function generationPreflightSignature(payload) {
-  const comparable = { ...payload };
-  delete comparable.seed;
-  return JSON.stringify(comparable);
+  return JSON.stringify(payload);
 }
 
 function showGenerationPreflight(compiled) {
@@ -2043,7 +2043,8 @@ async function prepareGeneration(payload, reuse = true) {
   const cached = generationPreflight?.compiled;
   const fallbackSeedChanged = cached?.prepared_payload?.h3_translation?.status === "unavailable"
     && cached.prepared_payload.seed !== payload.seed;
-  if (reuse && generationPreflight?.signature === signature && !fallbackSeedChanged) compiled = cached;
+  const expired = cached?.review_expires_at && Date.parse(cached.review_expires_at) <= Date.now();
+  if (reuse && generationPreflight?.signature === signature && !fallbackSeedChanged && !expired) compiled = cached;
   else {
     compiled = await api("/api/compile", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
@@ -2052,7 +2053,7 @@ async function prepareGeneration(payload, reuse = true) {
     generationPreflight = { signature, compiled };
   }
   showGenerationPreflight(compiled);
-  return { compiled, payload: { ...(compiled.prepared_payload || payload), seed: payload.seed } };
+  return { compiled, payload: { ...(compiled.prepared_payload || payload) } };
 }
 
 function showGenerationStage(message) {
@@ -2062,11 +2063,49 @@ function showGenerationStage(message) {
   note.classList.remove("hidden");
 }
 
-function confirmTranslationFallback(payload) {
+function finishGenerationReview(choice) {
+  if (!generationReview) return;
+  const review = generationReview;
+  if (choice === "approve" && review.needsOriginalChoice && !review.originalChosen) return;
+  generationReview = null;
+  $("#generationReviewDialog").close();
+  review.resolve(choice);
+}
+
+function chooseGenerationOriginal() {
+  if (!generationReview?.needsOriginalChoice) return;
+  generationReview.originalChosen = true;
+  $("#generationReviewLanguageStatus").textContent = "已選擇使用原文。請檢查下方完整稿件，再按「確認稿件並生成」。";
+  $("#approveGenerationReview").disabled = false;
+}
+
+function generationReviewPromptText(compiled, payload = {}) {
+  const model = (compiled.video_model || payload.video_model) === "fasth3_omni_nvfp4" ? "FastH3-Omni NVFP4" : "MiniMax H3";
+  const settings = [`模型：${model}`, `片長：${compiled.actual_duration ?? compiled.duration ?? payload.duration ?? "依設定"} 秒`, `尺寸：${compiled.width || "?"} × ${compiled.height || "?"}`, `Seed：${compiled.seed ?? payload.seed ?? "依保存設定"}`];
+  const mapping = Array.isArray(compiled.mapping) ? compiled.mapping : [];
+  const warnings = Array.isArray(compiled.warnings) ? compiled.warnings : [];
+  const materials = mapping.map(item => `${item.alias || "參考素材"} → ${[item.subject_tag, ...(item.picture_tags || []), ...(item.video_tags || []), ...(item.video_audio_tags || []), item.audio_tag].filter(Boolean).join("、") || "文字設定"}`);
+  return `${settings.join("\n")}\n\n素材對應：\n${materials.length ? materials.join("\n") : "依首尾圖片／文字設定"}\n\n${warnings.length ? `生成提醒：\n${warnings.join("\n")}\n\n` : ""}實際送給模型的稿件：\n${compiled.prompt || ""}`;
+}
+
+function requestGenerationReview(compiled, payload, { title = "生成前確認", receiptRequired = true, canRetry = true, replacementPlan = false } = {}) {
+  if (generationReview) throw new Error("請先完成目前的稿件確認，或返回修改。");
+  if (!compiled?.prompt?.trim()) throw new Error("主機沒有提供完整生成稿，影片尚未送出。請重新整理稿件。");
+  if (receiptRequired && !compiled.review_receipt) throw new Error("主機尚未提供稿件確認功能，影片尚未送出。請更新並重新啟動 Studio。");
   const translation = payload?.h3_translation;
-  if (translation?.status !== "unavailable") return true;
-  const reason = translation.reason_code === "timeout" ? "英文整理逾時" : "英文整理未完成";
-  return confirm(`${reason}，這次內容仍是原文。\n\n使用原文生成可能影響模型對描述的理解。\n按「確定」使用原文生成；按「取消」返回，再按「預覽編譯提示詞」重新整理。`);
+  const needsOriginalChoice = translation?.status === "unavailable";
+  $("#generationReviewTitle").textContent = title;
+  $("#generationReviewPromptTitle").textContent = replacementPlan ? "長片替換設定稿" : "實際送給模型的稿件";
+  $("#approveGenerationReview").textContent = replacementPlan ? "確認設定並準備分段" : "確認稿件並生成";
+  $("#generationReviewPrompt").textContent = compiled.prompt;
+  $("#generationReviewSummary").textContent = generationReviewPromptText({ ...compiled, prompt: "" }, payload).replace(/\n\n實際送給模型的稿件：\n$/, "");
+  $("#generationReviewLanguageStatus").textContent = needsOriginalChoice ? `${translation.reason_code === "timeout" ? "英文整理逾時" : "英文整理未完成"}，目前顯示原文。請選擇重試整理，或明確選擇使用原文；影片尚未送出。` : replacementPlan ? "先確認長片替換設定；每段的真正生成稿會在準備完成後逐段等待確認。這次確認只開始準備分段，不會立即送出影片生成。" : "這是本次實際送給模型的完整稿件。確認前不會建立影片工作。";
+  $("#generationReviewFallback").classList.toggle("hidden", !needsOriginalChoice);
+  $("#retryGenerationReview").classList.toggle("hidden", !needsOriginalChoice || !canRetry);
+  $("#approveGenerationReview").disabled = needsOriginalChoice;
+  const pending = new Promise(resolve => { generationReview = { compiled, payload, resolve, needsOriginalChoice, originalChosen: false }; });
+  $("#generationReviewDialog").showModal();
+  return pending;
 }
 
 async function compilePreview() {
@@ -2122,18 +2161,24 @@ async function renderVideo() {
   showGenerationStage("正在整理提示詞與參考素材；這一步還沒進影片佇列，本機模型可能需幾分鐘。");
   let submittedJob = null;
   try {
-    if ($("#videoSeedAuto").getAttribute("aria-pressed") === "true") {
+    if ($("#videoSeedAuto").getAttribute("aria-pressed") === "true" && generationPreflight?.signature !== generationPreflightSignature(collectPayload())) {
       $("#seed").value = randomVideoSeed($("#seed").value);
       persistForm();
     }
     const original = collectPayload();
     const signature = generationPreflightSignature(original);
-    const { payload } = await prepareGeneration(original);
+    let prepared = await prepareGeneration(original);
     if (generationPreflightSignature(collectPayload()) !== signature) throw new Error("準備期間設定已變更，這次未送出。請確認設定後再生成。");
-    if (!confirmTranslationFallback(payload)) {
-      showGenerationStage("影片尚未送出；可按「預覽編譯提示詞」重試英文整理，或調整內容後再次生成。");
-      return null;
+    while (true) {
+      showGenerationStage("完整生成稿已準備好，等待你確認；影片尚未送入佇列。");
+      const replacementPlan = prepared.compiled.review_kind === "replacement_plan";
+      const choice = await requestGenerationReview(prepared.compiled, prepared.payload, { title: replacementPlan ? "長片替換設定確認" : "生成前確認", replacementPlan });
+      if (choice === "retry") { showGenerationStage("正在重新整理英文敘述；影片尚未送出。"); prepared = await prepareGeneration(original, false); continue; }
+      if (choice !== "approve") { showGenerationStage("已返回修改，影片尚未送出。編輯內容與素材均保留。"); return null; }
+      break;
     }
+    if (generationPreflightSignature(collectPayload()) !== signature) throw new Error("設定已變更，原確認稿已失效；影片尚未送出，請重新檢查稿件。");
+    const payload = { ...prepared.payload, review_receipt: prepared.compiled.review_receipt };
     button.querySelector("span").textContent = "正在送入工作佇列…";
     showGenerationStage("內容準備完成，正在提交影片工作…");
     const job = await api("/api/render", {
@@ -2142,6 +2187,7 @@ async function renderVideo() {
       body: JSON.stringify(payload),
     });
     submittedJob = job;
+    generationPreflight = null;
     showGenerationStage(`工作 ${job.id.slice(0, 8)} 已加入佇列，可在作品列表查看進度。`);
     toast(`工作 ${job.id.slice(0, 8)} 已加入佇列`);
     await loadJobs(true);
@@ -2158,12 +2204,13 @@ async function renderVideo() {
 }
 
 function statusLabel(status) {
-  return ({ waiting: "等待中", queued: "等待中", preparing: "準備素材", running: "生成中", completed: "已完成", failed: "失敗", cancelled: "已取消", interrupted: "已中斷" })[status] || status;
+  return ({ waiting: "等待中", queued: "等待中", preparing: "準備素材", awaiting_review: "等待確認稿件", running: "生成中", completed: "已完成", failed: "失敗", cancelled: "已取消", interrupted: "已中斷" })[status] || status;
 }
 
 function queueJobPresentation(job, queue = sharedQueueData) {
   const active = ["queued", "preparing", "running"].includes(job.status);
   const percent = value => value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Math.max(0, Math.min(100, Math.round(Number(value))));
+  if (job.status === "awaiting_review") return { label: "等待確認稿件", detail: "請檢查本段完整生成稿；確認前不會開始本段生成", progress: percent(job.progress), waiting: true };
   if (!active) return { label: statusLabel(job.status), detail: job.current_node || statusLabel(job.status), progress: percent(job.progress), waiting: false };
   const row = queue?.jobs?.[job.id];
   const phase = row?.phase;
@@ -2424,6 +2471,23 @@ async function showJobPrompt(jobId) {
     promptElement.textContent = error.message;
     toast(error.message, true);
   }
+}
+
+async function reviewReplacementJobPrompt(jobId) {
+  const job = await api(`/api/jobs/${jobId}`);
+  if (job.status !== "awaiting_review" || !job.review?.id || !job.review.prompts?.length) { toast("本段稿件狀態已更新，請重新整理工作列表。", true); return null; }
+  const item = job.review.prompts[0], reviewId = job.review.id;
+  const choice = await requestGenerationReview({ ...item, actual_duration: item.duration }, { video_model: item.video_model, seed: item.seed, h3_translation: item.h3_translation }, { title: `${job.name || "長片替換"} · 本段生成前確認`, receiptRequired: false, canRetry: false });
+  if (choice !== "approve") return null;
+  const result = await api(`/api/jobs/${jobId}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ review_id: reviewId }) });
+  toast("已確認本段生成稿。後續片段仍會逐段等待確認。"); await loadJobs(true); return result;
+}
+
+async function resumeReplacementJob(jobId) {
+  const capabilities = await api("/api/scripts/status");
+  if (capabilities.prompt_review_supported !== true) throw new Error("主機尚未提供逐段生成稿確認功能。請更新並重新啟動 Studio；工作尚未接續。");
+  const result = await api(`/api/jobs/${jobId}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ require_prompt_review: true }) });
+  toast("已接續準備未完成片段；每段完整生成稿均需確認後才生成。"); await loadJobs(true); return result;
 }
 
 function originalGenerationRequest(request) {
@@ -2693,7 +2757,7 @@ async function loadJobs(force = false) {
     lastJobsSignature = signature;
     $("#jobEmpty").classList.toggle("hidden", jobs.length > 0);
     $("#jobList").innerHTML = jobs.map(job => {
-      const active = ["queued", "preparing", "running"].includes(job.status);
+      const active = ["queued", "preparing", "running", "awaiting_review"].includes(job.status);
       const date = new Date(job.created_at).toLocaleString("zh-TW", { hour12: false });
       const fallbackName = `${modeLabels[job.mode] || job.mode} · ${job.width}×${job.height}`;
       const modelLabel = job.video_model === "fasth3_omni_nvfp4" ? "FastH3-Omni NVFP4" : "MiniMax H3";
@@ -2717,6 +2781,7 @@ async function loadJobs(force = false) {
           <div class="job-detail">
             <div class="job-detail-copy"><small>完整工作編號：${escapeHtml(job.id)}</small><small>工作時間：${escapeHtml(executionLabel)}</small>${hasRetime ? `<small>節奏處理：原始 ${Number(job.original_duration).toFixed(2)} 秒，已調整為 ${Number(job.duration).toFixed(2)} 秒</small>` : ""}${frameSequence ? `<small>連續圖：${Number(frameSequence.frame_count)} 張 PNG · ${Number(frameSequence.width)}×${Number(frameSequence.height)} · ${Number(frameSequence.fps).toFixed(2)} FPS</small>` : ""}${job.output?.filename ? `<small>輸出檔名：${escapeHtml(job.output.filename)}</small>` : ""}</div>
             <div class="job-actions">
+              ${job.batch_type === "replace_long" && job.status === "awaiting_review" ? `<button class="button primary" data-job-review="${job.id}" type="button">檢查本段生成稿</button>` : ""}
               <button class="button ghost" data-job-show-prompt="${job.id}" type="button">查看生成提示詞</button>
               ${job.face_repair ? "" : `<button class="button secondary" data-job-apply="${job.id}" type="button">快速套用</button>`}
               ${job.status === "completed" ? `<button class="button secondary" data-face-repair="${job.id}" type="button">臉部修復</button>` : ""}
@@ -3752,9 +3817,13 @@ async function compileShortFilmShot(shotId, generate = false) {
     const signature = shortFilmGenerationSignature(saved);
     const item = shortFilmFlatten(saved).find(item => item.shot.id === shotId);
     update("preparing", "正在整理提示詞與參考素材；本機英文整理可能需幾分鐘，完成後才會送入生成佇列。");
-    const result = await api(`/api/shortfilms/${projectId}/shots/${shotId}/compile`, {
+    const cached = shortFilmReviewCache.get(requestKey);
+    let result = generate && cached?.signature === signature && (!cached.result.compiled.review_expires_at || Date.parse(cached.result.compiled.review_expires_at) > Date.now()) ? cached.result : await api(`/api/shortfilms/${projectId}/shots/${shotId}/compile`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prepare_continuity: true }),
     });
+    if (result.review_receipt) result.compiled.review_receipt = result.review_receipt;
+    result.compiled.warnings = [...new Set([...(result.compiled.warnings || []), ...(result.warnings || [])])];
+    shortFilmReviewCache.set(requestKey, { signature, result });
     const current = shortFilmProjects.find(value => value.id === projectId);
     if (!current || shortFilmGenerationSignature(current) !== signature) throw new Error("準備期間鏡頭內容已變更，這次未送出。請確認設定後再次生成。");
     const refreshed = shortFilmFlatten(current).find(item => item.shot.id === shotId);
@@ -3771,17 +3840,29 @@ async function compileShortFilmShot(shotId, generate = false) {
       toast(`提示詞已依官方格式編譯，使用 ${result.compiled.asset_count} 個素材。`);
       return null;
     }
-    if (!confirmTranslationFallback(result.payload)) {
-      update("error", "影片尚未送出；可按「預覽提示詞」重試英文整理，或調整內容後再次生成。");
-      return null;
+    while (true) {
+      update("review", "等待確認完整生成稿；影片尚未送入佇列。");
+      const choice = await requestGenerationReview(result.compiled, result.payload, { title: `${item.scene.title}／${item.shot.title} · 生成前確認` });
+      if (choice === "retry") {
+        update("preparing", "正在重新整理英文敘述；影片尚未送出。");
+        result = await api(`/api/shortfilms/${projectId}/shots/${shotId}/compile`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prepare_continuity: true }) });
+        if (result.review_receipt) result.compiled.review_receipt = result.review_receipt;
+        result.compiled.warnings = [...new Set([...(result.compiled.warnings || []), ...(result.warnings || [])])];
+        shortFilmReviewCache.set(requestKey, { signature, result });
+        continue;
+      }
+      if (choice !== "approve") { update("error", "已返回修改，影片尚未送出；稿件、素材與設定保留。"); return null; }
+      break;
     }
+    if (shortFilmGenerationSignature(shortFilmProjects.find(value => value.id === projectId)) !== signature) throw new Error("鏡頭設定已變更，原確認稿已失效；請重新檢查稿件。");
     update("submitting", result.payload?.h3_translation?.status === "unavailable"
       ? "英文整理未完成，已保留原文；正在送入生成佇列…"
       : "內容準備完成，正在送入生成佇列…");
     const job = await api("/api/render", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(result.payload),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...result.payload, review_receipt: result.compiled.review_receipt }),
     });
     submittedJob = job;
+    shortFilmReviewCache.delete(requestKey);
     const target = shortFilmProjects.find(value => value.id === projectId);
     if (target && shortFilmGenerationSignature(target) === signature) {
       const refreshed = shortFilmFlatten(target).find(item => item.shot.id === shotId);
@@ -3864,19 +3945,21 @@ async function waitForShortFilmJob(jobId) {
 
 function renderShortFilmBatch(batch = shortFilmBatch) {
   shortFilmBatch = batch;
-  shortFilmBatchRunning = Boolean(batch && ["queued", "running"].includes(batch.status));
+  shortFilmBatchRunning = Boolean(batch && ["queued", "running", "awaiting_review"].includes(batch.status));
   setShortFilmBatchEditing(shortFilmBatchRunning);
   const resumable = Boolean(batch && ["failed", "cancelled", "interrupted"].includes(batch.status));
   $("#runShortfilmBatch").classList.toggle("hidden", shortFilmBatchRunning);
   $("#runShortfilmBatch span").textContent = resumable ? "以目前設定開始新的流程" : "依序生成未完成鏡頭";
   $("#resumeShortfilmBatch").classList.toggle("hidden", !resumable);
   $("#stopShortfilmBatch").classList.toggle("hidden", !shortFilmBatchRunning);
-  if (shortFilmBatchRunning) {
+  $("#reviewShortfilmBatch").classList.toggle("hidden", batch?.status !== "awaiting_review");
+  if (batch?.status === "awaiting_review") $("#shortfilmBatchNote").textContent = `本鏡完整生成稿已準備好，等待你確認；確認前不會送出此鏡頭。${batch.current_shot_title || ""}`;
+  else if (shortFilmBatchRunning) {
     const count = (batch.completed_shot_ids || []).length;
-    $("#shortfilmBatchNote").textContent = `已完成 ${count}/${(batch.shot_ids || []).length} 鏡頭${batch.current_shot_title ? ` · 目前：${batch.current_shot_title}` : ""}。關閉頁面後仍會由 Studio 主機接續製作。`;
+    $("#shortfilmBatchNote").textContent = `已完成 ${count}/${(batch.shot_ids || []).length} 鏡頭${batch.current_shot_title ? ` · 目前：${batch.current_shot_title}` : ""}。主機會準備下一鏡，完整稿需回到此頁確認後才生成。`;
   } else if (batch?.status === "completed") $("#shortfilmBatchNote").textContent = "未完成鏡頭已依序製作完成，可在短片作品列表預覽。";
   else if (batch) $("#shortfilmBatchNote").textContent = batch.error || "流程已暫停。接續會使用原設定；修改內容後請開始新的流程。";
-  else $("#shortfilmBatchNote").textContent = "連戲鏡頭會等待上一鏡完成並擷取尾幀。關閉頁面後仍會依序製作；Studio 主機需保持執行。";
+  else $("#shortfilmBatchNote").textContent = "連戲鏡頭會等待上一鏡完成並擷取尾幀。每鏡完整稿均需確認後才生成；關閉頁面後可再回來確認。";
   if (batch) $("#shortfilmBatchNote").textContent += ` · ${batch.snapshot?.video_model === "fasth3_omni_nvfp4" ? "FastH3-Omni NVFP4" : "MiniMax H3"}`;
 }
 
@@ -3889,9 +3972,9 @@ async function loadShortFilmBatchStatus() {
     const response = await api(`/api/shortfilm-batches?project_id=${encodeURIComponent(projectId)}`);
     if (activeShortFilmProject()?.id !== projectId) return;
     const batches = Array.isArray(response) ? response : response.items || [];
-    const batch = batches.find(item => ["queued", "running"].includes(item.status)) || batches[0] || null;
+    const batch = batches.find(item => ["queued", "running", "awaiting_review"].includes(item.status)) || batches[0] || null;
     const wasRunning = shortFilmBatchRunning;
-    const nowRunning = Boolean(batch && ["queued", "running"].includes(batch.status));
+    const nowRunning = Boolean(batch && ["queued", "running", "awaiting_review"].includes(batch.status));
     if (nowRunning) { shortFilmBatchRunning = true; setShortFilmBatchEditing(true); }
     if (nowRunning || wasRunning) {
       const response = await api(`/api/shortfilms/${projectId}`);
@@ -3924,17 +4007,32 @@ async function runShortFilmBatch(resume = false) {
   shortFilmBatchRunning = true;
   setShortFilmBatchEditing(true);
   try {
+    const capabilities = await api("/api/scripts/status");
+    if (capabilities.prompt_review_supported !== true) throw new Error("主機尚未提供逐鏡生成稿確認功能。請更新並重新啟動 Studio；影片流程尚未送出。");
     await saveShortFilmProject();
     const url = resume && shortFilmBatch ? `/api/shortfilm-batches/${shortFilmBatch.id}/resume` : `/api/shortfilms/${project.id}/batch`;
-    const batch = await api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const batch = await api(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ require_prompt_review: true }) });
     renderShortFilmBatch(batch);
-    toast(resume ? "已使用原設定接續依序製作。" : "已開始依序製作，關閉頁面後仍會繼續。" );
+    toast(resume ? "已使用原設定接續，每鏡會先等待你確認完整生成稿。" : "已開始準備分鏡，每鏡會先等待你確認完整生成稿。" );
   } catch (error) {
     shortFilmBatchRunning = false;
     setShortFilmBatchEditing(false);
     renderShortFilmBatch(shortFilmBatch);
     toast(error.message, true);
   }
+}
+
+async function reviewShortFilmBatchPrompt() {
+  const batch = shortFilmBatch;
+  if (batch?.status !== "awaiting_review" || !batch.review?.id || !batch.review.prompts?.length) return;
+  const item = batch.review.prompts[0], reviewId = batch.review.id;
+  const choice = await requestGenerationReview({ ...item, actual_duration: item.duration }, { video_model: item.video_model, seed: item.seed, h3_translation: item.h3_translation }, { title: `${batch.current_shot_title || "短片鏡頭"} · 生成前確認`, receiptRequired: false, canRetry: false });
+  if (choice !== "approve") return;
+  if (shortFilmBatch?.id !== batch.id || shortFilmBatch?.review?.id !== reviewId || shortFilmBatch.status !== "awaiting_review") { toast("稿件狀態已更新，請重新檢查本鏡生成稿。", true); return; }
+  try {
+    const result = await api(`/api/shortfilm-batches/${batch.id}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ review_id: reviewId }) });
+    renderShortFilmBatch(result); toast("已確認本鏡生成稿，後續鏡頭仍會逐一等待確認。");
+  } catch (error) { toast(error.message, true); }
 }
 
 async function stopShortFilmBatch() {
@@ -3947,6 +4045,14 @@ async function stopShortFilmBatch() {
 }
 
 function bindEvents() {
+  $("#reviewShortfilmBatch").addEventListener("click", () => reviewShortFilmBatchPrompt().catch(error => toast(error.message, true)));
+  $("#approveGenerationReview").addEventListener("click", () => finishGenerationReview("approve"));
+  $("#cancelGenerationReview").addEventListener("click", () => finishGenerationReview("cancel"));
+  $("#closeGenerationReview").addEventListener("click", () => finishGenerationReview("cancel"));
+  $("#retryGenerationReview").addEventListener("click", () => finishGenerationReview("retry"));
+  $("#useOriginalGenerationReview").addEventListener("click", chooseGenerationOriginal);
+  $("#generationReviewDialog").addEventListener("cancel", event => { event.preventDefault(); finishGenerationReview("cancel"); });
+  $("#copyGenerationReview").addEventListener("click", async () => { if (!generationReview) return; try { await navigator.clipboard.writeText(generationReviewPromptText(generationReview.compiled, generationReview.payload)); toast("已複製完整生成稿與素材對應。"); } catch (_) { toast("無法自動複製，請選取稿件文字複製。", true); } });
   bindLoraPanels();
   $("#refreshSharedQueue")?.addEventListener("click", loadSharedQueue);
   $("#sfBuildSegmentRows").addEventListener("click", buildShortFilmSegmentRows);
@@ -4988,8 +5094,16 @@ function bindEvents() {
     const applyButton = event.target.closest("[data-job-apply]");
     const cancelButton = event.target.closest("[data-job-cancel]");
     const resumeButton = event.target.closest("[data-job-resume]");
+    const reviewButton = event.target.closest("[data-job-review]");
     const renameButton = event.target.closest("[data-job-rename]");
     const deleteButton = event.target.closest("[data-job-delete]");
+    if (reviewButton) {
+      reviewButton.disabled = true;
+      try { await reviewReplacementJobPrompt(reviewButton.dataset.jobReview); }
+      catch (error) { toast(error.message, true); }
+      finally { reviewButton.disabled = false; }
+      return;
+    }
     if (favoriteButton) {
       event.preventDefault();
       event.stopPropagation();
@@ -5038,9 +5152,7 @@ function bindEvents() {
     if (resumeButton) {
       resumeButton.disabled = true;
       try {
-        await api(`/api/jobs/${resumeButton.dataset.jobResume}/resume`, { method: "POST" });
-        toast("已從第一個未完成片段接續工作。");
-        loadJobs(true);
+        await resumeReplacementJob(resumeButton.dataset.jobResume);
       } catch (error) { toast(error.message, true); }
       finally { resumeButton.disabled = false; }
       return;
