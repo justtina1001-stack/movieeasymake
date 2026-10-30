@@ -2207,6 +2207,37 @@ function statusLabel(status) {
   return ({ waiting: "等待中", queued: "等待中", preparing: "準備素材", awaiting_review: "等待確認稿件", running: "生成中", completed: "已完成", failed: "失敗", cancelled: "已取消", interrupted: "已中斷" })[status] || status;
 }
 
+function videoJobErrorPresentation(job) {
+  const message = typeof job.error === "string" ? job.error : "";
+  const detail = typeof job.error_detail === "string" && job.error_detail ? job.error_detail : message;
+  if (!message && !detail) return null;
+  const cpuOom = /\b(?:DefaultCPUAllocator|CPUAllocator)\b|\bCPU\s+(?:out of memory|not enough memory)\b/i.test(detail);
+  const legacyOom = !cpuOom && (
+    /\bAllocation on device\s+\d+\s+would exceed allowed memory\b/i.test(detail)
+    || (/\bout of memory\b|\bOutOfMemoryError\b/i.test(detail)
+      && /\bCUDA\b|\bGPU\b|\bdevice\s+\d+\b|\btorch(?:\.cuda)?\.OutOfMemoryError\b/i.test(detail))
+  );
+  if (job.error_code !== "gpu_out_of_memory" && !legacyOom) return { message, detail: "", node: "", oom: false };
+  const node = job.error_node && typeof job.error_node === "object" ? job.error_node : {};
+  const nodeName = node.title || node.type || "";
+  const nodeLabel = [nodeName, node.id === undefined || node.id === null ? "" : `節點 ${node.id}`].filter(Boolean).join(" · ");
+  return {
+    message: job.error_code === "gpu_out_of_memory" && message && message !== detail
+      ? message
+      : "顯示卡記憶體不足，這次影片未完成。請降低解析度或縮短片長，再確認生成稿後重試；原稿與素材可繼續使用。",
+    detail,
+    node: nodeLabel,
+    oom: true,
+  };
+}
+
+function videoJobErrorHtml(job) {
+  const error = videoJobErrorPresentation(job);
+  if (!error) return "";
+  if (!error.oom) return `<div class="job-error">${escapeHtml(error.message)}</div>`;
+  return `<div class="job-error job-error-memory"><p>${escapeHtml(error.message)}</p><details class="job-error-technical"><summary>查看技術原文</summary>${error.node ? `<p>失敗步驟：${escapeHtml(error.node)}</p>` : ""}<pre>${escapeHtml(error.detail)}</pre></details></div>`;
+}
+
 function queueJobPresentation(job, queue = sharedQueueData) {
   const active = ["queued", "preparing", "running"].includes(job.status);
   const percent = value => value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) ? null : Math.max(0, Math.min(100, Math.round(Number(value))));
@@ -2796,7 +2827,7 @@ async function loadJobs(force = false) {
             ${batchSegmentsHtml(job)}
             ${job.preview_version ? `<div class="job-live-preview"><div><span>TAEH3 LIVE PREVIEW</span><strong>${active ? "生成中近似畫面" : "最後一張生成預覽"}</strong><small>這是低成本潛空間預覽，細節與最終影片可能不同。</small></div><img src="/api/jobs/${job.id}/preview?v=${encodeURIComponent(job.preview_version)}" alt="${escapeHtml(title)}生成中預覽"></div>` : ""}
             <div class="job-recipe hidden" data-job-recipe-panel="${job.id}"><div class="job-recipe-heading"><strong>實際送給 AI 的生成提示詞</strong><button class="text-button" data-job-copy-prompt="${job.id}" type="button">複製提示詞</button></div><pre data-job-compiled-prompt></pre></div>
-            ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
+            ${videoJobErrorHtml(job)}
             ${job.merge_error ? `<div class="job-error">${escapeHtml(job.merge_error)}</div>` : ""}
             ${job.retime_error ? `<div class="job-error">${escapeHtml(job.retime_error)}</div>` : ""}
             ${job.frame_export_error ? `<div class="job-error">${escapeHtml(job.frame_export_error)}</div>` : ""}
@@ -3750,7 +3781,7 @@ async function loadShortFilmJobs(force = false) {
         </div>
         ${job.preview_version ? `<div class="job-live-preview"><div><span>TAEH3 LIVE PREVIEW</span><strong>${active ? "生成中近似畫面" : "最後一張生成預覽"}</strong><small>細節與最終影片可能不同。</small></div><img src="/api/jobs/${job.id}/preview?v=${encodeURIComponent(job.preview_version)}" alt="${escapeHtml(title)}生成預覽"></div>` : ""}
         <div class="job-recipe hidden" data-job-recipe-panel="${job.id}"><div class="job-recipe-heading"><strong>實際送給 AI 的生成提示詞</strong><button class="text-button" data-sf-job-copy-prompt="${job.id}" type="button">複製提示詞</button></div><pre data-job-compiled-prompt></pre></div>
-        ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
+        ${videoJobErrorHtml(job)}
         ${job.status === "completed" ? `<video class="job-video shortfilm-job-video" controls preload="none" data-src="/api/jobs/${job.id}/video"></video>` : ""}
       </div>
     </details>`;

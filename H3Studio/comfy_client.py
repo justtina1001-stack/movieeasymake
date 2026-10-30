@@ -28,6 +28,17 @@ from queue_cancel import cancel_queue_prompt
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
+class ComfyExecutionError(RuntimeError):
+    """An engine failure with its original message and failing node identity."""
+
+    def __init__(self, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        details = details or {}
+        self.node_id = details.get("node_id")
+        self.node_type = details.get("node_type")
+        self.exception_type = details.get("exception_type")
+
+
 class ComfyClient:
     def __init__(self, settings: ConnectionSettings, data_dir: Path):
         self.mode = settings.mode
@@ -276,6 +287,10 @@ class ComfyClient:
     @staticmethod
     def history_state(history: dict[str, Any]) -> str:
         status = history.get("status") or {}
+        # ComfyUI records failures as completed=false. A lost websocket must not
+        # turn a terminal error into an indefinitely running Studio job.
+        if status.get("status_str") == "error":
+            return "error"
         if not status.get("completed"):
             return "running"
         return "success" if status.get("status_str") == "success" else "error"
@@ -289,6 +304,15 @@ class ComfyClient:
             data = message[1] if isinstance(message[1], dict) else {}
             return str(data.get("exception_message") or data.get("exception_type") or "ComfyUI 執行失敗。")
         return "ComfyUI 執行失敗。"
+
+    @classmethod
+    def history_exception(cls, history: dict[str, Any]) -> ComfyExecutionError:
+        status = history.get("status") or {}
+        for message in reversed(status.get("messages") or []):
+            if (isinstance(message, list) and len(message) >= 2
+                    and message[0] == "execution_error" and isinstance(message[1], dict)):
+                return ComfyExecutionError(cls.history_error(history), message[1])
+        return ComfyExecutionError(cls.history_error(history))
 
     async def get_history(
         self,
@@ -360,7 +384,7 @@ class ComfyClient:
                 if state == "success":
                     return prompt_id, history
                 if state == "error":
-                    raise RuntimeError(self.history_error(history))
+                    raise self.history_exception(history)
 
                 try:
                     async with session.ws_connect(
@@ -383,7 +407,7 @@ class ComfyClient:
                                 if state == "success":
                                     return prompt_id, history
                                 if state == "error":
-                                    raise RuntimeError(self.history_error(history))
+                                    raise self.history_exception(history)
                                 continue
                             if message.type == aiohttp.WSMsgType.TEXT:
                                 event = json.loads(message.data)
@@ -397,7 +421,7 @@ class ComfyClient:
                                 elif event.get("type") == "executing":
                                     await callback({"status": "running", "current_node": data.get("node")})
                                 elif event.get("type") == "execution_error":
-                                    raise RuntimeError(data.get("exception_message") or "ComfyUI 執行失敗。")
+                                    raise ComfyExecutionError(data.get("exception_message") or "ComfyUI 執行失敗。", data)
                             elif message.type == aiohttp.WSMsgType.BINARY:
                                 preview = self.decode_preview_message(message.data)
                                 if preview:
@@ -413,7 +437,7 @@ class ComfyClient:
                 if state == "success":
                     return prompt_id, history
                 if state == "error":
-                    raise RuntimeError(self.history_error(history))
+                    raise self.history_exception(history)
                 await callback({"status": "running", "current_node": "進度連線中斷，正在自動重連"})
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(10.0, reconnect_delay * 2)

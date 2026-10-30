@@ -28,6 +28,7 @@ from aiohttp import web
 from PIL import Image, ImageOps
 
 from comfy_client import ComfyClient
+from video_generation_errors import video_generation_error_fields
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, validate_runtime_inventory, resolve_video_vae
 from video_models import VIDEO_MODEL_H3, video_model_profiles
 from h3_media import prepare_media_payload, normalized_reference_video, reference_video_ids
@@ -1347,6 +1348,9 @@ class JobManager:
             "progress": 0,
             "current_node": None,
             "error": None,
+            "error_code": None,
+            "error_detail": None,
+            "error_node": None,
             "prompt_id": None,
             "output": None,
             "preview_version": None,
@@ -1404,6 +1408,9 @@ class JobManager:
             "progress": 0,
             "current_node": "等待切割長影片",
             "error": None,
+            "error_code": None,
+            "error_detail": None,
+            "error_node": None,
             "prompt_id": None,
             "output": None,
             "width": compiled.width,
@@ -1514,6 +1521,9 @@ class JobManager:
             "progress": 100,
             "current_node": None,
             "error": None,
+            "error_code": None,
+            "error_detail": None,
+            "error_node": None,
             "prompt_id": prompt_id,
             "output": output,
             **(history_execution_timing(history or {}) or self.finish_timing(job_id)),
@@ -1633,7 +1643,10 @@ class JobManager:
                     return False
             if state == "error":
                 timing = history_execution_timing(history) or self.finish_timing(job_id)
-                self.update(job_id, status="failed", current_node=None, error=self.comfy.history_error(history), **timing)
+                failure = video_generation_error_fields(
+                    ComfyClient.history_exception(history), current_node=job.get("current_node"),
+                )
+                self.update(job_id, status="failed", current_node=None, **failure, **timing)
                 return False
             if not wait:
                 return False
@@ -1834,7 +1847,8 @@ class JobManager:
             include_audio = bool(references and references[0].get("video_use_audio"))
             if not parent.get("generation_started_at"):
                 self.update(parent_id, generation_started_at=datetime.now().astimezone().isoformat())
-            self.update(parent_id, status="preparing", error=None, progress=1, current_node="分析並切割來源影片")
+            self.update(parent_id, status="preparing", error=None, error_code=None, error_detail=None, error_node=None,
+                        progress=1, current_node="分析並切割來源影片")
             segments = parent.get("segments") or []
             previous_continuity_asset: str | None = None
             segment_paths: list[Path] = []
@@ -1988,6 +2002,9 @@ class JobManager:
                 progress=100,
                 current_node=None,
                 error=None,
+                error_code=None,
+                error_detail=None,
+                error_node=None,
                 active_child_id=None,
                 **completion_updates,
                 **self.finish_timing(parent_id),
@@ -2002,12 +2019,14 @@ class JobManager:
                 **self.finish_timing(parent_id),
             )
         except Exception as error:
+            child_failure = self.jobs.get(str(parent.get("active_child_id") or "")) or {}
             self.update(
                 parent_id,
                 status="failed",
                 current_node=None,
                 active_child_id=None,
                 error=str(error),
+                **{key: child_failure.get(key) for key in ("error_code", "error_detail", "error_node")},
                 **self.finish_timing(parent_id),
             )
 
@@ -2057,6 +2076,7 @@ class JobManager:
 
     async def _run(self, job_id: str, compiled: CompiledRequest) -> None:
         cancel_event = self.cancel_events[job_id]
+        workflow: dict[str, Any] = {}
         try:
             async with self.gpu_lock:
                 if cancel_event.is_set():
@@ -2139,7 +2159,10 @@ class JobManager:
         except asyncio.CancelledError:
             self.update(job_id, status="cancelled", current_node=None, error="工作已取消。", **self.finish_timing(job_id))
         except Exception as error:
-            self.update(job_id, status="failed", current_node=None, error=str(error), **self.finish_timing(job_id))
+            failure = video_generation_error_fields(
+                error, workflow=workflow, current_node=self.jobs[job_id].get("current_node"),
+            )
+            self.update(job_id, status="failed", current_node=None, **failure, **self.finish_timing(job_id))
 
     async def cancel(self, job_id: str) -> None:
         if job_id not in self.jobs:

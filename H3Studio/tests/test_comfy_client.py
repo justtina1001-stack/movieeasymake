@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from comfy_client import ComfyClient
+from comfy_client import ComfyClient, ComfyExecutionError
 from domain import TURBO_LORA_CANDIDATES, VIDEO_VAE_FILENAMES
 from settings import ConnectionSettings
 
@@ -15,6 +15,10 @@ from settings import ConnectionSettings
 class ComfyClientRecoveryTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.history_calls = 0
+        self.prompt_calls = 0
+        self.history_override = None
+        self.history_override_after = 1
+        self.websocket_error = None
         app = web.Application()
         app.router.add_post("/prompt", self.prompt)
         app.router.add_get("/ws", self.websocket)
@@ -39,16 +43,22 @@ class ComfyClientRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     async def prompt(self, _request):
+        self.prompt_calls += 1
         return web.json_response({"prompt_id": "prompt-1"})
 
     async def websocket(self, request):
         ws = web.WebSocketResponse()
         await ws.prepare(request)
+        if self.websocket_error:
+            await ws.send_json({"type": "execution_error", "data": self.websocket_error})
         await ws.close()
         return ws
 
     async def history(self, _request):
         self.history_calls += 1
+        if self.history_override is not None:
+            return web.json_response({"prompt-1": self.history_override}
+                                     if self.history_calls >= self.history_override_after else {})
         if self.history_calls < 3:
             return web.json_response({})
         return web.json_response({
@@ -86,6 +96,51 @@ class ComfyClientRecoveryTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(self.client.history_state(history), "error")
         self.assertEqual(self.client.history_error(history), "GPU out of memory")
+
+    def test_error_history_is_terminal_even_when_completed_is_false(self):
+        for completed in (False, True):
+            with self.subTest(completed=completed):
+                self.assertEqual(self.client.history_state({"status": {
+                    "status_str": "error", "completed": completed,
+                }}), "error")
+        for history in ({}, {"status": {}}, {"status": {"status_str": "success", "completed": False}}):
+            self.assertEqual(self.client.history_state(history), "running")
+
+    async def test_error_after_lost_websocket_preserves_node_and_never_resubmits(self):
+        details = {"node_id": "16", "node_type": "SamplerCustomAdvanced",
+                   "exception_type": "torch.OutOfMemoryError", "exception_message": "CUDA out of memory"}
+        self.history_override_after = 2
+        self.history_override = {"status": {"status_str": "error", "completed": False,
+                                            "messages": [["execution_error", details]]}}
+        events = []
+
+        async def progress(event):
+            events.append(event)
+
+        with self.assertRaises(ComfyExecutionError) as caught:
+            await asyncio.wait_for(self.client.run_prompt({}, progress, asyncio.Event()), timeout=2)
+        self.assertEqual(str(caught.exception), details["exception_message"])
+        self.assertEqual(caught.exception.node_id, "16")
+        self.assertEqual(caught.exception.node_type, "SamplerCustomAdvanced")
+        self.assertEqual(caught.exception.exception_type, "torch.OutOfMemoryError")
+        self.assertEqual(self.prompt_calls, 1)
+        self.assertEqual(self.history_calls, 2)
+
+    async def test_websocket_error_keeps_original_diagnostics(self):
+        self.history_override_after = 99
+        self.history_override = {}
+        self.websocket_error = {"prompt_id": "prompt-1", "node_id": "9", "node_type": "VAEDecode",
+                                "exception_type": "torch.OutOfMemoryError", "exception_message": "GPU out of memory"}
+
+        async def progress(_event):
+            pass
+
+        with self.assertRaises(ComfyExecutionError) as caught:
+            await asyncio.wait_for(self.client.run_prompt({}, progress, asyncio.Event()), timeout=2)
+        self.assertEqual(caught.exception.node_id, "9")
+        self.assertEqual(caught.exception.node_type, "VAEDecode")
+        self.assertEqual(str(caught.exception), "GPU out of memory")
+        self.assertEqual(self.prompt_calls, 1)
 
     def test_decodes_comfy_preview_binary_messages(self):
         jpeg = b"\xff\xd8preview"

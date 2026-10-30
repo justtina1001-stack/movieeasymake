@@ -829,6 +829,12 @@ a.button { color: inherit; text-decoration: none; display: inline-flex; align-it
 .job-recipe pre { max-height: 300px; margin: 0; padding: 15px; overflow: auto; color: #bfc9d8; font: 10px/1.75 Consolas, "Microsoft JhengHei", monospace; white-space: pre-wrap; word-break: break-word; }
 .job-video { grid-column: 1 / -1; border-radius: 12px; max-height: 520px; width: 100%; background: black; }
 .job-error { grid-column: 1 / -1; color: #ff96a5; background: rgba(255,93,113,.07); border-radius: 10px; padding: 10px 12px; font-size: 11px; }
+.job-error-memory { min-width: 0; line-height: 1.7; }
+.job-error-memory > p { margin: 0; white-space: pre-wrap; }
+.job-error-technical { margin-top: 8px; color: var(--muted); }
+.job-error-technical summary { cursor: pointer; width: fit-content; }
+.job-error-technical p { margin: 8px 0; overflow-wrap: anywhere; }
+.job-error-technical pre { max-height: 220px; margin: 8px 0 0; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.65 Consolas, "Microsoft JhengHei", monospace; }
 .batch-segments { grid-column: 1 / -1; display: grid; gap: 7px; padding: 12px; border: 1px solid rgba(85,215,208,.14); border-radius: 12px; background: rgba(85,215,208,.035); }
 .batch-segments-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; color: var(--cyan); font-size: 10px; }
 .batch-segment { display: grid; grid-template-columns: 66px minmax(0,1fr) 80px; gap: 10px; align-items: center; color: var(--muted); font-size: 9px; }
