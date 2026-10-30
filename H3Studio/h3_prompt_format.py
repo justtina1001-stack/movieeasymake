@@ -16,8 +16,12 @@ BASE_SECTIONS = ("integrated_multimodal_description", "overall_soundscape", "non
 REF_SECTIONS = ("subject_definitions", "summary", "retention_analysis", "detailed_description", "overall_soundscape", "non_diegetic_music")
 _RANGE = r"(?P<start>\d+(?:\.\d+)?)\s*(?:s|秒)?\s*[-–—～~至]\s*(?P<end>\d+(?:\.\d+)?)\s*(?:s|秒)"
 _TIMED_NAMED = re.compile(
-    r"^[ \t]*(?:#{1,6}\s*)?(?:\*\*|__)?(?:鏡頭|镜头|分鏡|分镜)\s*(?P<index>\d+)\s*[:：]?\s*"
+    r"^[ \t]*(?:#{1,6}\s*)?(?:\*\*|__)?(?:鏡頭|镜头|分鏡|分镜|shot)\s*(?P<index>\d+)\s*[:：]?\s*"
     r"(?P<title>[^\r\n]*?)[（(]\s*" + _RANGE + r"\s*[）)](?:\*\*|__)?[ \t]*\r?$", re.M | re.I)
+_TIMED_SHOT = re.compile(
+    r"^[ \t]*(?:#{1,6}\s*)?(?:\*\*|__)?shot\s*(?P<index>\d+)"
+    r"(?:[ \t]*[｜|:：][ \t]*|[ \t]+)" + _RANGE +
+    r"\s*(?:[｜|:：]\s*(?P<title>[^\r\n]*?))?(?:\*\*|__)?[ \t]*\r?$", re.M | re.I)
 _TIMED_NUMBERED = re.compile(
     r"^[ \t]*(?:#{1,6}\s*)?(?:\*\*|__)?(?P<index>\d+)[.)、]\s*" + _RANGE +
     r"\s*(?:[｜|:：]\s*(?P<title>[^\r\n]*?))?(?:\*\*|__)?[ \t]*\r?$", re.M | re.I)
@@ -26,6 +30,7 @@ _TIMED_PLAIN = re.compile(
     r"\s*(?:[｜|:：]\s*(?P<title>[^\r\n]*?))?(?:\*\*|__)?[ \t]*\r?$", re.M | re.I)
 _TIMED_CANDIDATE = re.compile(
     r"^[ \t]*(?:#{1,6}\s*)?(?:\*\*|__)?(?:(?:鏡頭|镜头|分鏡|分镜)\s*(?:\d+|[一二三四五六七八九十]+)\s*[:：（(]|"
+    r"shot\s*\d+\b|"
     r"\d+[.)、]\s*\d+(?:\.\d+)?\s*(?:s|秒)?\s*[-–—～~至]|"
     r"\d+[.)、]\s*\d+:\d|"
     r"\d+(?:\.\d+)?\s*(?:s|秒)?\s*[-–—～~至]\s*\d+(?:\.\d+)?\s*(?:s|秒)\s*[｜|:：])", re.M | re.I)
@@ -111,12 +116,12 @@ def normalize_shots(text: str, duration: float, *, add_opening: bool = True,
     # Only explicit standalone storyboard headings with both numeric endpoints
     # qualify. Keep quoted/dialogue content opaque and let the existing shot
     # validator handle ordering and duration after this syntax conversion.
-    headings = sorted([match for pattern in (_TIMED_NAMED, _TIMED_NUMBERED, _TIMED_PLAIN)
+    headings = sorted([match for pattern in (_TIMED_NAMED, _TIMED_SHOT, _TIMED_NUMBERED, _TIMED_PLAIN)
                        for match in pattern.finditer(masked)], key=lambda match: match.start())
     candidates = list(_TIMED_CANDIDATE.finditer(masked))
     if any(not any(heading.start() <= candidate.start() < heading.end() for heading in headings)
            for candidate in candidates):
-        raise ValueError("無法辨識分鏡時間碼；請使用「分鏡 1：段名（0–3秒）」或「1. 0.0–3.0s｜段名」，每段需有完整起訖時間。")
+        raise ValueError("無法辨識分鏡時間碼；請使用「分鏡 1：段名（0–3秒）」、「SHOT 01｜0.0–3.0 秒」或「1. 0.0–3.0s｜段名」，每段需有完整起訖時間。")
     if headings:
         if _SHOT.search(masked):
             raise ValueError("請勿混用時間碼稿與 [Shot N] 分鏡標記；請統一一種格式後再生成。")

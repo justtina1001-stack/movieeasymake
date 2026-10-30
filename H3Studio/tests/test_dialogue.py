@@ -37,6 +37,29 @@ class DialogueFormattingTests(unittest.TestCase):
         self.assertEqual(format_dialogue('小明：「你好！」', speakers=['小明']), '小明：<d>[Chinese] 你好！</d>')
         self.assertEqual(format_dialogue('旁白（法語）：「Bonjour !」'), '旁白（法語）：<d>[French] Bonjour !</d>')
 
+    def test_named_visual_effect_and_action_labels_are_not_spoken(self):
+        text = (
+            '重點特效：\n'
+            '- 姜子牙：淡金法印、法器符文流光、袖袍受風。\n'
+            '- 妲己：尾巴外沿幽藍妖焰、指尖妖氣絲流、髮絲飄動。\n'
+            '角色：白袍隨風飄動。\n'
+            'Alex: gold sparks surround his hands.\n'
+            '姜子牙：\n金色法印逐漸亮起。'
+        )
+        self.assertEqual(format_dialogue(text, speakers=['姜子牙', '妲己', 'Alex']), text)
+
+    def test_name_only_unquoted_lines_need_a_dedicated_dialogue_field(self):
+        text = '小明：你好！'
+        self.assertEqual(format_dialogue(text, speakers=['小明']), text)
+        self.assertEqual(
+            format_dialogue(text, speakers=['小明'], dialogue_field=True),
+            '小明：<d>[Chinese] 你好！</d>',
+        )
+        self.assertEqual(
+            format_dialogue('小明台詞：你好！', speakers=['小明']),
+            '小明台詞：<d>[Chinese] 你好！</d>',
+        )
+
     def test_dedicated_field_and_bare_labeled_dialogue(self):
         self.assertEqual(format_dialogue('「你好！」', dialogue_field=True), '<d>[Chinese] 你好！</d>')
         self.assertEqual(format_dialogue('**小明台詞：**你好！'), '**小明台詞：**<d>[Chinese] 你好！</d>')

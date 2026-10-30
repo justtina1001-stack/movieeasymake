@@ -21,7 +21,9 @@ def ref_payload(*, video=False, **changes):
     reference = dict(alias="Alice", type="character", image_asset_ids=["a" * 32])
     if video:
         reference["video_asset_id"] = "b" * 32
-    return dict(mode="r2v", prompt="[Shot 1] Alice moves.\nAlice: hello.",
+    # This is the narrative field, so speech has an explicit cue rather than a
+    # name-only label that could also describe a character's visual direction.
+    return dict(mode="r2v", prompt='[Shot 1] Alice moves.\nAlice says: "hello."',
                 references=[reference], prompt_profile="shortfilm", **changes)
 
 

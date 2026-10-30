@@ -44,6 +44,22 @@ class DialogueCompileTests(unittest.TestCase):
         self.assertIn('法力震鳴「嗡——」', compiled.prompt)
         self.assertIn('<Subject 1>（少年） (S1)清冷低語：<d>[Chinese] 請等我回來。</d>', compiled.prompt)
 
+    def test_ref2va_visual_effect_bullets_do_not_become_dialogue_or_speakers(self):
+        compiled = compile_request(request_payload(
+            '重點特效：\n'
+            '- 姜子牙：淡金法印、法器符文流光、袖袍受風。\n'
+            '- 妲己：尾巴外沿幽藍妖焰、指尖妖氣絲流、髮絲飄動。\n'
+            '姜子牙同時大喝運勁，左手劍指前指。',
+            mode='r2v', references=[
+                {'alias': '姜子牙', 'type': 'character', 'image_asset_ids': [IMAGE_A]},
+                {'alias': '妲己', 'type': 'character', 'image_asset_ids': ['b' * 32]},
+            ],
+        ))
+        self.assertEqual(spoken_blocks(compiled.prompt), [])
+        self.assertNotRegex(compiled.prompt, r'\(S\d+\)')
+        self.assertIn('淡金法印、法器符文流光、袖袍受風。', compiled.prompt)
+        self.assertIn('尾巴外沿幽藍妖焰、指尖妖氣絲流、髮絲飄動。', compiled.prompt)
+
     def test_inline_chinese_speech_is_tagged_without_changing_the_words(self):
         compiled = compile_request(request_payload("小明走進車站。小明說：「你好，歡迎回來……！」"))
         self.assertEqual(spoken_blocks(compiled.prompt), ["[Chinese] 你好，歡迎回來……！"])

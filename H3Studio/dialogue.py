@@ -80,7 +80,7 @@ def _wrap(text: str, hint: str = "") -> str:
     return f"<d>[{_language(text, hint)}] {text}</d>"
 
 
-def _speech_heading(text: str, speakers: set[str]) -> bool:
+def _speech_heading(text: str, speakers: set[str], *, allow_speaker_shorthand: bool = True) -> bool:
     heading = _speech_context(text).strip(" \t\r\n*_`#:：")
     if _SILENT_HEADING.search(heading) or _VISIBLE_TEXT.search(heading):
         return False
@@ -91,10 +91,12 @@ def _speech_heading(text: str, speakers: set[str]) -> bool:
         return False
     if _SPEECH_END.search(without_language):
         return True
-    return without_language in speakers or without_language in {"角色", "男主角", "女主角"}
+    return allow_speaker_shorthand and (
+        without_language in speakers or without_language in {"角色", "男主角", "女主角"}
+    )
 
 
-def _unquoted_labels(text: str, speakers: set[str]) -> str:
+def _unquoted_labels(text: str, speakers: set[str], *, dialogue_field: bool = False) -> str:
     lines: list[str] = []
     pending_heading = ""
     quote_spans = list(_quoted_spans(text))
@@ -105,7 +107,12 @@ def _unquoted_labels(text: str, speakers: set[str]) -> str:
         # A multiline sign/quotation can itself contain a line such as 台詞：… .
         inside_quote = any(start <= offset + len(line) - len(line.lstrip()) < end for start, end in quote_spans)
         match = _LABEL_LINE.match(body_line)
-        if not inside_quote and match and _speech_heading(match["head"], speakers) and not _MIXED_HEADING.search(match["head"]):
+        # A named character followed by a colon also labels appearance, action,
+        # and effects in manuscripts. Bare prose needs an explicit speech cue;
+        # name-only shorthand is safe only in the dedicated dialogue field.
+        if (not inside_quote and match
+                and _speech_heading(match["head"], speakers, allow_speaker_shorthand=dialogue_field)
+                and not _MIXED_HEADING.search(match["head"])):
             body = match["body"]
             pending_heading = match["head"] if not body.strip() else ""
             if body.strip() and not any(opener in body for opener in _QUOTE_PAIRS) and "<d>" not in body:
@@ -194,7 +201,7 @@ def format_dialogue(text: str, *, speakers: Iterable[str] = (), dialogue_field: 
         else _wrap(match.group()[3:-4]),
         text,
     )
-    text = map_outside_dialogue(text, lambda part: _unquoted_labels(part, speaker_set))
+    text = map_outside_dialogue(text, lambda part: _unquoted_labels(part, speaker_set, dialogue_field=dialogue_field))
     parts: list[str] = []
     cursor = position = 0
     while position < len(text):

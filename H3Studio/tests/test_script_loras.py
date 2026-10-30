@@ -23,7 +23,8 @@ def choices():
 
 class PromptTriggerTests(unittest.TestCase):
     def payload(self, **changes):
-        return dict(mode="r2v", prompt="[Shot 1] Alice moves her hands.\nAlice: hello.",
+        # Keep the spoken intent explicit in the mixed visual narrative field.
+        return dict(mode="r2v", prompt='[Shot 1] Alice moves her hands.\nAlice says: "hello."',
                     references=[dict(alias="Alice", type="character", image_asset_ids=["a" * 32])],
                     prompt_profile="shortfilm", custom_loras=choices(), **changes)
 
