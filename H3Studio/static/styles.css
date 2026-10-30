@@ -928,6 +928,24 @@ a.button { color: inherit; text-decoration: none; display: inline-flex; align-it
 .voice-license-note strong { font-size: 9px; }
 .voice-license-note span { margin-top: 3px; color: var(--muted); font-size: 8px; line-height: 1.45; }
 .voice-generate { background: linear-gradient(135deg,#7350d5,#3d94cf); box-shadow: 0 10px 30px rgba(104,79,208,.22); }
+.sfx-heading { background: linear-gradient(135deg,rgba(30,181,155,.12),rgba(55,158,221,.045) 58%,transparent); }
+.sfx-model-card { grid-template-columns: auto minmax(0,1fr) auto; }
+.sfx-prompt-help,.sfx-feedback { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.sfx-feedback { min-height: 1.7em; }
+.sfx-studio-card .music-job-status { align-items: flex-start; }
+.sfx-studio-card .music-job-status > b { white-space: nowrap; flex-shrink: 0; }
+.sfx-studio-card .music-job-status > span { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.sfx-progress { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin-top: 10px; }
+.sfx-progress progress { flex: 1; min-width: 0; height: 6px; accent-color: #53cfb0; }
+.sfx-job-description { margin-top: 10px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.sfx-job-description summary { cursor: pointer; }
+.sfx-job-description p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; }
+.sfx-editor-dialog { width: min(520px,calc(100vw - 32px)); color: var(--text); background: #171d27; border: 1px solid var(--line); border-radius: 15px; padding: 20px; box-shadow: var(--shadow); }
+.sfx-editor-dialog::backdrop { background: #0009; }
+.sfx-editor-dialog .modal-heading { padding: 0 0 16px; }
+.sfx-editor-dialog label { display: grid; gap: 8px; font-size: 13px; }
+.sfx-editor-dialog p { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.sfx-editor-dialog .button { margin-top: 12px; }
 
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 20px); background: #272d37; border: 1px solid var(--line); padding: 12px 18px; border-radius: 10px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transition: .25s; z-index: 100; font-size: 12px; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); animation: toast-bounce 380ms var(--motion-spring); }

@@ -1,0 +1,15 @@
+# Dedicated MOSS runtime only; do not install into Studio or ComfyUI.
+numpy==1.26.4
+einops==0.8.2
+pillow==12.2.0
+tqdm==4.67.3
+safetensors==0.7.0
+transformers==4.57.1
+diffusers==0.37.1
+ftfy==6.3.1
+regex==2026.4.4
+soundfile==0.13.1
+imageio==2.37.3
+descript-audiotools==0.7.2
+accelerate==1.13.0
+gradio==6.11.0

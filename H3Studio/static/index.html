@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MiniMax H3 Studio</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20261030-memory-errors">
+  <link rel="stylesheet" href="/static/styles.css?v=20261030-sfx-layout">
   <link rel="stylesheet" href="/static/lora-help.css?v=20261005-lora-recommendations">
-  <link rel="stylesheet" href="/static/workspace_ui.css?v=20261017-ux">
+  <link rel="stylesheet" href="/static/workspace_ui.css?v=20261030-sfx">
 </head>
 <body>
   <div class="ambient ambient-one"></div>
@@ -25,6 +25,7 @@
       <a class="button ghost small" href="/scripts" target="_blank" rel="noopener">✎ 腳本編寫</a>
       <button id="openMusicStudio" class="button ghost small music-toolbar-button" type="button" aria-haspopup="dialog"><b>♫</b><span>Music 3</span></button>
       <button id="openVoiceStudio" class="button ghost small voice-toolbar-button" type="button" aria-haspopup="dialog"><b>◉</b><span>語音</span></button>
+      <button id="openSfxStudio" class="button ghost small" type="button" aria-haspopup="dialog"><b>◌</b><span>音效</span></button>
       <button id="openPromptGuide" class="button ghost small guide-toolbar-button" type="button" aria-haspopup="dialog" aria-label="開啟提示詞指南"><b>✦</b><span class="guide-button-label">提示詞指南</span></button>
       <button id="startEngine" class="button ghost small" type="button">啟動引擎</button>
       <button id="openModelUpdates" class="button ghost small model-update-toolbar" type="button" aria-haspopup="dialog"><span id="modelUpdateToolbarDot" class="model-update-toolbar-dot hidden"></span><span id="modelUpdateToolbarText">模型版本</span></button>
@@ -765,6 +766,31 @@ non_diegetic_music: ...</pre></div>
     </section>
   </div>
 
+  <div id="sfxModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="sfxTitle">
+    <div class="modal-backdrop" data-close-sfx></div>
+    <section class="modal-card music-studio-card sfx-studio-card">
+      <div class="modal-heading music-heading sfx-heading">
+        <div><p class="eyebrow">SOUND EFFECTS</p><h2 id="sfxTitle">MOSS 音效工作室</h2><p>用中文或英文描述聲音，生成後可試聽、下載，或加入剪輯音軌。</p></div>
+        <button class="icon-button modal-close" type="button" data-close-sfx aria-label="關閉音效工作室">×</button>
+      </div>
+      <div class="music-layout">
+        <form id="sfxForm" class="music-editor">
+          <div class="music-model-card sfx-model-card"><span id="sfxStatusDot" class="music-status-dot"></span><div><strong id="sfxModelTitle">正在檢查 MOSS 音效…</strong><small id="sfxModelDetail">中文／英文描述 · 1–30 秒 · 48kHz WAV</small></div><button id="checkSfxStatus" class="button ghost small" type="button">重新檢查</button></div>
+          <p id="sfxDraftStatus" class="subtle" role="status">草稿會儲存在此瀏覽器</p>
+          <label class="music-wide-field">音效名稱<input id="sfxJobName" maxlength="80" placeholder="例如：金屬重擊、法術衝擊"></label>
+          <label class="music-wide-field">音效描述<textarea id="sfxPrompt" rows="6" maxlength="2000" required placeholder="例如：一記沉重的金屬撞擊，開頭短促尖銳，接著是低沉震動與逐漸消失的回響。沒有音樂與人聲。"></textarea></label>
+          <p class="sfx-prompt-help">描述發聲物件、動作、先後順序與空間感。這是文字生音效，不會自動依影片畫面對齊。</p>
+          <div class="form-grid music-core-fields"><label>長度（秒）<input id="sfxDuration" type="number" min="1" max="30" step="0.1" value="5" required></label><label>Seed<div class="seed-input"><input id="sfxSeed" inputmode="numeric" pattern="[0-9]+" required><button id="randomSfxSeed" class="button ghost small" type="button" aria-label="隨機音效 Seed">↻</button></div></label></div>
+          <button id="generateSfx" class="button primary wide music-generate" type="submit" disabled>產生音效</button>
+          <p class="music-generation-note">音效與影片、音樂共用生成佇列；等待期間可繼續編輯。Seed 可手動更換。</p>
+          <p id="sfxFeedback" class="sfx-feedback" role="status" aria-live="polite"></p>
+        </form>
+        <section class="music-history"><div class="music-history-title"><div><span class="step-number">HISTORY</span><h3>音效項目</h3></div><button id="refreshSfxJobs" class="button ghost small" type="button">重新整理</button></div><div id="sfxJobList" class="music-job-list"><div class="empty-state">尚無音效工作</div></div><div class="music-pagination"><button id="previousSfxPage" class="button ghost small" type="button" disabled>← 上一頁</button><span id="sfxPageLabel">1 / 1</span><button id="nextSfxPage" class="button ghost small" type="button" disabled>下一頁 →</button></div></section>
+      </div>
+      <dialog id="sfxEditorDialog" class="sfx-editor-dialog" aria-labelledby="sfxEditorTitle"><div class="modal-heading"><h3 id="sfxEditorTitle">加入剪輯音軌</h3><button id="closeSfxEditor" class="icon-button" type="button" aria-label="關閉加入剪輯視窗">×</button></div><label>加入哪個專案？<select id="sfxEditorProject"><option value="">建立新的剪輯專案</option></select></label><p id="sfxEditorStatus" role="status"></p><a id="sfxOpenEditor" class="button primary" target="_blank" rel="noopener">開啟剪輯並加入音效 ↗</a></dialog>
+    </section>
+  </div>
+
   <div id="musicModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="musicTitle">
     <div class="modal-backdrop" data-close-music></div>
     <section class="modal-card music-studio-card">
@@ -925,8 +951,9 @@ non_diegetic_music: ...</pre></div>
   <script src="/static/lora-help.js?v=20261005-lora-recommendations"></script>
   <script src="/static/shortfilm_persistence.js?v=20261017-ux"></script>
   <script src="/static/audio_workspace.js?v=20261017-ux"></script>
-  <script src="/static/app.js?v=20261030-memory-errors"></script>
+  <script src="/static/app.js?v=20261030-sfx"></script>
+  <script src="/static/sfx.js?v=20261030-sfx"></script>
   <script src="/static/face-repair.js?v=20260917-face-repair"></script>
-  <script src="/static/workspace_ui.js?v=20261017-ux"></script>
+  <script src="/static/workspace_ui.js?v=20261030-sfx"></script>
 </body>
 </html>

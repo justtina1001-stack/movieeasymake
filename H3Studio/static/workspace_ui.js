@@ -5,13 +5,13 @@
     if (path.startsWith("/scripts")) return "scripts";
     if (path.startsWith("/images")) return "images";
     const params = new URLSearchParams(search);
-    if (["voice", "music"].includes(params.get("tool"))) return params.get("tool");
+    if (["voice", "music", "sfx"].includes(params.get("tool"))) return params.get("tool");
     return params.get("workspace") === "shortfilm" ? "shortfilm" : "quick";
   }
   const destinations = [
     ["scripts", "腳本", "/scripts"], ["images", "圖片", "/images"],
     ["quick", "影片", "/?workspace=quick"], ["shortfilm", "短片", "/?workspace=shortfilm"],
-    ["editor", "剪輯", "/editor"], ["voice", "語音", "/?tool=voice"], ["music", "音樂", "/?tool=music"],
+    ["editor", "剪輯", "/editor"], ["voice", "語音", "/?tool=voice"], ["music", "音樂", "/?tool=music"], ["sfx", "音效", "/?tool=sfx"],
   ];
   function setupNavigation(doc) {
     const header = doc.querySelector("body > header");
@@ -24,10 +24,11 @@
     for (const [key, label, href] of destinations) {
       const link = doc.createElement("a"); link.href = href; link.textContent = label; link.dataset.studioSection = key;
       if (key === active) link.setAttribute("aria-current", "page");
-      if (["voice", "music"].includes(key) && doc.getElementById(`open${key === "voice" ? "Voice" : "Music"}Studio`)) {
+      const triggerId = { voice: "openVoiceStudio", music: "openMusicStudio", sfx: "openSfxStudio" }[key];
+      if (triggerId && doc.getElementById(triggerId)) {
         link.setAttribute("aria-haspopup", "dialog");
         link.addEventListener("click", event => {
-          event.preventDefault(); doc.getElementById(`open${key === "voice" ? "Voice" : "Music"}Studio`).click();
+          event.preventDefault(); doc.getElementById(triggerId).click();
         });
       }
       nav.append(link);
@@ -42,8 +43,8 @@
       }
     });
     const params = new URLSearchParams(root.location.search), tool = params.get("tool");
-    if (["voice", "music"].includes(tool)) {
-      const trigger = doc.getElementById(`open${tool === "voice" ? "Voice" : "Music"}Studio`);
+    if (["voice", "music", "sfx"].includes(tool)) {
+      const trigger = doc.getElementById({ voice: "openVoiceStudio", music: "openMusicStudio", sfx: "openSfxStudio" }[tool]);
       if (trigger) root.setTimeout(() => trigger.click(), 0);
     }
   }
@@ -75,6 +76,8 @@
     }
     doc.addEventListener("keydown", event => {
       if (!open) return;
+      // A nested native dialog owns its focus loop and Escape action.
+      if (open.querySelector("dialog[open]")) return;
       if (event.key === "Tab") {
         const items = focusables(open), first = items[0] || open, last = items.at(-1) || open;
         if (!items.length || !open.contains(doc.activeElement) || (!event.shiftKey && doc.activeElement === last) || (event.shiftKey && doc.activeElement === first)) {

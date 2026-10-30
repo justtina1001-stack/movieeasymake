@@ -255,7 +255,7 @@ def register_editor_media_io(app):
         return await upload_media(request, store)
 
     async def capabilities(request):
-        return web.json_response({"schema_version": 13, "subtitle_capacity": 5000, "project_background": True, "export_history": True,
+        return web.json_response({"schema_version": 13, "sound_effects": True, "subtitle_capacity": 5000, "project_background": True, "export_history": True,
                                   "color_adjustments": True, "max_color_adjustments": 20, "max_active_color_adjustments": 4,
                                   "reference_transitions": True, "transition_effects": True, "text_fonts": True, "text_idle_animations": True,
                                   "clip_animations": True, "clip_transitions": True, "generated_video_thumbnails": True, "text_style": True, "overlay_tracks": True, "audio_tracks": 4, "speed_min": 0.25,

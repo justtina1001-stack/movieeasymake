@@ -8,7 +8,7 @@ from typing import Any
 
 
 ACTIVE_STATUSES = {"queued", "preparing", "running"}
-KIND_LABELS = {"video": "影片", "music": "音樂", "voice": "語音", "image": "圖片", "unknown": "工作"}
+KIND_LABELS = {"video": "影片", "music": "音樂", "voice": "語音", "sfx": "音效", "image": "圖片", "unknown": "工作"}
 
 
 def build_queue_view(
@@ -18,6 +18,7 @@ def build_queue_view(
     voice_jobs: dict[str, dict[str, Any]],
     *,
     image_jobs: dict[str, dict[str, Any]] | None = None,
+    sfx_jobs: dict[str, dict[str, Any]] | None = None,
     colleague_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Do not infer a global rank for jobs still behind the local GPU lock.
@@ -30,7 +31,7 @@ def build_queue_view(
     available = snapshot.get("available") is True
     all_jobs = {
         job_id: (kind, job)
-        for kind, collection in (("video", video_jobs), ("music", music_jobs), ("voice", voice_jobs), ("image", image_jobs or {}))
+        for kind, collection in (("video", video_jobs), ("music", music_jobs), ("voice", voice_jobs), ("sfx", sfx_jobs or {}), ("image", image_jobs or {}))
         for job_id, job in collection.items()
     }
     by_prompt = {
@@ -106,7 +107,7 @@ def build_queue_view(
             phase = "local_waiting"
         elif job.get("status") == "preparing":
             phase = "finishing" if job.get("output") or job.get("current_node") == "合併替換片段並處理聲音" else "preparing"
-        elif kind == "voice":
+        elif kind in {"voice", "sfx"}:
             phase = "local_processing"
         else:
             # A missing queue entry could be submission/download/reconnection in

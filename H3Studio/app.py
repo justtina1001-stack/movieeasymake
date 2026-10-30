@@ -53,6 +53,7 @@ from voice import (
     filename_stem as voice_filename_stem,
 )
 from shared_gateway import GatewayError, SharedComfyGateway
+from sound_effects import SoundEffectJobManager, register_sound_effect_routes
 from queue_presentation import build_queue_view
 from queue_cancel import QueueCancelError
 from face_repair import repair_capabilities, repair_options
@@ -2305,8 +2306,10 @@ def create_app() -> web.Application:
     music_jobs = MusicJobManager(comfy, DATA_DIR, jobs.gpu_lock, music_installer)
     voice_installer = VoiceInstaller(DATA_DIR)
     voice_jobs = VoiceJobManager(DATA_DIR, jobs.gpu_lock, voice_installer, assets.path_for, comfy=comfy)
+    sfx_jobs = SoundEffectJobManager(DATA_DIR, jobs.gpu_lock, comfy=comfy)
     gateway = SharedComfyGateway(DATA_DIR, voice_installer=voice_installer, voice_jobs=voice_jobs, voice_assets=assets)
     voice_jobs.before_local_generate = gateway.wait_for_engine_idle
+    sfx_jobs.before_local_generate = gateway.wait_for_engine_idle
     shortfilms = ShortFilmStore(DATA_DIR / "shortfilms")
 
     async def use_installed_engine(target: Path) -> None:
@@ -2331,6 +2334,7 @@ def create_app() -> web.Application:
     app["music_jobs"] = music_jobs
     app["voice_installer"] = voice_installer
     app["voice_jobs"] = voice_jobs
+    app["sfx_jobs"] = sfx_jobs
     app["shared_gateway"] = gateway
     app["shortfilms"] = shortfilms
     reviews = GenerationReviewStore()
@@ -2343,6 +2347,7 @@ def create_app() -> web.Application:
         return await prepare_h3_payload(app, prepared)
 
     app["prepare_generation_payload"] = prepare_generation_payload
+    register_sound_effect_routes(app)
     register_job_thumbnails(app, OUTPUT_DIR)
     image_jobs = register_image_routes(app, STATIC_DIR, DATA_DIR)
     register_editor_routes(app, STATIC_DIR, DATA_DIR)
@@ -2410,7 +2415,7 @@ def create_app() -> web.Application:
                 if name:
                     colleagues[prompt_id] = name
         result = build_queue_view(snapshot, jobs.jobs, music_jobs.jobs, voice_jobs.jobs,
-                                  image_jobs=image_jobs.jobs, colleague_names=colleagues)
+                                  image_jobs=image_jobs.jobs, sfx_jobs=sfx_jobs.jobs, colleague_names=colleagues)
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
     async def connection(_: web.Request) -> web.Response:
@@ -2418,7 +2423,7 @@ def create_app() -> web.Application:
 
     async def update_connection(request: web.Request) -> web.Response:
         if jobs.gpu_lock.locked() or comfy.is_starting or music_installer.public_status()["active"] or voice_installer.public_status()["active"]:
-            return json_response_error(RequestError("目前有影片、音樂或語音正在生成，或模型仍在下載，請完成後再切換引擎。"), 409)
+            return json_response_error(RequestError("目前有影片、音樂、語音或音效正在生成，或模型仍在下載，請完成後再切換引擎。"), 409)
         try:
             payload = await request.json()
             updated = settings.update(payload)
@@ -2460,7 +2465,7 @@ def create_app() -> web.Application:
 
     async def start_engine_installer(request: web.Request) -> web.Response:
         if jobs.gpu_lock.locked() or music_installer.public_status()["active"] or voice_installer.public_status()["active"]:
-            return json_response_error(RequestError("目前有影片、音樂或語音正在生成，或模型仍在下載，請完成後再安裝本機引擎。"), 409)
+            return json_response_error(RequestError("目前有影片、音樂、語音或音效正在生成，或模型仍在下載，請完成後再安裝本機引擎。"), 409)
         try:
             payload = await request.json()
             target = resolve_install_target(payload.get("comfy_dir"), APP_DIR)
@@ -2480,7 +2485,7 @@ def create_app() -> web.Application:
         if comfy.is_starting:
             blockers.append({"code": "engine_starting", "message": "這台 Studio 正在啟動或等待連線 ComfyUI 引擎，請等啟動完成或失敗後重試。"})
         if jobs.gpu_lock.locked():
-            blockers.append({"code": "generation", "message": "這台 Studio 有影片、音樂或語音工作正在準備或生成，請等待工作結束。"})
+            blockers.append({"code": "generation", "message": "這台 Studio 有影片、音樂、語音或音效工作正在準備或生成，請等待工作結束。"})
         if installer.public_status().get("status") in {"starting", "running", "cancelling"}:
             blockers.append({"code": "engine_installation", "message": "這台電腦正在安裝或修復 ComfyUI，請到「引擎設定」查看進度。"})
         if music_installer.public_status()["active"]:
@@ -3523,6 +3528,7 @@ def create_app() -> web.Application:
         await gateway.stop()
 
     async def cleanup_voice(_: web.Application) -> None:
+        await sfx_jobs.shutdown()
         await voice_jobs.shutdown()
         await voice_installer.shutdown()
 

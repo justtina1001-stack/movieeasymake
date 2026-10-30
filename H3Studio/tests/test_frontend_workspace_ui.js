@@ -180,7 +180,21 @@ test("a modal opened from the collapsed settings menu returns focus to its visib
 test("navigation selects the current work area from both dedicated pages and home query parameters", () => {
   const { ui } = fixture();
   for (const [route, query, expected] of [["/editor", "?job=x", "editor"], ["/scripts", "", "scripts"], ["/images", "", "images"],
-    ["/", "?workspace=shortfilm", "shortfilm"], ["/", "?tool=voice", "voice"], ["/", "?tool=music", "music"], ["/", "", "quick"]]) {
+    ["/", "?workspace=shortfilm", "shortfilm"], ["/", "?tool=voice", "voice"], ["/", "?tool=music", "music"], ["/", "?tool=sfx", "sfx"], ["/", "", "quick"]]) {
     assert.equal(ui.currentSection(route, query), expected);
   }
+});
+
+test("a nested native editor picker keeps its own Escape and Tab handling", () => {
+  const f = fixture(), modal = f.dialog();
+  let parentCloses = 0;
+  const close = f.node("button", {class:"modal-close"}, modal); close.addEventListener("click",()=>parentCloses++);
+  const picker=f.node("dialog",{open:""},modal), choice=f.node("select",{},picker);
+  f.ui.installModalFocus(f.doc); modal.classList.remove("hidden"); f.flush(); choice.focus();
+  assert.equal(f.key("Escape").prevented,false);
+  assert.equal(f.key("Tab").prevented,false);
+  assert.equal(parentCloses,0);
+  picker.open=false;
+  assert.equal(f.key("Escape").prevented,true);
+  assert.equal(parentCloses,1);
 });

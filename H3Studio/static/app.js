@@ -2299,7 +2299,7 @@ function refreshQueueJobAnnotations() {
 }
 
 function queueRowsHtml(rows, group) {
-  const kinds = { video: "影片", music: "音樂", voice: "語音", image: "圖片", unknown: "其他工作" };
+  const kinds = { video: "影片", music: "音樂", voice: "語音", sfx: "音效", image: "圖片", unknown: "其他工作" };
   return rows.map(row => {
     const rank = Number.isInteger(row.position) && row.position > 0 ? `第 ${row.position} 位` : "等待中";
     const phaseLabel = { engine_running: "執行中", engine_waiting: rank, local_waiting: "待送出", preparing: "準備素材", finishing: "完成後處理", local_processing: "本機處理", remote_waiting: "遠端排隊中", remote_preparing: "遠端準備中", remote_processing: "遠端生成中", unknown: "同步狀態中" }[row.phase] || "同步狀態中";
@@ -2320,6 +2320,9 @@ async function revealQueueJob(kind, id) {
   } else if (kind === "music") {
     musicFocusedJobId = id; openMusicStudio(); await loadMusicJobs(true);
     card = $(`[data-music-job="${id}"]`);
+  } else if (kind === "sfx") {
+    await window.H3SoundEffects?.workspace?.open();
+    card = $(`[data-sfx-job="${id}"]`);
   } else if (kind === "video") {
     const job = await api(`/api/jobs/${id}`);
     if (job.shortfilm_project_id) {

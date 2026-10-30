@@ -660,12 +660,13 @@ def render_project(project, media_paths, output_path, cancel_event, progress_cal
 
 
 class EditorStore:
-    def __init__(self, data_dir, assets, jobs):
+    def __init__(self, data_dir, assets, jobs, *, sfx_jobs=None):
         self.root = Path(data_dir) / "editor"
         self.media_dir, self.project_dir, self.export_dir = (self.root / name for name in ("media", "projects", "exports"))
         for directory in (self.media_dir, self.project_dir, self.export_dir):
             directory.mkdir(parents=True, exist_ok=True)
         self.assets, self.jobs = assets, jobs
+        self.sfx_jobs = sfx_jobs
         self.media = self._load(self.media_dir)
         self.projects = self._load(self.project_dir)
         self.exports = self._load(self.export_dir)
@@ -721,8 +722,8 @@ class EditorStore:
         return path
 
     async def import_media(self, payload):
-        if not isinstance(payload, dict) or set(payload) not in ({"asset_id"}, {"job_id"}):
-            raise EditorError("請指定一個 asset_id 或 job_id，不能指定路徑或網址。")
+        if not isinstance(payload, dict) or set(payload) not in ({"asset_id"}, {"job_id"}, {"sfx_job_id"}):
+            raise EditorError("請指定一個 asset_id、job_id 或 sfx_job_id，不能指定路徑或網址。")
         source_id = check_id(next(iter(payload.values())))
         # Assets/jobs have immutable IDs; the editor already owns an independent
         # copy, so re-importing that source needs no filesystem copy or decode.
@@ -746,6 +747,16 @@ class EditorStore:
             if asset_root is not None and Path(asset_root).resolve() not in path.parents:
                 raise EditorError("來源素材不在素材目錄內。")
             name = metadata.get("name") or path.name
+        elif "sfx_job_id" in payload:
+            manager = self.sfx_jobs
+            job = manager.jobs.get(source_id) if manager is not None else None
+            if job is None or job.get("status") != "completed":
+                raise EditorError("找不到已完成的音效工作。", 404)
+            path = manager.local_output_path(job)
+            if path is None:
+                raise EditorError("音效檔案不存在。", 404)
+            path = Path(path)
+            name = job.get("name") or "MOSS 音效"
         else:
             job = self.jobs.jobs.get(source_id)
             if job is None or job.get("status") != "completed":
@@ -1016,7 +1027,7 @@ class EditorStore:
 
 
 def register_editor_routes(app, static_dir, data_dir):
-    store = EditorStore(data_dir, app["assets"], app["jobs"])
+    store = EditorStore(data_dir, app["assets"], app["jobs"], sfx_jobs=app.get("sfx_jobs"))
     app["editor"] = store
 
     @web.middleware

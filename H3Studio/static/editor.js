@@ -843,7 +843,23 @@
     render();
     return { refresh, render, open, close };
   }
-  const core = { colorMath, requireColorSupport, requireSavedColor, ...motion, ...speedMath, ...animationsCore, normalizeProjectAnimations, requireAnimationSupport, isTransitionEffect, isReferenceTransition, requireTransitionEffectSupport, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities, editorHistoryVideoUrl, editorVideoHistoryItems, filterEditorVideoHistory, createEditorVideoHistory };
+  function soundEffectTransfer(search) {
+    const params = new URLSearchParams(search), jobId = params.get("sfx");
+    if (!jobId) return null;
+    const projectId = params.get("project"), newProject = params.get("new") === "1";
+    if (!/^[a-f0-9]{32}$/.test(jobId) || projectId && !/^[a-f0-9]{32}$/.test(projectId)) throw new Error("音效或剪輯專案編號無效。");
+    if (Boolean(projectId) === newProject) throw new Error("請先選擇音效要加入的剪輯專案，或建立新專案。");
+    return { jobId, projectId, newProject };
+  }
+  function appendSoundEffect(project, media, clipId) {
+    if (mediaKind(media) !== "audio" || !Number.isFinite(Number(media.duration)) || Number(media.duration) <= 0 || Number(media.duration) > 600) throw new Error("音效來源尚未就緒或長度無效。");
+    const next = clone(project), out = Number(media.duration), track = freeAudioTrack(next, 0, out);
+    (next.audio_clips ||= []).push({ id: clipId, media_id: media.id, in: 0, out, start: 0, track, volume: 1, speed: 1, fade_in: 0, fade_out: 0 });
+    if (!totalDuration(next)) next.canvas_duration = out;
+    validateProject(next);
+    return next;
+  }
+  const core = { soundEffectTransfer, appendSoundEffect, colorMath, requireColorSupport, requireSavedColor, ...motion, ...speedMath, ...animationsCore, normalizeProjectAnimations, requireAnimationSupport, isTransitionEffect, isReferenceTransition, requireTransitionEffectSupport, transformClipSpeed, SpeedCurveTransaction, clone, clamp, speedOf, duration, speedLabel, mainDuration, totalDuration, fadeEnvelope, clampFades, VideoLayersController, nonzeroFades, promoteClip, audioClips, overlays, TEXT_STYLE_DEFAULTS, canonicalTextStyle, validateTextStyle, requireTextStyleSupport, canonicalOverlay, validateOverlays, overlayRasterKey, PreviewRequestQueue, transformOverlay, shiftOverlayTime, splitOverlayAt, OverlayTransaction, mediaKind, audioGain, audioLanes, audioPreviewCandidates, freeAudioTrack, editableContent, signature, canonicalSavedSignature, resolveDraft, formatTime, locateTime, validateProject, splitAt, splitAudioAt, detachAudio, reorder, trimTimelineClip, TrimTransaction, ProjectSession, ProjectAutoSaver, VideoDeck, AudioPreview, requireCapabilities, editorHistoryVideoUrl, editorVideoHistoryItems, filterEditorVideoHistory, createEditorVideoHistory };
   const trackDragModule = typeof module !== "undefined" && module.exports ? require("./editor_track_drag.js") : root.H3EditorTrackDrag;
   Object.assign(core, trackDragModule.createTrackDragCore(core));
   Object.assign(core, { canonicalTextFont, validateTextFont, normalizeEditorFonts, requireTextFontSupport, requireTextIdleSupport });
@@ -2707,6 +2723,25 @@
     if (add) addMedia(media.id);
     return media;
   }
+  async function importSoundEffect(jobId) {
+    if (locked()) throw new Error("剪輯尚未準備好，請稍後再加入音效。");
+    state.busy = true; renderDisabled();
+    let media;
+    try {
+      const response = await api("/api/editor/media", json("POST", { sfx_job_id: jobId }));
+      media = response.media || response; state.media.set(media.id, media); renderMedia();
+    } finally { state.busy = false; renderDisabled(); }
+    const clipId = uid();
+    edit(value => {
+      const next = appendSoundEffect(value, media, clipId);
+      value.audio_clips = next.audio_clips;
+      if (next.canvas_duration !== undefined) value.canvas_duration = next.canvas_duration;
+      validateProject(value, state.media);
+    }, null, false);
+    state.selected = clipId; state.selectedKind = "audio"; state.playhead = 0; render();
+    notify(media.duration > totalDuration(project()) ? "音效已加入音軌；超過影片尾端的部分不會匯出，可調整位置或背景片長。" : "音效已加入開頭的可用音軌，可在時間軸調整位置、音量與淡入淡出。");
+    return media;
+  }
   async function loadJobs() {
     if (state.jobsLoading) return;
     state.jobsLoading = true; $("refreshJobs").disabled = true;
@@ -2840,10 +2875,20 @@
     const data = await Promise.all([api("/api/editor/media"), api("/api/editor/projects"), loadTextFonts(), checkMediaLibrarySupport()]);
     state.media = new Map(list(data[0], "media").map(item => [item.id, item])); state.projects = list(data[1], "projects");
     renderMedia();
-    const url = new URL(location.href), requested = url.searchParams.get("project"), last = storageGet("h3-editor-last-project");
-    let id = requested || (state.projects.some(p => p.id === last) ? last : state.projects[0]?.id);
-    if (!id) { const response = await api("/api/editor/projects", json("POST", { name: "我的剪輯專案" })); const value = response.project || response; state.projects.unshift(value); id = value.id; }
+    const url = new URL(location.href), transfer = soundEffectTransfer(url.search), requested = url.searchParams.get("project"), last = storageGet("h3-editor-last-project");
+    if (transfer && capabilities.sound_effects !== true) throw new Error("目前 Studio 尚未載入音效匯入功能，請更新並重新啟動 Studio；既有剪輯尚未更動。");
+    let id = transfer ? transfer.projectId : requested || (state.projects.some(p => p.id === last) ? last : state.projects[0]?.id);
+    if (!id) { const response = await api("/api/editor/projects", json("POST", { name: transfer ? "MOSS 音效剪輯" : "我的剪輯專案" })); const value = response.project || response; state.projects.unshift(value); id = value.id; }
     await loadProject(id, false); state.busy = false; render();
+    if (transfer) {
+      const key = `h3-editor-sfx:${id}:${transfer.jobId}`;
+      let seen; try { seen = JSON.parse(sessionStorage.getItem(key)); } catch { seen = null; }
+      if (!seen) {
+        const media = await importSoundEffect(transfer.jobId); await saveProject();
+        try { sessionStorage.setItem(key, JSON.stringify({ project_id: id, media_id: media.id })); } catch {}
+      } else notify("這筆音效已在本次操作中加入此專案，未重複加入。");
+      const clean = new URL(location.href); clean.searchParams.delete("sfx"); clean.searchParams.delete("new"); clean.searchParams.set("project", id); history.replaceState(null, "", clean);
+    }
     const jobId = url.searchParams.get("job");
     if (jobId) {
       let seen; try { seen = JSON.parse(sessionStorage.getItem(`h3-editor-job:${jobId}`)); } catch { seen = null; }
