@@ -369,6 +369,127 @@ class SetupTests(unittest.IsolatedAsyncioTestCase):
                 session.assert_not_called()
 
 
+def native_entry(model, *, source=False):
+    spec = setup.PINNED_NATIVE_MODELS[model]
+    return {"name": spec["source"] if source else model, "digest": spec["manifest_sha256"],
+            "details": {"format": "gguf", "family": spec["family"], "quantization_level": spec["quantization"]}}
+
+
+def native_shown(model):
+    spec = setup.PINNED_NATIVE_MODELS[model]
+    return {"modelfile": 'FROM "E:\\model store\\blobs\\sha256-' + spec["model_sha256"] + '"',
+            "template": "{{ .Prompt }}", "capabilities": ["completion", "thinking"]}
+
+
+def native_responses(model, *, existing=None):
+    source = native_entry(model, source=True)
+    responses = [("POST", "/api/pull", b'{"status":"success"}\n'),
+                 ("GET", "/api/tags", {"models": [source]}),
+                 ("POST", "/api/show", native_shown(model)),
+                 ("GET", "/api/tags", {"models": [source] + ([existing] if existing else [])})]
+    if existing is not None:
+        responses += [("POST", "/api/show", native_shown(model))]
+    else:
+        responses += [("POST", "/api/copy", b""),
+                      ("GET", "/api/tags", {"models": [source, native_entry(model)]}),
+                      ("POST", "/api/show", native_shown(model))]
+    return responses
+
+
+class NativeRoleModelTests(unittest.IsolatedAsyncioTestCase):
+    async def run_pull(self, model, session, root):
+        with patch.object(setup, "ROOT", root), \
+             patch.object(setup.shutil, "disk_usage", return_value=SimpleNamespace(free=40 * 1024**3)), \
+             patch.object(setup.aiohttp, "ClientSession", return_value=session):
+            await setup.pull_model(model)
+
+    async def test_role_models_use_reviewed_gguf_sources_and_keep_native_templates(self):
+        for model, spec in setup.PINNED_NATIVE_MODELS.items():
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                session = ModelSession(native_responses(model))
+                await self.run_pull(model, session, root)
+                saved = json.loads((root / "installed-model.json").read_text("utf-8"))
+                self.assertEqual(saved["name"], model)
+                self.assertEqual(saved["installer_verification"]["manifest_sha256"], spec["manifest_sha256"])
+                self.assertFalse(saved["installer_verification"]["inference_performed"])
+                self.assertEqual(session.requests[0][2]["json"]["model"], spec["source"])
+                copied = next(item for item in session.requests if item[1] == "/api/copy")
+                self.assertEqual(copied[2]["json"], {"source": spec["source"], "destination": model})
+                self.assertFalse(any(route in {"/api/chat", "/api/generate", "/api/create", "/api/delete"}
+                                     for _, route, _ in session.requests))
+                self.assertEqual(session.responses, [])
+
+    async def test_manifest_drift_or_quantization_change_never_replaces_alias(self):
+        model = "gemma4:12b"
+        for field, value in (("digest", "0" * 64), ("quantization_level", "Q8_0"), ("format", "safetensors")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                responses = native_responses(model)
+                source = responses[1][2]["models"][0]
+                if field == "digest": source[field] = value
+                else: source["details"][field] = value
+                session = ModelSession(responses)
+                with self.assertRaisesRegex(RuntimeError, "固定的本地版本"):
+                    await self.run_pull(model, session, Path(directory))
+                self.assertFalse(any(route == "/api/copy" for _, route, _ in session.requests))
+                self.assertFalse((Path(directory) / "installed-model.json").exists())
+
+    async def test_wrong_blob_missing_template_or_remote_show_cannot_publish_alias(self):
+        model = "gemma4:12b"
+        for change, error in (({"modelfile": "FROM /blobs/sha256-" + "0" * 64}, "SHA-256"),
+                              ({"template": ""}, "對話模板"),
+                              ({"template": None}, "對話模板"),
+                              ({"capabilities": ["vision"]}, "文字生成"),
+                              ({"remote_host": "https://example.invalid"}, "本地權重")):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                responses = native_responses(model)
+                responses[2][2].update(change)
+                session = ModelSession(responses)
+                with self.assertRaisesRegex(RuntimeError, error):
+                    await self.run_pull(model, session, Path(directory))
+                self.assertFalse(any(route == "/api/copy" for _, route, _ in session.requests))
+
+    async def test_existing_matching_alias_is_verified_without_copy_or_replacement(self):
+        model = "gemma4:12b"
+        session = ModelSession(native_responses(model, existing=native_entry(model)))
+        with tempfile.TemporaryDirectory() as directory:
+            await self.run_pull(model, session, Path(directory))
+        self.assertFalse(any(route == "/api/copy" for _, route, _ in session.requests))
+        self.assertEqual(session.responses, [])
+
+    async def test_existing_custom_alias_is_preserved_and_not_marked_installed(self):
+        model = "gemma4:12b"
+        existing = {**native_entry(model), "digest": "customized-model"}
+        session = ModelSession(native_responses(model, existing=existing))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "installed-model.json").write_text("previous record", "utf-8")
+            with self.assertRaisesRegex(RuntimeError, "既有別名保留"):
+                await self.run_pull(model, session, root)
+            self.assertEqual((root / "installed-model.json").read_text("utf-8"), "previous record")
+        self.assertFalse(any(route == "/api/copy" for _, route, _ in session.requests))
+
+    async def test_qwen_four_b_disk_requirement_is_checked_before_network(self):
+        model = "qwen3.5:4b"
+        self.assertIn(model, setup.MODELS)
+        self.assertEqual(setup.MODEL_DISK_GIB[model], 5)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(setup, "ROOT", Path(directory)), \
+                 patch.object(setup.shutil, "disk_usage", return_value=SimpleNamespace(free=5 * 1024**3 - 1)), \
+                 patch.object(setup.aiohttp, "ClientSession") as factory:
+                with self.assertRaisesRegex(RuntimeError, "5 GiB"):
+                    await setup.pull_model(model)
+                factory.assert_not_called()
+
+    def test_separate_role_records_do_not_erase_prior_installed_models(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(setup, "ROOT", Path(directory)):
+            setup.save_install_record("gemma4:12b", native_entry("gemma4:12b"))
+            setup.save_install_record("qwen3.5:4b", native_entry("qwen3.5:4b"))
+            records = list((Path(directory) / "installed-models").glob("*.json"))
+            self.assertEqual({json.loads(p.read_text("utf-8"))["name"] for p in records}, {"gemma4:12b", "qwen3.5:4b"})
+            self.assertFalse(list(Path(directory).rglob("*.tmp")))
+
+
 class ServerTests(unittest.TestCase):
     def test_existing_service_is_reused_without_starting_or_loading_model(self):
         with patch.object(setup, "probe", return_value={"version": "test"}), \

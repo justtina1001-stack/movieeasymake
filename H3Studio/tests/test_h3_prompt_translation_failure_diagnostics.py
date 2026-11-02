@@ -65,7 +65,7 @@ class FakeSession:
 
 class FailureDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.settings = {"base_url": "http://127.0.0.1:11434", "model": "writer"}
+        self.settings = {"base_url": "http://127.0.0.1:11434", "model": "unrelated-writer", "translation_model": "writer"}
         self.app = {"scriptwriting": SimpleNamespace(settings=self.settings, queue_lock=asyncio.Lock())}
         self.translator = H3PromptTranslator(self.app)
         self.raw = {"prompt": "角色向左走", "references": [{"alias": "角色", "description": "穿藍衣"}]}

@@ -10,6 +10,7 @@ from h3_prompt_translation import H3PromptTranslator, payload_digest
 class FallbackHandoffTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.settings = {"base_url": "http://127.0.0.1:11434", "model": "local-writer",
+                         "translation_model": "local-translator",
                          "temperature": 0.8, "num_ctx": 8192, "num_predict": 4096}
         self.app = {"scriptwriting": SimpleNamespace(settings=self.settings)}
         self.translator = H3PromptTranslator(self.app)
@@ -63,13 +64,21 @@ class FallbackHandoffTests(unittest.IsolatedAsyncioTestCase):
             await self.translator.prepare(edited)
         self.assertEqual(self.translator._request.await_count, len(changes) + 1)
 
-    async def test_model_origin_and_other_writer_settings_changes_do_not_reuse(self):
+    async def test_translation_model_or_origin_changes_do_not_reuse(self):
         fallback = await self.translator.prepare(self.raw)
-        for key, value in (("model", "another-writer"), ("base_url", "http://localhost:11434"),
-                           ("num_ctx", 16384), ("temperature", 0.5)):
+        for key, value in (("translation_model", "another-translator"), ("base_url", "http://localhost:11434")):
             self.app["scriptwriting"].settings = self.settings | {key: value}
             await self.translator.prepare(fallback)
-        self.assertEqual(self.translator._request.await_count, 5)
+        self.assertEqual(self.translator._request.await_count, 3)
+
+    async def test_writer_and_vision_setting_changes_preserve_translation_handoff(self):
+        fallback = await self.translator.prepare(self.raw)
+        for key, value in (("model", "another-writer"), ("vision_model", "another-vision"),
+                           ("num_ctx", 16384), ("temperature", 0.5)):
+            self.app["scriptwriting"].settings = self.settings | {key: value}
+            reused = await self.translator.prepare(fallback)
+            self.assertEqual(reused["h3_translation"], fallback["h3_translation"])
+        self.translator._request.assert_awaited_once()
 
     async def test_handoff_expiry_does_not_extend_when_reused(self):
         with patch("h3_prompt_translation.time.monotonic", return_value=100):

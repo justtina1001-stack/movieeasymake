@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -14,6 +15,7 @@ from scriptwriting import (
     DEFAULT_SETTINGS, ScriptwritingError, ScriptwritingManager, build_messages,
     local_base_url, normalize_settings, parse_storyboard, register_scriptwriting_routes,
     validate_context, validate_storyboard,
+    STORYBOARD_SCHEMA_VERSION, storyboard_response_schema,
 )
 from shortfilm import ShortFilmStore
 
@@ -85,6 +87,27 @@ class ScriptValidationTests(unittest.TestCase):
                 normalize_settings(raw)
         self.assertEqual(normalize_settings({})["model"], "h3-script-hermes4:14b-q5_k_m")
         self.assertEqual(normalize_settings({"model": "qwen3.5:9b"})["model"], "qwen3.5:9b")
+
+    def test_legacy_translation_model_is_snapshotted_and_writer_switch_is_independent(self):
+        legacy = dict(DEFAULT_SETTINGS, model="legacy-writer")
+        legacy.pop("translation_model")
+        migrated = normalize_settings(legacy)
+        self.assertEqual(migrated["translation_model"], "legacy-writer")
+        changed = normalize_settings({"model": "gemma4:12b"}, migrated)
+        self.assertEqual(changed["model"], "gemma4:12b")
+        self.assertEqual(changed["translation_model"], "legacy-writer")
+        # A legacy in-memory manager is migrated from its prior saved writer,
+        # rather than from the newly selected writer.
+        changed = normalize_settings({"model": "gemma4:12b"}, legacy)
+        self.assertEqual(changed["translation_model"], "legacy-writer")
+        selected = normalize_settings({"translation_model": "qwen3.5:4b"}, changed)
+        self.assertEqual(selected["model"], "gemma4:12b")
+        self.assertEqual(selected["translation_model"], "qwen3.5:4b")
+
+    def test_translation_model_rejects_cloud_invalid_and_empty_names(self):
+        for model in ("x:cloud", "", None, "not a model", "writer?token=secret"):
+            with self.subTest(model=model), self.assertRaises(ScriptwritingError):
+                normalize_settings({"translation_model": model})
 
     def test_storyboard_preserves_content_and_rejects_unsafe_structure(self):
         self.assertEqual(validate_storyboard(STORYBOARD), STORYBOARD)
@@ -309,6 +332,34 @@ class ScriptAPITests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.post("/api/scripts/settings", json=payload)
             self.assertEqual(response.status, 400)
             self.assertEqual(self.manager.settings, before)
+
+    async def test_translation_choice_persists_without_following_writer_switch(self):
+        self.tags.extend([{"name": "translator:latest", "size": 1000},
+                          {"name": "gemma4:12b", "size": 1000}])
+        response = await self.client.post("/api/scripts/settings", json={"translation_model": "translator"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["translation_model"], "translator")
+        response = await self.client.post("/api/scripts/settings", json={"model": "gemma4:12b"})
+        saved = await response.json()
+        self.assertEqual(saved["translation_model"], "translator")
+        self.assertEqual(saved["model"], "gemma4:12b")
+        persisted = json.loads(self.manager.settings_path.read_text("utf-8"))
+        self.assertEqual(normalize_settings(persisted), saved)
+        status = await (await self.client.get("/api/scripts/status")).json()
+        self.assertTrue(status["ready"])
+        self.assertTrue(status["translation_ready"], status)
+
+    async def test_missing_or_cloud_translation_model_does_not_disable_writer(self):
+        for name in ("not-installed", "remote-only"):
+            if name == "remote-only":
+                self.tags.append({"name": name, "size": 1000, "remote_host": "https://cloud.example"})
+            response = await self.client.post("/api/scripts/settings", json={"translation_model": name})
+            self.assertEqual(response.status, 200)
+            status = await (await self.client.get("/api/scripts/status")).json()
+            self.assertTrue(status["ready"])
+            self.assertFalse(status["translation_ready"])
+            self.assertIn(name, status["translation_error"])
+            self.assertFalse(self.chat_requests)
 
     async def test_generation_keeps_input_snapshot_and_never_overwrites_edits(self):
         await self.lock.acquire()
@@ -583,6 +634,9 @@ class ScriptAPITests(unittest.IsolatedAsyncioTestCase):
         result = await self.complete(job)
         self.assertEqual(result["status"], "completed", result)
         self.assertEqual(result["input"]["project"]["duration"], 5)
+        schema = self.chat_requests[0]["format"]
+        self.assertEqual(schema, result["input"]["response_format"])
+        self.assertEqual(schema["properties"]["scenes"]["items"]["properties"]["shots"]["items"]["properties"]["duration"]["enum"], [5])
         self.assertEqual(self.manager.get_project(project["id"])["duration"], 15)
         imported = self.manager.import_shortfilm(result["id"])["project"]
         self.assertEqual(imported["target_duration"], 5)
@@ -592,7 +646,13 @@ class ScriptAPITests(unittest.IsolatedAsyncioTestCase):
         project = await self.create(duration=5)
         result = await self.complete(await self.submit(project, action="storyboard"))
         self.assertEqual(result["status"], "completed", result)
-        self.assertEqual(self.chat_requests[0]["format"], "json")
+        schema = storyboard_response_schema(5)
+        self.assertEqual(self.chat_requests[0]["format"], schema)
+        self.assertEqual(result["input"]["response_format"], schema)
+        self.assertEqual(result["output_schema_version"], STORYBOARD_SCHEMA_VERSION)
+        self.assertEqual(result["output_schema_sha256"], hashlib.sha256(json.dumps(
+            schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest())
         response = await self.client.post(f"/api/scripts/jobs/{result['id']}/shortfilm")
         self.assertEqual(response.status, 201)
         imported = await response.json()

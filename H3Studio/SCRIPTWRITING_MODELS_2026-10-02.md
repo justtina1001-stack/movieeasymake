@@ -2,6 +2,8 @@
 
 查核日期：2026-10-02（Asia/Taipei）。只採用模型開發者、Ollama、Google 的官方資料；模型權重可下載，不等於完整訓練資料與訓練流程開源。
 
+**2026-11-02 更新：**此主機已安裝 Gemma 4 12B 與獨立英文整理用 Qwen3.5 4B，保留 Hermes／Qwen27B 切換；編劇、看圖與英文整理現可分別設定。同稿實測、目前選擇及已知限制以 [Gemma 同稿比較紀錄](GEMMA4_SCREENWRITING_REVIEW_2026-11-02.md) 為準。下文保留 10 月的選型背景與原始部署紀錄。
+
 ## 結論
 
 **後續更新：使用者要求改用適合成年角色戀愛、曖昧與成熟劇情的候選，已將預設切換為 Hermes 4 14B Q5_K_M。** 本機名稱 `h3-script-hermes4:14b-q5_k_m`，約 10.51 GB，Apache 2.0。模型作者列出創意寫作、JSON 格式遵循及較低拒答率；這些是選型依據，不能保證所有內容都不拒答，也不能直接推論繁體中文劇本品質勝過較大的模型。[Hermes 官方模型卡](https://huggingface.co/NousResearch/Hermes-4-14B)、[量化發布者](https://huggingface.co/bartowski/NousResearch_Hermes-4-14B-GGUF)

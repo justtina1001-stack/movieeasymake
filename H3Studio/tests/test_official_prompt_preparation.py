@@ -21,7 +21,7 @@ MANUSCRIPT = (
 
 class OfficialPreparationTests(unittest.IsolatedAsyncioTestCase):
     def translator(self):
-        app = {"scriptwriting": SimpleNamespace(settings={"base_url": "http://127.0.0.1:11434", "model": "writer"})}
+        app = {"scriptwriting": SimpleNamespace(settings={"base_url": "http://127.0.0.1:11434", "model": "writer", "translation_model": "translator"})}
         translator = H3PromptTranslator(app)
         translator._request = AsyncMock()
         return translator

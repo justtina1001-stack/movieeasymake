@@ -546,7 +546,7 @@ test('old short-cut validation failures show a recovery hint without changing th
     ui.state.job = { ...ui.state.job, error, action: 'storyboard', status: 'failed', ...change }; ui.renderPreview();
     assert.doesNotMatch(elements.get('scriptJobDetail').textContent, /短切鏡需合併/);
   }
-  assert.match(html, /scripts\.js\?v=20261029-prompt-review/);
+  assert.match(html, /scripts\.js\?v=20261102-independent-translation/);
 });
 
 function cameraCorrection(overrides = {}) { return { scene_index: 0, shot_index: 0, original_camera: '35mm low-angle tracking shot', original_camera_detail: '鏡頭跟隨主角前進', camera: 'custom', camera_detail: '35mm low-angle tracking shot\n鏡頭跟隨主角前進', ...overrides }; }
@@ -707,20 +707,22 @@ test('existing manuscripts can generate without duplicated ideas and concept-onl
 
 test('model settings fields remain disabled during save and status refresh, preventing edits from being replaced', async () => {
   const saving = deferred();
-  const settings = { base_url: 'http://127.0.0.1:11434', model: 'qwen3.8:27b', temperature: 0.8, num_ctx: 8192, num_predict: 4096 };
-  const { ui, elements } = fixture(async url => url.endsWith('/settings') ? saving.promise : response({ ready: true, settings, models: [{ name: settings.model }] }));
+  const settings = { base_url: 'http://127.0.0.1:11434', model: 'qwen3.8:27b', translation_model: 'qwen3.5:9b', temperature: 0.8, num_ctx: 8192, num_predict: 4096 };
+  const { ui, elements } = fixture(async url => url.endsWith('/settings') ? saving.promise : response({ ready: true, translation_ready: true, settings, models: [{ name: settings.model }, { name: settings.translation_model }] }));
+  ui.state.translationSupported = true;
   elements.get('scriptBaseUrl').value = settings.base_url;
   elements.get('scriptModel').value = settings.model;
+  elements.get('scriptTranslationModel').value = settings.translation_model;
   elements.get('scriptTemperature').value = settings.temperature;
   elements.get('scriptContext').value = settings.num_ctx;
   elements.get('scriptMaxOutput').value = settings.num_predict;
   const pending = ui.saveSettings({ preventDefault() {} });
   assert.equal(ui.state.settingsSaving, true);
-  for (const id of ['scriptBaseUrl', 'scriptModel', 'scriptTemperature', 'scriptContext', 'scriptMaxOutput']) assert.equal(elements.get(id).disabled, true);
+  for (const id of ['scriptBaseUrl', 'scriptModel', 'scriptTranslationModel', 'scriptTemperature', 'scriptContext', 'scriptMaxOutput']) assert.equal(elements.get(id).disabled, true);
   saving.resolve(response(settings));
   await pending;
   assert.equal(ui.state.settingsSaving, false);
-  for (const id of ['scriptBaseUrl', 'scriptModel', 'scriptTemperature', 'scriptContext', 'scriptMaxOutput']) assert.equal(elements.get(id).disabled, false);
+  for (const id of ['scriptBaseUrl', 'scriptModel', 'scriptTranslationModel', 'scriptTemperature', 'scriptContext', 'scriptMaxOutput']) assert.equal(elements.get(id).disabled, false);
 });
 
 test('character references normalize as separate deep copied records and participate in dirty signatures', () => {
@@ -918,6 +920,85 @@ test('vision readiness controls image analysis independently of writing and pers
   ui.state.visionReady = false; ui.renderPreview();
   assert.equal(ui.state.referenceControls.get(reference().id).analyze.disabled, true);
   assert.ok(actions.every(action => !action.disabled));
+});
+
+test('independent writer, vision and translation models use installed choices and save without changing manuscript', async () => {
+  let settings = { base_url: 'http://127.0.0.1:11434', model: 'h3-script-hermes4:14b-q5_k_m', vision_model: 'qwen3.8:27b', translation_model: 'qwen3.5:9b', temperature: 0.8, num_ctx: 8192, num_predict: 4096 };
+  const models = [settings.model, settings.vision_model, settings.translation_model, 'gemma4:12b'].map(name => ({ name }));
+  const { ui, elements, calls } = fixture(async (url, options) => {
+    if (url.endsWith('/settings')) { settings = JSON.parse(options.body); return response(settings); }
+    return response({ ready: true, vision_ready: true, translation_ready: true, settings, models });
+  });
+  ui.writeProject(project({ content: '保留同一份未套用的編輯稿' }));
+  await ui.refreshEngine();
+  const before = JSON.stringify(ui.readProject());
+  assert.equal(elements.get('scriptTranslationModel').value, 'qwen3.5:9b');
+  assert.equal(elements.get('scriptTranslationModel').disabled, false);
+  for (const id of ['scriptModel', 'scriptVisionModel', 'scriptTranslationModel']) assert.deepEqual(elements.get(id).options.map(option => option.value), models.map(model => model.name));
+  elements.get('scriptModel').value = 'gemma4:12b';
+  ui.state.settingsDirty = true;
+  await ui.saveSettings({ preventDefault() {} });
+  const saved = JSON.parse(calls.find(call => call.url.endsWith('/settings')).options.body);
+  assert.equal(saved.model, 'gemma4:12b');
+  assert.equal(saved.vision_model, 'qwen3.8:27b');
+  assert.equal(saved.translation_model, 'qwen3.5:9b');
+  assert.equal(elements.get('scriptTranslationModel').value, 'qwen3.5:9b');
+  assert.equal(JSON.stringify(ui.readProject()), before);
+  assert.match(elements.get('scriptTranslationStatus').textContent, /已就緒.*qwen3\.5:9b/);
+});
+
+test('missing translation models remain selected and show an independent error without blocking writing', async () => {
+  const settings = { model: 'gemma4:12b', vision_model: 'qwen3.8:27b', translation_model: 'saved-translator:9b' };
+  const { ui, elements, actions } = fixture(async () => response({ ready: true, vision_ready: true, translation_ready: false, translation_error: '英文整理模型尚未安裝 saved-translator:9b', settings, models: [{ name: settings.model }, { name: settings.vision_model }] }));
+  ui.writeProject(project({ writing_skill: '' }));
+  await ui.refreshEngine();
+  assert.equal(elements.get('scriptTranslationModel').value, settings.translation_model);
+  assert.equal(elements.get('scriptTranslationModel').disabled, false);
+  assert.ok(elements.get('scriptTranslationModel').options.some(option => option.value === settings.translation_model && /尚未安裝/.test(option.textContent)));
+  assert.match(elements.get('scriptTranslationStatus').textContent, /英文整理模型尚未安裝/);
+  assert.equal(ui.state.ready, true);
+  assert.ok(actions.every(action => !action.disabled));
+});
+
+test('status refresh preserves unsaved independent model selections', async () => {
+  const settings = { model: 'hermes:14b', vision_model: 'qwen:27b', translation_model: 'translator:9b' };
+  const { ui, elements } = fixture(async () => response({ ready: true, translation_ready: true, settings, models: [settings.model, settings.vision_model, settings.translation_model, 'gemma4:12b'] }));
+  await ui.refreshEngine();
+  elements.get('scriptModel').value = 'gemma4:12b';
+  elements.get('scriptTranslationModel').value = 'hermes:14b';
+  ui.state.settingsDirty = true;
+  await ui.refreshEngine();
+  assert.equal(elements.get('scriptModel').value, 'gemma4:12b');
+  assert.equal(elements.get('scriptTranslationModel').value, 'hermes:14b');
+  assert.equal(elements.get('scriptVisionModel').value, 'qwen:27b');
+  assert.equal(ui.state.settingsDirty, true);
+});
+
+test('a backend that drops the independent translation setting cannot report it saved', async () => {
+  const settings = { base_url: 'http://127.0.0.1:11434', model: 'gemma4:12b', vision_model: 'qwen:27b', translation_model: 'translator:9b', num_ctx: 8192, num_predict: 4096 };
+  const { ui, elements, calls } = fixture(async url => url.endsWith('/settings') ? response({ ...settings, translation_model: 'wrong:9b' }) : response({ ready: true, translation_ready: true, settings, models: [settings.model, settings.vision_model, settings.translation_model] }));
+  await ui.refreshEngine(); ui.state.settingsDirty = true;
+  await ui.saveSettings({ preventDefault() {} });
+  assert.match(elements.get('scriptMessage').textContent, /未保存所選的英文整理模型/);
+  assert.equal(elements.get('scriptTranslationModel').value, settings.translation_model);
+  assert.equal(ui.state.settingsDirty, true);
+  assert.equal(ui.state.settingsSaving, false);
+  assert.equal(elements.get('scriptTranslationModel').disabled, false);
+  assert.equal(calls.filter(call => call.url.endsWith('/status')).length, 1);
+});
+
+test('older backend keeps writer settings usable and does not pretend to save a separate translator', async () => {
+  const settings = { base_url: 'http://127.0.0.1:11434', model: 'hermes:14b', vision_model: 'qwen:27b', num_ctx: 8192, num_predict: 4096 };
+  const { ui, elements, calls } = fixture(async url => url.endsWith('/settings') ? response(settings) : response({ ready: true, settings, models: [settings.model, settings.vision_model] }));
+  await ui.refreshEngine();
+  assert.equal(elements.get('scriptTranslationModel').disabled, true);
+  assert.match(elements.get('scriptTranslationStatus').textContent, /尚未提供獨立英文整理模型設定/);
+  await ui.saveSettings({ preventDefault() {} });
+  const saved = JSON.parse(calls.find(call => call.url.endsWith('/settings')).options.body);
+  assert.equal(Object.hasOwn(saved, 'translation_model'), false);
+  assert.equal(saved.model, settings.model);
+  assert.equal(elements.get('scriptTranslationModel').disabled, true);
+  assert.match(elements.get('scriptMessage').textContent, /需更新主機後使用/);
 });
 
 test('reference conflicts preserve every local mapping and expose distinct current server appearances', async () => {
@@ -1621,7 +1702,7 @@ test('H3 sources retain reviewed provenance and repository counts without presen
   assert.equal(rendered.children[3].rel, 'noopener noreferrer');
   assert.equal(elements.get('scriptSkillVersion').textContent, '方法版本：20261006-h3');
   assert.match(html, /Stars 為倉庫關注度，並非成片品質評分/);
-  assert.match(html, /scripts\.js\?v=20261029-prompt-review/);
+  assert.match(html, /scripts\.js\?v=20261102-independent-translation/);
   elements.get('scriptWritingSkill').value = 'h3-performance-beats'; ui.renderWritingSkillDetails();
   assert.match(elements.get('scriptSkillSources').children[0].children[2].textContent, /社群來源.*倉庫 ⭐ 175.*Forks 4/);
 });

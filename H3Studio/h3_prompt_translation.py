@@ -1,4 +1,4 @@
-"""Prepare English H3 directions with the configured local writer, preserving content."""
+"""Prepare English H3 directions with an independently selected local model."""
 from __future__ import annotations
 
 import asyncio
@@ -34,9 +34,13 @@ _SYSTEM = (
     "dialogue, music, actions, timing, camera motion, or creative details. Preserve every "
     "H3KEEP placeholder byte-for-byte exactly once and in its original order. They contain "
     "protected names, dialogue, screen text, reference tags, numbers and timestamps. "
-    "Preserve negation, counts, spatial relationships, event order, and the ending state."
+    "Preserve negation, counts, spatial relationships, event order, and the ending state. "
+    "Do not infer gender from names. When the source does not explicitly specify a "
+    "character's gender, use the character's name or gender-neutral wording instead "
+    "of he/she/his/her; preserve any explicitly stated gender."
 )
-_WARNING = "英文敘述整理未完成，已保留原文；可先啟動本機編劇模型，再重新預覽。"
+_WARNING = "英文敘述整理未完成，已保留原文；請檢查腳本設定中的英文整理模型，再重新預覽。"
+_LEGACY_WARNING = "英文敘述整理未完成，已保留原文；可先啟動本機編劇模型，再重新預覽。"
 _FALLBACK_HANDOFF_TTL = 120
 _FALLBACK_HANDOFF_LIMIT = 128
 _FAILURE_MESSAGES = {
@@ -200,7 +204,8 @@ class H3PromptTranslator:
 
     @staticmethod
     def _settings_identity(settings: dict) -> str:
-        return hashlib.sha256(json.dumps(settings, ensure_ascii=False, sort_keys=True,
+        identity = {key: settings.get(key) for key in ("base_url", "translation_model")}
+        return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
                                          separators=(",", ":")).encode()).hexdigest()
 
     def _reuse_fallback_handoff(self, payload: dict, settings: dict) -> bool:
@@ -235,7 +240,7 @@ class H3PromptTranslator:
         if (parsed.scheme not in {"http", "https"} or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
                 or parsed.username or parsed.password or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
             raise _TranslationFailure("local_error")
-        model = settings.get("model")
+        model = settings.get("translation_model")
         if not isinstance(model, str) or not model or ":cloud" in model.lower():
             raise _TranslationFailure("model_unavailable")
         base_url = str(settings["base_url"]).rstrip("/")
@@ -314,6 +319,8 @@ class H3PromptTranslator:
         payload = copy.deepcopy(raw)
         manager = self.app.get("scriptwriting")
         settings = getattr(manager, "settings", None)
+        if isinstance(settings, dict):
+            settings = {key: copy.deepcopy(settings.get(key)) for key in ("base_url", "translation_model")}
         if isinstance(settings, dict) and self._reuse_fallback_handoff(payload, settings):
             return payload
         aliases = [str(item.get("alias", "")) for item in payload.get("references") or [] if isinstance(item, dict)]
@@ -352,7 +359,7 @@ class H3PromptTranslator:
                 payload["h3_translation"] = {"status": "not_needed", "source_texts": normalized_sources}
             return payload
         warnings = [value for value in payload.get("h3_preparation_warnings") or []
-                    if value not in {_WARNING, "已保留原文敘述；目前關閉自動英文整理。"}]
+                    if value not in {_WARNING, _LEGACY_WARNING, "已保留原文敘述；目前關閉自動英文整理。"}]
         if payload.get("translate_directions") is False:
             warnings.append("已保留原文敘述；目前關閉自動英文整理。")
             payload.update(h3_preparation_warnings=list(dict.fromkeys(warnings)),
@@ -363,7 +370,7 @@ class H3PromptTranslator:
             original["prompt"] = source_prompt
         original.update(normalized_sources)
         settings = copy.deepcopy(settings)
-        cache_prefix = (settings.get("base_url"), settings.get("model"), "h3-translation-v2-official")
+        cache_prefix = (settings.get("base_url"), settings.get("translation_model"), "h3-translation-v4-gender-neutral")
         started_at = time.monotonic()
         try:
             async with self._lock:
@@ -392,11 +399,11 @@ class H3PromptTranslator:
                     self._cache.move_to_end(cache_key)
                 while len(self._cache) > 256:
                     self._cache.popitem(last=False)
-            payload["h3_translation"] = {"status": "translated", "model": settings["model"],
+            payload["h3_translation"] = {"status": "translated", "model": settings["translation_model"],
                                          "source_texts": original, "source_payload_digest": payload_digest(raw)}
         except (ValueError, TypeError, KeyError, aiohttp.ClientError, TimeoutError, OSError) as error:
             warnings.append(_WARNING)
-            payload["h3_translation"] = {"status": "unavailable", "source_texts": original,
+            payload["h3_translation"] = {"status": "unavailable", "model": settings.get("translation_model"), "source_texts": original,
                                          **_failure_diagnostics(error, started_at)}
         payload["h3_preparation_warnings"] = list(dict.fromkeys(warnings))
         if payload.get("h3_translation", {}).get("status") == "unavailable":

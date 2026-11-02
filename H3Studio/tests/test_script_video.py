@@ -225,7 +225,7 @@ class ScriptVideoAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def fake_chat(self, request):
         payload = await request.json()
-        action = "storyboard" if payload.get("format") == "json" else "screenplay"
+        action = "storyboard" if isinstance(payload.get("format"), dict) or payload.get("format") == "json" else "screenplay"
         self.chat_actions.append(action)
         self.reply = self.storyboard_reply if action == "storyboard" else self.screenplay_reply
         return await scripts.ScriptAPITests.fake_chat(self, request)
@@ -466,6 +466,11 @@ class ScriptVideoAPITests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_manuscript_without_idea_preserves_text_and_selected_video_model(self):
         content = '阿青拿起行李，停下看向列車。\n他輕聲說：「等我一下。」隨後登車。'
+        # This mock must honor the source manuscript's exact speech, rather
+        # than returning the unrelated default fixture's 「我們回家吧。」.
+        storyboard = copy.deepcopy(STORYBOARD)
+        storyboard["scenes"][0]["shots"][0]["dialogue"] = "等我一下。"
+        self.storyboard_reply = json.dumps(storyboard, ensure_ascii=False)
         project = await self.project(idea="", content=content, video_settings={
             "aspect_ratio": "9:16", "megapixels": 0.4, "video_model": "fasth3_omni_nvfp4"})
         pipeline = await self.start_pipeline(project, source_mode="manuscript", project_revision=project["revision"])
@@ -488,6 +493,7 @@ class ScriptVideoAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.manager.get_project(project["id"]), project)
         plans = self.renderer.plans[result["shortfilm_id"]]
         self.assertTrue(all(plan["payload"]["video_model"] == "fasth3_omni_nvfp4" for plan in plans))
+        self.assertEqual(sum(compile_request(plan["payload"]).prompt.count("等我一下。") for plan in plans), 1)
 
     async def test_explicit_manuscript_rejects_blank_content_even_when_an_idea_exists(self):
         project = await self.project(idea="一名旅人趕上最後一班列車。", content=" \n\t ")

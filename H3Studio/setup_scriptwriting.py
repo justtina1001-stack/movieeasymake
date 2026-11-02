@@ -43,8 +43,25 @@ HERMES_CHAT_TEMPLATE = '''{{ if .System }}<|im_start|>system
 HERMES_JINJA_SHA256 = "fa3d3eab6e9e7ffeef38e38a737d2a665e0dfd2f73a4e375faaf37febe516b3e"
 HERMES_PARAMETERS = {"temperature": .6, "top_p": .95, "top_k": 20,
                      "repeat_penalty": 1, "stop": ["<|im_start|>", "<|im_end|>"]}
-MODELS = {DEFAULT_MODEL, "qwen3.8:27b", "qwen3.5:9b", "gemma4:12b"}
-MODEL_DISK_GIB = {DEFAULT_MODEL: 14, "qwen3.8:27b": 22, "qwen3.5:9b": 10, "gemma4:12b": 10}
+# Broad tags can now select different runners. Keep these roles on the reviewed
+# llama.cpp/GGUF artifacts, and verify the complete native manifest before aliasing.
+PINNED_NATIVE_MODELS = {
+    "gemma4:12b": {
+        "source": "gemma4:12b-it-q4_K_M",
+        "manifest_sha256": "6114515d63c17436a7c0417d82820ac65ad643e2806c5a3c89cb62846436ed0b",
+        "model_sha256": "bb722270d54346adc198f213851dbe0207e87c3ecf2a0aff4d92262726215391",
+        "family": "gemma4", "quantization": "Q4_K_M",
+    },
+    "qwen3.5:4b": {
+        "source": "qwen3.5:4b-q4_K_M",
+        "manifest_sha256": "d8b0f5e9760cd1682034f292d7ef72ec46f432149be0df7574bf2d6e92e38c04",
+        "model_sha256": "a9d0a3e1d8c91732a3812becd31f8d4a8ff57414903f226306069f0437e2ac50",
+        "family": "qwen35", "quantization": "Q4_K_M",
+    },
+}
+MODELS = {DEFAULT_MODEL, "qwen3.8:27b", "qwen3.5:9b", *PINNED_NATIVE_MODELS}
+MODEL_DISK_GIB = {DEFAULT_MODEL: 14, "qwen3.8:27b": 22, "qwen3.5:9b": 10,
+                  "gemma4:12b": 10, "qwen3.5:4b": 5}
 BASE_URL = "http://127.0.0.1:11434"
 
 
@@ -286,6 +303,56 @@ def verify_hermes_template(shown: dict) -> None:
         raise RuntimeError("Hermes 實際使用的 ChatML 模板驗證失敗。")
 
 
+async def verify_native_model(session: aiohttp.ClientSession, installed: dict, spec: dict) -> dict:
+    details = installed.get("details", {})
+    if (installed.get("remote_host") or installed.get("remote_model")
+            or installed.get("digest", "").removeprefix("sha256:") != spec["manifest_sha256"]
+            or details.get("format") != "gguf" or details.get("family") != spec["family"]
+            or details.get("quantization_level") != spec["quantization"]):
+        raise RuntimeError("模型版本、GGUF 格式或量化與固定的本地版本不符；既有別名保留。")
+    async with session.post(BASE_URL + "/api/show", json={"model": installed["name"]}, allow_redirects=False) as response:
+        response.raise_for_status()
+        shown = await response.json()
+    if shown.get("remote_host") or shown.get("remote_model"):
+        raise RuntimeError("此模型必須使用本地權重。")
+    match = re.search(r"(?mi)^FROM[ \t]+([^\r\n]+)[ \t]*$", str(shown.get("modelfile", "")))
+    blob = match.group(1).strip().strip('\"\'') if match else ""
+    if blob.replace("\\", "/").rsplit("/", 1)[-1] != "sha256-" + spec["model_sha256"]:
+        raise RuntimeError("模型 GGUF 的 SHA-256 與固定版本不符；既有別名保留。")
+    capabilities, template = shown.get("capabilities"), shown.get("template")
+    if (not isinstance(capabilities, list) or "completion" not in capabilities
+            or not isinstance(template, str) or not template.strip()):
+        raise RuntimeError("本地模型缺少文字生成能力或對話模板，未標記安裝完成。")
+    return shown
+
+
+async def publish_native_alias(session: aiohttp.ClientSession, model: str, source: dict, spec: dict) -> tuple[dict, dict]:
+    async with session.get(BASE_URL + "/api/tags", allow_redirects=False) as response:
+        response.raise_for_status()
+        tags = await response.json()
+    existing = next((item for item in tags.get("models", []) if item.get("name") == model), None)
+    if existing is not None:
+        # Re-running must not silently replace a customized or older local alias.
+        return existing, await verify_native_model(session, existing, spec)
+    async with session.post(BASE_URL + "/api/copy", json={"source": source["name"], "destination": model}, allow_redirects=False) as response:
+        response.raise_for_status()
+    installed = await local_model(session, model)
+    return installed, await verify_native_model(session, installed, spec)
+
+
+def save_install_record(model: str, installed: dict, verification: dict | None = None) -> None:
+    # Different role-model pulls can complete concurrently. Publish whole records
+    # atomically, and keep a separate record for every installed role model.
+    record = {**installed, **({"installer_verification": verification} if verification else {})}
+    records = ROOT / "installed-models"
+    records.mkdir(parents=True, exist_ok=True)
+    for destination in (records / (re.sub(r"[^A-Za-z0-9_.-]+", "_", model) + ".json"),
+                        ROOT / "installed-model.json"):
+        temporary = destination.with_name(destination.name + "." + uuid.uuid4().hex + ".tmp")
+        temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(destination)
+
+
 async def pull_model(model: str) -> None:
     if model not in MODELS:
         raise RuntimeError("此安裝器只接受已核對的本地模型。")
@@ -295,7 +362,8 @@ async def pull_model(model: str) -> None:
         raise RuntimeError(f"安裝 {model} 至少需保留 {needed / 1024**3:.0f} GiB 空間。")
     timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=600)
     async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-        source_model = HERMES_SOURCE if model == DEFAULT_MODEL else model
+        native_spec = PINNED_NATIVE_MODELS.get(model)
+        source_model = HERMES_SOURCE if model == DEFAULT_MODEL else native_spec["source"] if native_spec else model
         async with session.post(BASE_URL + "/api/pull", json={"model": source_model, "stream": True}, allow_redirects=False) as response:
             response.raise_for_status()
             previous = None
@@ -317,7 +385,14 @@ async def pull_model(model: str) -> None:
             if not success:
                 raise RuntimeError("模型下載串流提前結束，可重新執行安裝器續傳。")
         installed = await local_model(session, source_model)
-        if model == DEFAULT_MODEL:
+        verification = None
+        if native_spec:
+            await verify_native_model(session, installed, native_spec)
+            installed, shown = await publish_native_alias(session, model, installed, native_spec)
+            verification = {**native_spec, "selected_template_sha256": hashlib.sha256(shown["template"].encode("utf-8")).hexdigest(),
+                            "capabilities": shown.get("capabilities", []), "installer_runtime_version": VERSION,
+                            "inference_performed": False}
+        elif model == DEFAULT_MODEL:
             await verify_hermes(session, installed)
             # Keep the original source intact. The local alias shares its GGUF
             # weights, but explicitly selects Hermes' plain ChatML mode.
@@ -331,7 +406,7 @@ async def pull_model(model: str) -> None:
             installed = await local_model(session, model)
             shown = await verify_hermes(session, installed)
             verify_hermes_template(shown)
-        (ROOT / "installed-model.json").write_text(json.dumps(installed, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_install_record(model, installed, verification)
         print(f"Installed local model {model}; no inference or GPU allocation performed.", flush=True)
 
 

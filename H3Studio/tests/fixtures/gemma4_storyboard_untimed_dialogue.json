@@ -1,0 +1,40 @@
+{
+  "title": "驗收｜Gemma 4／Hermes 同稿比較",
+  "synopsis": "在夜間遺跡中，道士玄青將一枚發出暖金光芒的玉簡交付給信使小羽，小羽接過任務後前往出口，玄青在原地目送。",
+  "characters": [
+    {
+      "name": "玄青",
+      "type": "character",
+      "reference": "",
+      "description": "成年男道士，身著白袍，神情沉穩。"
+    },
+    {
+      "name": "小羽",
+      "type": "character",
+      "reference": "",
+      "description": "成年女信使，身著深藍色短披風，眼神堅定。"
+    }
+  ],
+  "scenes": [
+    {
+      "title": "夜間遺跡交接",
+      "location": "夜間遺跡石台",
+      "time_of_day": "夜",
+      "description": "精緻動畫風格，藍色環境光與石台暖金反光。環境中僅有風聲與衣料摩擦音。",
+      "shots": [
+        {
+          "title": "交付",
+          "duration": 15,
+          "action": "Xuanqing stands on the left side of the stone platform, Xiaoyu stands on the right, facing each other at an arm's length. Xuanqing holds a single jade slip in his right hand, looking at Xiaoyu before extending his hand towards the center. Xiaoyu looks down at the jade slip. [Shot 2] At 00:05.000, the camera cuts to a close-up of their hands. Xiaoyu's hands enter from the right to firmly grasp the jade slip. Xuanqing confirms and releases his hand, withdrawing it. The jade slip remains in Xiaoyu's hands. [Shot 3] At 00:10.000, the camera cuts to a wide shot. Xiaoyu holds the jade slip against her chest, turns toward the exit on the right, and walks out of the frame. Xuanqing remains at the platform, watching her leave. No one else appears.",
+          "dialogue": "玄青(S1) says <d>[Chinese] 天亮前，別回頭。</d>\n小羽(S2) says <d>[Chinese] 我會把它帶回來。</d>",
+          "speaker": "",
+          "sound": "Wind whistling, fabric rustling, sound of jade slip touching palms, footsteps fading into the distance.",
+          "camera": "custom",
+          "camera_detail": "00:00.000-00:05.000: 50mm medium shot, eye-level, static. 00:05.000-00:10.000: 85mm close-up of hands, slow push-in to the contact point, then static. 00:10.000-00:15.000: 35mm wide shot, static, maintaining the original axis.",
+          "shot_size": "medium",
+          "ending": "15.0s cut to black."
+        }
+      ]
+    }
+  ]
+}

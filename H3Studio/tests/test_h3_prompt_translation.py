@@ -4,16 +4,16 @@ import asyncio
 import json
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from h3_prompt_translation import H3PromptTranslator, _mask, _restore
+from h3_prompt_translation import H3PromptTranslator, _LEGACY_WARNING, _mask, _restore
 
 
 class TranslationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.app = {"scriptwriting": SimpleNamespace(settings={"base_url": "http://127.0.0.1:11434", "model": "local-writer"})}
+        self.app = {"scriptwriting": SimpleNamespace(settings={"base_url": "http://127.0.0.1:11434", "model": "local-writer", "translation_model": "local-translator"})}
         self.translator = H3PromptTranslator(self.app)
 
         async def translate(values, settings):
@@ -62,6 +62,22 @@ class TranslationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third["prompt"], second["prompt"])
         self.translator._request.assert_awaited_once()
 
+    async def test_writer_changes_preserve_cache_but_translator_changes_retranslate(self):
+        raw = {"prompt": "向左走", "seed": 1}
+        first = await self.translator.prepare(raw)
+        settings = self.app["scriptwriting"].settings
+        self.assertEqual(first["h3_translation"]["model"], "local-translator")
+        settings.update(model="gemma4:12b", temperature=0.2, vision_model="other-vision")
+        same = await self.translator.prepare(raw)
+        self.assertEqual(same["prompt"], first["prompt"])
+        self.translator._request.assert_awaited_once()
+        settings["translation_model"] = "second-translator"
+        changed = await self.translator.prepare(raw)
+        self.assertEqual(changed["h3_translation"]["model"], "second-translator")
+        self.assertEqual(self.translator._request.await_count, 2)
+        self.assertEqual(self.translator._request.await_args.args[1],
+                         {"base_url": settings["base_url"], "translation_model": "second-translator"})
+
     async def test_model_failure_retains_directions_and_reports_unavailable(self):
         self.translator._request.side_effect = TimeoutError()
         raw = {"prompt": "角色向左走", "references": [{"alias": "角色"}]}
@@ -69,6 +85,11 @@ class TranslationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["prompt"], raw["prompt"])
         self.assertEqual(result["h3_translation"]["status"], "unavailable")
         self.assertTrue(result["h3_preparation_warnings"])
+
+    async def test_successful_retry_clears_legacy_shared_writer_warning(self):
+        result = await self.translator.prepare({"prompt": "向左走", "h3_preparation_warnings": [_LEGACY_WARNING]})
+        self.assertEqual(result["h3_translation"]["status"], "translated")
+        self.assertNotIn(_LEGACY_WARNING, result["h3_preparation_warnings"])
 
     async def test_one_bad_field_never_commits_partial_translation(self):
         async def bad(values, settings):
@@ -145,6 +166,13 @@ class TranslationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LocalRequestTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_translation_selection_never_falls_back_to_writer(self):
+        with patch("h3_prompt_translation.aiohttp.ClientSession") as session:
+            with self.assertRaises(ValueError):
+                await H3PromptTranslator({})._request({"0": "walk left"},
+                    {"base_url": "http://127.0.0.1:11434", "model": "installed-writer"})
+            session.assert_not_called()
+
     async def test_local_request_uses_cpu_and_releases_model(self):
         calls = []
         app = web.Application()
@@ -172,9 +200,10 @@ class LocalRequestTests(unittest.IsolatedAsyncioTestCase):
             translator = H3PromptTranslator({})
             sent = {"0": "H3KEEPABCDEF123456X0000X walks beside H3KEEPABCDEF123456X0001X."}
             result = await translator._request(sent,
-                                                {"base_url": str(server.make_url("/")), "model": "writer"})
+                                                {"base_url": str(server.make_url("/")), "model": "unrelated-writer", "translation_model": "writer"})
             self.assertEqual(result, sent)
             self.assertEqual(calls[0]["options"]["num_gpu"], 0)
+            self.assertEqual(calls[0]["model"], "writer")
             self.assertIs(calls[0]["think"], False)
             self.assertEqual(calls[0]["keep_alive"], 0)
             self.assertEqual(calls[0]["format"]["required"], ["0"])
@@ -198,7 +227,7 @@ class LocalRequestTests(unittest.IsolatedAsyncioTestCase):
         try:
             with self.assertRaises(ValueError):
                 await H3PromptTranslator({})._request({"0": "source"},
-                    {"base_url": str(server.make_url("/")), "model": "writer"})
+                    {"base_url": str(server.make_url("/")), "model": "unrelated-writer", "translation_model": "writer"})
             chat.assert_not_awaited()
         finally:
             await server.close()

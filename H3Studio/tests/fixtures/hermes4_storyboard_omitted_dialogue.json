@@ -1,0 +1,40 @@
+{
+  "characters": [
+    {
+      "description": "玄青：成年男道士，白袍，沉穩。小羽：成年女信使，深藍短披風，堅定。僅此兩人。",
+      "name": "玄青",
+      "reference": "",
+      "type": "character"
+    },
+    {
+      "description": "玄青：成年男道士，白袍，沉穩。小羽：成年女信使，深藍短披風，堅定。僅此兩人。",
+      "name": "小羽",
+      "reference": "",
+      "type": "character"
+    }
+  ],
+  "scenes": [
+    {
+      "description": "夜間遺跡的同一座石台旁，精緻動畫風格，藍色環境光與石台暖金反光。玄青在左側，小羽在右側。",
+      "location": "遺跡",
+      "shots": [
+        {
+          "action": "玄青右手拿唯一一枚玉簡，先看向小羽，再將右手伸向畫面中央。",
+          "camera": "static",
+          "camera_detail": "50mm中景，固定。",
+          "dialogue": "",
+          "duration": 15,
+          "ending": "切黑",
+          "shot_size": "medium",
+          "sound": "風聲與衣料摩擦。",
+          "speaker": "",
+          "title": "交付"
+        }
+      ],
+      "time_of_day": "夜間",
+      "title": "交付"
+    }
+  ],
+  "synopsis": "精緻動畫風格，夜間遺跡，藍色環境光與石台暖金反光。玄青與小羽在石台旁交換玉簡。",
+  "title": "驗收｜Gemma 4／Hermes 同稿比較"
+}

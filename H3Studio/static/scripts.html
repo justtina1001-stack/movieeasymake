@@ -32,9 +32,11 @@
     <details id="scriptSettings" class="script-settings">
       <summary>本機模型與生成設定<span>OLLAMA</span></summary>
       <form id="scriptSettingsForm">
-        <div class="script-settings-grid"><label>Ollama 本機網址<input id="scriptBaseUrl" type="url" value="http://127.0.0.1:11434" required autocomplete="off"></label><label>劇本編寫模型<select id="scriptModel" required><option value="">正在載入…</option></select></label><label>圖片分析模型<select id="scriptVisionModel"><option value="qwen3.8:27b">qwen3.8:27b</option></select></label></div>
-        <p class="script-hint">預設：Hermes 4 14B Q5_K_M，適合角色創作與成熟劇情。已安裝的 Qwen3.8 27B 可切換使用；速度優先可另裝 Qwen3.5 9B。模型選單只顯示這台主機實際安裝的版本。</p>
+        <div class="script-settings-grid"><label>Ollama 本機網址<input id="scriptBaseUrl" type="url" value="http://127.0.0.1:11434" required autocomplete="off"></label><label>劇本編寫模型<select id="scriptModel" required><option value="">正在載入…</option></select></label><label>圖片分析模型<select id="scriptVisionModel"><option value="qwen3.8:27b">qwen3.8:27b</option></select></label><label>英文整理模型<select id="scriptTranslationModel" disabled><option value="">正在載入…</option></select></label></div>
+        <p class="script-hint">劇本編寫、圖片分析與英文整理可分別選擇本機模型。Gemma 4 12B、Hermes 與其他模型會依主機的實際安裝清單提供切換；已保存但缺少的模型會另外標示。</p>
         <p id="scriptVisionStatus" class="script-hint" role="status" aria-live="polite">正在檢查圖片分析模型…</p>
+        <p class="script-hint">英文整理用於影片生成前的敘述準備，獨立於編劇與圖片分析；更換劇本編寫模型不會連動更換英文整理模型。</p>
+        <p id="scriptTranslationStatus" class="script-hint" role="status" aria-live="polite">正在檢查英文整理模型…</p>
         <details class="script-advanced"><summary>進階生成參數</summary><div class="script-settings-grid script-settings-advanced"><label>創意溫度<input id="scriptTemperature" type="number" min="0" max="2" step="0.05" value="0.8" required></label><label>上下文 Token<input id="scriptContext" type="number" min="2048" max="131072" step="1024" value="8192" required></label><label>最大輸出 Token<input id="scriptMaxOutput" type="number" min="256" max="32768" step="256" value="4096" required></label></div></details>
         <div class="script-settings-bottom"><p>首次使用：在工具根目錄執行 <code>setup_scriptwriting.bat</code>，完成後按「重新檢查」。模型與設定保存在 Studio 主機。</p><button id="saveScriptSettings" class="button secondary" type="submit">儲存模型設定</button></div>
       </form>
@@ -122,7 +124,7 @@
     <footer class="script-page-footer">MiniMax H3 Studio <span>從文字開始，把故事帶到畫面。</span></footer>
   </main>
   <script src="/static/lora-help.js?v=20261005-lora-recommendations" defer></script>
-  <script src="/static/scripts.js?v=20261029-prompt-review" defer></script>
+  <script src="/static/scripts.js?v=20261102-independent-translation" defer></script>
   <script src="/static/workspace_ui.js?v=20261030-sfx"></script>
 </body>
 </html>

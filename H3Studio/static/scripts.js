@@ -886,7 +886,7 @@ if (typeof document !== "undefined") {
     $("scriptTemperature").value = settings.temperature ?? 0.8;
     $("scriptContext").value = settings.num_ctx || 8192;
     $("scriptMaxOutput").value = settings.num_predict || 4096;
-    for (const [id, setting, fallback] of [["scriptModel", "model", ""], ["scriptVisionModel", "vision_model", "qwen3.8:27b"]]) {
+    for (const [id, setting, fallback] of [["scriptModel", "model", ""], ["scriptVisionModel", "vision_model", "qwen3.8:27b"], ["scriptTranslationModel", "translation_model", settings.model || ""]]) {
     const select = $(id);
     select.replaceChildren();
     if (!models.length) select.add(new Option("尚未找到已安裝模型", ""));
@@ -914,6 +914,8 @@ if (typeof document !== "undefined") {
       if (!status || typeof status !== "object" || typeof status.ready !== "boolean") throw new Error("主機狀態回應不完整，暫時無法確認連線與功能；請稍後重新檢查。");
       state.ready = Boolean(status.ready);
       state.visionReady = Boolean(status.vision_ready);
+      state.translationSupported = typeof status.translation_ready === "boolean";
+      state.translationReady = status.translation_ready === true;
       state.referencesSupported = status.character_references_supported === true;
       state.referencesSupportKnown = true;
       if (state.referencesSupported && state.messageKind === "references-support") message("");
@@ -935,12 +937,16 @@ if (typeof document !== "undefined") {
       $("scriptEngineStatus").textContent = state.ready ? `本機模型已就緒 · ${state.settings.model || "Ollama"}` : "本機模型尚未就緒";
       $("scriptEngineDetail").textContent = state.ready ? `Ollama ${state.settings.base_url || "http://127.0.0.1:11434"} · 生成在 Studio 主機執行` : status.error || "請執行 setup_scriptwriting.bat 安裝 Ollama 與模型，再重新檢查。";
       $("scriptVisionStatus").textContent = state.visionReady ? `圖片分析已就緒 · ${state.settings.vision_model || "qwen3.8:27b"}` : status.vision_error || "圖片分析模型尚未就緒；仍可手寫外觀描述並編寫劇本。";
+      $("scriptTranslationModel").disabled = state.settingsSaving || !state.translationSupported;
+      $("scriptTranslationStatus").textContent = !state.translationSupported ? "這台主機尚未提供獨立英文整理模型設定，請更新並重啟 Studio；目前編劇設定仍可使用。" : state.translationReady ? `英文整理已就緒 · ${state.settings.translation_model || state.settings.model || "Ollama"}` : status.translation_error || "英文整理模型尚未就緒；可先編寫劇本，生成影片前請重新檢查。";
       $("scriptVideoReadyStatus").textContent = !state.videoPipelinesSupported ? "自動影片功能尚未就緒；請重新啟動更新後的 Studio。" : state.videoReady ? "多模態影片已就緒；完成劇本後可接續製作。" : state.videoError || "影片引擎尚未就緒；先在影片工作室檢查連線與模型。";
       if (state.skillsSupported) await loadWritingSkills();
       if (state.videoPipelinesSupported) await loadPipelines();
     } catch (error) {
       state.ready = false;
       state.visionReady = false;
+      state.translationReady = false;
+      state.translationSupported = false;
       state.videoReady = false;
       state.manuscriptVideoSupported = false;
       state.promptReviewSupported = false;
@@ -950,6 +956,8 @@ if (typeof document !== "undefined") {
       $("scriptEngineStatus").textContent = "無法取得本機模型狀態";
       $("scriptEngineDetail").textContent = error.message;
       $("scriptVisionStatus").textContent = "暫時無法取得圖片分析狀態；可先手寫外觀。";
+      $("scriptTranslationModel").disabled = true;
+      $("scriptTranslationStatus").textContent = "暫時無法取得英文整理模型狀態；已選設定與草稿保留。";
       $("scriptVideoReadyStatus").textContent = "暫時無法取得影片引擎狀態。";
       if (!state.skillsCatalogReady) state.skillsError = "暫時無法確認主機連線與創作 Skill 功能；可繼續編輯。";
     } finally { $("refreshScriptEngine").disabled = false; renderWritingSkillDetails(); renderScriptLoras(); updateControls(); }
@@ -960,18 +968,22 @@ if (typeof document !== "undefined") {
     const baseUrl = $("scriptBaseUrl").value.trim().replace(/\/$/, "");
     if (!scriptLocalEndpoint(baseUrl)) { message("Ollama 網址請使用本機位址，例如 http://127.0.0.1:11434。", true); return; }
     if (!$("scriptModel").value) { message("請先安裝本機模型，再重新檢查並選擇模型。", true); return; }
+    if (state.translationSupported && !$("scriptTranslationModel").value) { message("請選擇英文整理使用的本機模型；它與劇本編寫模型分開設定。", true); return; }
     if (Number($("scriptMaxOutput").value) >= Number($("scriptContext").value)) { message("最大輸出 Token 必須小於上下文 Token。上下文也需要保留空間給故事設定與既有劇本。", true); return; }
     state.settingsSaving = true;
     $("saveScriptSettings").disabled = true;
-    ["scriptBaseUrl", "scriptModel", "scriptVisionModel", "scriptTemperature", "scriptContext", "scriptMaxOutput"].forEach(id => { $(id).disabled = true; });
+    ["scriptBaseUrl", "scriptModel", "scriptVisionModel", "scriptTranslationModel", "scriptTemperature", "scriptContext", "scriptMaxOutput"].forEach(id => { $(id).disabled = true; });
     updateControls();
     try {
-      state.settings = await api("/api/scripts/settings", { method: "POST", body: JSON.stringify({ base_url: baseUrl, model: $("scriptModel").value, vision_model: $("scriptVisionModel").value || "qwen3.8:27b", temperature: Number($("scriptTemperature").value), num_ctx: Number($("scriptContext").value), num_predict: Number($("scriptMaxOutput").value) }) });
+      const selectedTranslation = state.translationSupported ? $("scriptTranslationModel").value : null;
+      const saved = await api("/api/scripts/settings", { method: "POST", body: JSON.stringify({ base_url: baseUrl, model: $("scriptModel").value, vision_model: $("scriptVisionModel").value || "qwen3.8:27b", ...(selectedTranslation !== null ? { translation_model: selectedTranslation } : {}), temperature: Number($("scriptTemperature").value), num_ctx: Number($("scriptContext").value), num_predict: Number($("scriptMaxOutput").value) }) });
+      if (selectedTranslation !== null && saved.translation_model !== selectedTranslation) throw new Error("主機未保存所選的英文整理模型；目前選擇與草稿已保留，請更新 Studio 後再儲存。");
+      state.settings = saved;
       state.settingsDirty = false;
       await refreshEngine({ resetSettings: true });
-      message("本機模型設定已儲存。設定會套用至接下來送出的寫作工作。");
+      message(state.translationSupported ? "本機模型設定已儲存。編劇、圖片分析與英文整理會分別使用所選模型，套用至接下來送出的工作。" : "本機模型設定已儲存。設定會套用至接下來送出的寫作工作；獨立英文整理設定需更新主機後使用。");
     } catch (error) { message(error.message, true); }
-    finally { state.settingsSaving = false; $("saveScriptSettings").disabled = false; ["scriptBaseUrl", "scriptModel", "scriptVisionModel", "scriptTemperature", "scriptContext", "scriptMaxOutput"].forEach(id => { $(id).disabled = false; }); updateControls(); }
+    finally { state.settingsSaving = false; $("saveScriptSettings").disabled = false; ["scriptBaseUrl", "scriptModel", "scriptVisionModel", "scriptTemperature", "scriptContext", "scriptMaxOutput"].forEach(id => { $(id).disabled = false; }); $("scriptTranslationModel").disabled = !state.translationSupported; updateControls(); }
   }
 
   function renderHistory() {

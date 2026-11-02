@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,11 +33,13 @@ from script_video_format import ScriptVideoFormatError, normalize_video_settings
 from custom_loras import normalize_loras, validate_loras_for_family, validate_lora_requirements
 from video_models import FIXED_RECIPE_MODELS
 from h3_official_policy import official_storyboard_rules, OFFICIAL_PROMPT_VERSION
+from dialogue import format_dialogue, _quoted_spans
 
 
 DEFAULT_SETTINGS = {
     "base_url": "http://127.0.0.1:11434", "model": "h3-script-hermes4:14b-q5_k_m",
     "vision_model": "qwen3.8:27b",
+    "translation_model": "h3-script-hermes4:14b-q5_k_m",
     "num_ctx": 8192, "num_predict": 4096, "temperature": 0.8,
 }
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -46,6 +50,7 @@ MAX_CONTENT = 300_000
 MAX_WIRE_BYTES = 4_000_000
 STORYBOARD_AUTO_CONTEXT_LIMIT = 16_384
 CONTEXT_ALLOCATION_STEP = 2_048
+STORYBOARD_SCHEMA_VERSION = "20261102-canonical-timed-dialogue-v1"
 FIELD_LIMITS = {
     "title": 120, "idea": 12000, "genre": 200, "characters": 12000,
     "style": 4000, "instructions": 12000, "content": MAX_CONTENT,
@@ -115,10 +120,15 @@ def is_cloud_model(item: Any) -> bool:
 def normalize_settings(raw: Any, previous: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) - set(DEFAULT_SETTINGS):
         raise ScriptwritingError("寫作設定格式錯誤。")
-    result = dict(previous or DEFAULT_SETTINGS)
+    result = dict(DEFAULT_SETTINGS)
+    result.update(previous or {})
     result.update(raw)
+    if "translation_model" not in raw and (previous is None or "translation_model" not in previous):
+        # Snapshot the old shared choice once. Subsequent writer switches must
+        # never silently change the English preparation model.
+        result["translation_model"] = (previous or raw).get("model", DEFAULT_SETTINGS["model"])
     result["base_url"] = local_base_url(result["base_url"])
-    for key in ("model", "vision_model"):
+    for key in ("model", "vision_model", "translation_model"):
         model = result[key]
         if not isinstance(model, str) or not MODEL_NAME.fullmatch(model) or is_cloud_model({"name": model}):
             raise ScriptwritingError("請選擇已下載的本機模型名稱，不可使用雲端模型。")
@@ -436,6 +446,123 @@ def parse_storyboard(content: str, *, target_duration: float | None = None) -> d
     return storyboard
 
 
+def storyboard_response_schema(target_duration: float) -> dict[str, Any]:
+    """Constrain new model output while retaining the historical parser contract.
+
+    One generated scene is a clip container, not a restriction to one location;
+    prescribed internal cuts, scene changes and timed speech remain in action.
+    """
+    def text(limit: int, *, required: bool = False) -> dict[str, Any]:
+        return {"type": "string", "maxLength": limit, **({"minLength": 1} if required else {})}
+
+    def record(fields: dict[str, Any]) -> dict[str, Any]:
+        return {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
+
+    one_clip = target_duration <= 15
+    duration = {"type": "number", "minimum": 5, "maximum": 15}
+    if one_clip:
+        duration["enum"] = [target_duration]
+    shot = record({
+        "title": text(80, required=True), "duration": duration,
+        "action": {**text(5000, required=True),
+                   "description": "English visual action, exact original names, prescribed local cut times and each named speech event together at its original time."},
+        "dialogue": {"type": "string", "enum": [""]},
+        "speaker": {"type": "string", "enum": [""]},
+        "sound": text(1200 - len(NO_BGM_SOUNDSCAPE) - 1),
+        "camera": {"type": "string", "enum": sorted(CAMERAS)},
+        "camera_detail": text(800),
+        "shot_size": {"type": "string", "enum": sorted(SHOT_SIZES)},
+        "ending": text(1200),
+    })
+    scene = record({
+        "title": text(80, required=True), "location": text(200), "time_of_day": text(120),
+        "description": text(1800),
+        "shots": {"type": "array", "minItems": 1, "maxItems": 1 if one_clip else 500, "items": shot},
+    })
+    return record({
+        "title": text(80, required=True), "synopsis": text(5000),
+        "characters": {"type": "array", "maxItems": 64, "items": record({
+            "name": text(60, required=True), "type": {"type": "string", "enum": sorted(ASSET_TYPES)},
+            "reference": text(60), "description": text(1200),
+        })},
+        "scenes": {"type": "array", "minItems": 1, "maxItems": 1 if one_clip else 100, "items": scene},
+    })
+
+
+def _tagged_spoken_utterances(text: str) -> list[str]:
+    """Read spoken tags, excluding printed/quoted markup and visible-text labels."""
+    quotations = list(_quoted_spans(text))
+    result = []
+    for match in re.finditer(r"<d>((?:(?!<d>|</d>).)*)</d>", text, re.DOTALL):
+        if any(start <= match.start() < end for start, end in quotations):
+            continue
+        clause = re.split(r"[\n。！？.!?；;]", text[:match.start()])[-1]
+        if re.search(r"(?:字幕|字卡|招牌(?:文字)?|標語|标语|螢幕文字|屏幕文字|"
+                     r"(?:screen|visible)\s+text|captions?|subtitles?|sign(?:age)?)\s*"
+                     r"(?:reads?|displays?|shows?|寫著|写着|顯示|显示|文字)?\s*[:：]?\s*$", clause, re.I):
+            continue
+        # The leading language annotation is metadata; spoken punctuation and
+        # internal spacing remain exact, rather than being paraphrased/folded.
+        utterance = re.sub(r"^\s*\[[^\]\r\n]{1,40}\][ \t]*", "", match[1], count=1).strip()
+        if utterance:
+            result.append(utterance)
+    return result
+
+
+def _required_manuscript_utterances(source: str) -> list[str]:
+    # A bare no-dialogue field is an instruction, while a character explicitly
+    # saying 「無」 or a supplied <d> block is actual speech and stays protected.
+    lines = []
+    for line in source.splitlines(keepends=True):
+        label = re.match(r"^[ \t]*(?:(?:[-*+]|\#{1,6})[ \t]+)?[*_]*(?:對白|对白|台詞|台词)"
+                         r"(?:[（(\[][^）)\]\r\n]{0,30}[）)\]])?[*_]*[ \t]*[:：][*_]*[ \t]*(.*)$", line)
+        if label:
+            body = label[1].strip()
+            if re.fullmatch(r"(?:無|无|沒有|没有|無對白|无对白|無台詞|无台词|none|n/a|no dialogue)[。.!！]?",
+                            re.sub(r"[*_]", "", body), re.I):
+                continue
+            # Nested, unquoted speaker labels are ambiguous; do not mandate
+            # that a speaker name itself be read as dialogue.
+            if "<d>" not in body and not re.search(r'[「『“"]', body) and re.search(r"[:：]", body):
+                continue
+        lines.append(line)
+    return _tagged_spoken_utterances(format_dialogue("".join(lines)))
+
+
+def storyboard_dialogue_retention(storyboard: dict[str, Any], source: str) -> dict[str, Any]:
+    """Count exact mandated speech in new output without inferring speakers/time.
+
+    This intentionally checks explicit manuscript speech only. Titles, synopsis,
+    camera prose, subtitles and character descriptions cannot satisfy a line.
+    """
+    required = Counter(_required_manuscript_utterances(source))
+    actual = Counter()
+    for scene in storyboard.get("scenes", []):
+        for shot in scene.get("shots", []):
+            actual.update(_tagged_spoken_utterances(shot.get("action", "")))
+            dialogue = shot.get("dialogue", "")
+            if dialogue:
+                formatted = format_dialogue(dialogue, dialogue_field=True)
+                spoken = _tagged_spoken_utterances(formatted)
+                # A valid legacy field with a real speaker may literally say
+                # "無"; its nonempty field is speech, not a silent placeholder.
+                actual.update(spoken if "<d>" in formatted else [dialogue.strip()])
+    missing = sum(max(count - actual[line], 0) for line, count in required.items())
+    duplicate = sum(max(actual[line] - count, 0) for line, count in required.items())
+    return {"version": "explicit-manuscript-speech-v1", "required_count": sum(required.values()),
+            "matched_count": sum(min(actual[line], count) for line, count in required.items()),
+            "missing_count": missing, "duplicate_count": duplicate,
+            "passed": missing == 0 and duplicate == 0}
+
+
+def _require_storyboard_dialogue_retention(report: dict[str, Any]) -> None:
+    if not report["passed"]:
+        raise ScriptwritingError(
+            f"分鏡未逐字保留指定台詞或次數不符（缺少 {report['missing_count']} 句、重複 {report['duplicate_count']} 句）。"
+            "原生成內容已保留；請檢查後重新整理分鏡，不會自動補詞或重試。"
+        )
+
+
 def readable_job(job: dict[str, Any]) -> dict[str, Any]:
     """Derive an editable-reading view without rewriting saved history or engine data."""
     result = copy.deepcopy(job)
@@ -522,20 +649,24 @@ def build_messages(project: dict[str, Any], action: str, instructions: str) -> l
             "輸出單一有效 JSON，不要 Markdown、解說或思考過程。結構："
             '{"title":"片名","synopsis":"摘要","characters":[{"name":"素材名","type":"character","reference":"圖一或空字串","description":"描述"}],'
             '"scenes":[{"title":"場次","location":"地點","time_of_day":"日或夜","description":"空間/風格/連續性",'
-            f'"shots":[{{"title":"影片片段","duration":{min(project["duration"], 15):g},"action":"Opening visible action. [Shot 2] At 00:02.000, the camera cuts to the next view and the action continues.",'
-            '"dialogue":"對白或空字串","speaker":"角色名或空字串","sound":"環境音/音效，零BGM",'
+            f'"shots":[{{"title":"影片片段","duration":{min(project["duration"], 15):g},"action":"Opening visible action with the original named speaker and exact dialogue at its prescribed time. [Shot 2] At 00:02.000, the next prescribed view and action continue.",'
+            '"dialogue":"","speaker":"","sound":"環境音/音效，零BGM",'
             '"camera":"custom","camera_detail":"依時間段運鏡","shot_size":"medium","ending":"最後反應/定格/切黑"}]}]}。'
             f"所有shots的duration加總必須恰好{duration}秒，不是每段都{duration}秒。"
             "每個shots項目是5～15秒生成片段。短於5秒的切鏡保留在action內，不延長；15秒內完整故事優先使用單一片段，duration等於目標片長。"
+            "本次新輸出的dialogue與speaker固定空字串；所有實際台詞直接放在action內原本發話的切鏡／局部時點，不能另外集中到片段結尾。"
+            "目標不超過15秒時，JSON只用一個scene容器及一個同長shots項目；原稿的換景、切鏡及時點完整寫在action，不代表故事只能在單一地點。"
             "文字劇本的2秒或2.5秒段落是片段內的切鏡，不能逐段複製成shots陣列；同一場景的15秒故事應是一個duration=15的項目，原切鏡時間及細節都放在其action。"
             "上面的動作只是格式佔位示例；使用本次故事，切點依原劇本，不套用示例動作或時間分配。"
             "action首段直接寫內容，不寫[Shot 1]；後續依序使用[Shot 2] At 00:02.000等局部時間碼，嚴格遞增且小於片段duration。"
             "每段保留焦段、機位、位置/距離、表演、運鏡、VFX、聲音及收尾。敘述用英文，素材名稱保留原名，中文台詞不翻譯。"
+            "角色及素材姓名即使在英文action中也逐字使用原名，不音譯、不改成英文拼音；每句台詞的姓名、Sx及原句都保持固定對應。"
             " Keep original asset names in English action. Check visible cast/count/positions/start/end state per cut. "
             "Prefer one event/reaction and few cuts unless prescribed. Show counted objects clearly; preserve events/times/dialogue without replay. "
             "多角色台詞放action：角色名(S1) says <d>[Chinese] 原台詞</d>；依首次實際發聲順序配置S1、S2並跨鏡保持；不發聲的角色與背景不佔編號；dialogue和speaker留空，避免重複。"
             "文字劇本的「對白：無」代表無對白；轉成JSON時dialogue與speaker都填空字串，不把「無」當作台詞或角色；實際指定台詞仍逐字保留。"
-            "單句台詞也可用dialogue及speaker，speaker須為角色/動物。type限character/creature/object/background/style/motion/effect，遺跡為background。"
+            "單句與多角色台詞都使用上述action標記；不要將說話者前綴或<d>區塊放入dialogue欄。type限character/creature/object/background/style/motion/effect，遺跡為background。"
+            "每個片段的action、camera_detail及ending時間都以該片段0秒為起點，不超過該片段duration；全片最後切黑只放最後片段，不在每個5秒片段重複寫全片15秒切黑。"
             "參考圖標籤放reference，無圖片不捏造外觀。action最多5000字、camera_detail800、ending1200、場景description1800。"
             f"camera 只填支援代號 {', '.join(CAMERAS)}；焦段、機位和運鏡描述放 camera_detail，不放 camera；shot_size 使用 {', '.join(SHOT_SIZES)}。"
             "優先依既有劇本製作分鏡；沒有既有劇本時依故事概念創作。"
@@ -860,6 +991,8 @@ class ScriptwritingManager:
             return False
         try:
             storyboard = parse_storyboard(job["content"], target_duration=project["duration"])
+            if job.get("output_schema_version"):
+                _require_storyboard_dialogue_retention(storyboard_dialogue_retention(storyboard, project.get("content", "")))
         except (ScriptwritingError, ValueError, TypeError):
             return False
         normalization = storyboard.get("storyboard_normalization")
@@ -980,6 +1113,7 @@ class ScriptwritingManager:
         result = {"ready": False, "error": None, "settings": settings, "models": [], "excluded_cloud_models": 0,
                   "character_references_supported": True,
                   "vision_ready": False, "vision_error": None,
+                  "translation_ready": False, "translation_error": None,
                   "local_only": True, "active_jobs": sum(job.get("status") in ACTIVE for job in self.jobs.values())}
         try:
             async with aiohttp.ClientSession(trust_env=False, timeout=aiohttp.ClientTimeout(total=8)) as session:
@@ -996,12 +1130,21 @@ class ScriptwritingManager:
                     result["vision_ready"] = True
                 except ScriptwritingError as error:
                     result["vision_error"] = str(error)
+                try:
+                    translation = await self._check_model(session, {**settings, "model": settings["translation_model"]}, result["models"])
+                    if "completion" not in translation.get("capabilities", []):
+                        raise ScriptwritingError("英文整理模型不支援文字生成；請選擇已下載的本機文字模型。")
+                    result["translation_ready"] = True
+                except ScriptwritingError as error:
+                    result["translation_error"] = str(error)
         except ScriptwritingError as error:
             result["error"] = str(error)
             result["vision_error"] = str(error)
+            result["translation_error"] = str(error)
         except (aiohttp.ClientError, TimeoutError, OSError):
             result["error"] = "無法連線至本機 Ollama；請先啟動 Ollama 並確認位址。"
             result["vision_error"] = result["error"]
+            result["translation_error"] = result["error"]
         return result
 
     def submit(self, raw: Any, *, project_override: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1060,6 +1203,13 @@ class ScriptwritingManager:
                "shortfilm_id": None}
         if reference:
             job.update(reference_id=reference["id"], reference_name=reference["name"])
+        if action == "storyboard":
+            schema = storyboard_response_schema(project["duration"])
+            job["input"]["response_format"] = schema
+            job["output_schema_version"] = STORYBOARD_SCHEMA_VERSION
+            job["output_schema_sha256"] = hashlib.sha256(json.dumps(
+                schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
         self.jobs[job["id"]] = job
         try:
             self._save_jobs(job["id"])
@@ -1151,7 +1301,8 @@ class ScriptwritingManager:
                     payload["messages"] = copy.deepcopy(messages)
                     payload["messages"][-1]["images"] = [encoded]
                 if job["action"] == "storyboard":
-                    payload["format"] = "json"
+                    payload["format"] = copy.deepcopy(job["input"].get("response_format")
+                                                       or storyboard_response_schema(job["input"]["project"]["duration"]))
                 attempted = True
                 async with session.post(settings["base_url"] + "/api/chat", json=payload, allow_redirects=False) as response:
                     self.responses[job_id] = response
@@ -1159,7 +1310,11 @@ class ScriptwritingManager:
                         raise ScriptwritingError(f"Ollama 無法生成（HTTP {response.status}）；請確認模型與可用記憶體。", 502)
                     await self._read_stream(job, response)
                 if job["action"] == "storyboard":
-                    job["storyboard"] = parse_storyboard(job["content"], target_duration=job["input"]["project"]["duration"])
+                    project = job["input"]["project"]
+                    storyboard = parse_storyboard(job["content"], target_duration=project["duration"])
+                    job["dialogue_retention"] = storyboard_dialogue_retention(storyboard, project.get("content", ""))
+                    _require_storyboard_dialogue_retention(job["dialogue_retention"])
+                    job["storyboard"] = storyboard
                 elif job["action"] in {"screenplay", "rewrite"}:
                     readable = normalize_screenplay(job["content"])
                     if readable != job["content"]:
@@ -1300,6 +1455,8 @@ class ScriptwritingManager:
         if store is None:
             raise ScriptwritingError("短片功能尚未啟用。", 503)
         storyboard = validate_storyboard(job.get("storyboard"), target_duration=job["input"]["project"].get("duration"))
+        if job.get("output_schema_version"):
+            _require_storyboard_dialogue_retention(storyboard_dialogue_retention(storyboard, job["input"]["project"].get("content", "")))
         normalization = job["storyboard"].get("storyboard_normalization")
         source_cuts = normalization.get("source_cuts") if isinstance(normalization, dict) else None
         original_speaker_ids = {}
@@ -1459,6 +1616,7 @@ class UnavailableScriptwritingManager(ScriptwritingManager):
             "ready": False, "available": False, "initialization_error": True,
             "error": self.unavailable_error, "settings": self.settings,
             "models": [], "excluded_cloud_models": 0, "local_only": True, "active_jobs": 0,
+            "translation_ready": False, "translation_error": self.unavailable_error,
         }
 
     async def close(self) -> None:

@@ -1,0 +1,40 @@
+{
+  "title": "驗收｜Gemma 4／Hermes 同稿比較",
+  "synopsis": "在深夜的遺跡中，道士玄青與信使小羽進行玉簡任務的交接，小羽護持玉簡走向出口。",
+  "characters": [
+    {
+      "name": "玄青",
+      "type": "character",
+      "reference": "",
+      "description": "成年男道士，身著白袍，神情沉穩。"
+    },
+    {
+      "name": "小羽",
+      "type": "character",
+      "reference": "",
+      "description": "成年女信使，身著深藍短披風，眼神堅定。"
+    }
+  ],
+  "scenes": [
+    {
+      "title": "天亮前的玉簡",
+      "location": "夜間遺跡石台",
+      "time_of_day": "夜",
+      "description": "精緻動畫風格，充滿夜間藍色環境光與石台暖金反光。環境音包含風聲與衣料摩擦。",
+      "shots": [
+        {
+          "title": "交付",
+          "duration": 15,
+          "action": "玄青 stands on the left side of the stone platform, 小羽 stands on the right side, facing each other about an arm's length apart. 玄青 holds the unique jade slip in his right hand, looks at 小羽, and extends his right hand toward the center. 小羽 looks down at the jade slip, not yet touching it. 玄青(S1) says <d>[Chinese] 天亮前，別回頭。</d> [Shot 2] At 00:05.000, a close-up of hands. 小羽's hands enter from the right, and 玄青's hand remains on the left. 小羽 uses both hands to steadily receive the jade slip. 玄青 confirms the handover and releases his hand, withdrawing it. The jade slip remains held by 小羽. 小羽(S2) says <d>[Chinese] 我會把它帶回來。</d> [Shot 3] At 00:10.000, a wide shot. 小羽 holds the jade slip protectively against her chest, turns toward the exit on the far right, and walks out of the frame. 玄青 remains in place, watching her leave. 小羽 does not look back.",
+          "dialogue": "",
+          "speaker": "",
+          "sound": "Wind howling, fabric rustling, sound of jade slip touching palms.",
+          "camera": "custom",
+          "camera_detail": "00:00.000 - 00:05.000: 50mm medium shot, eye level, static. 00:05.000 - 00:10.000: 85mm close-up of hands, slow push-in to the contact point, then stop. 00:10.000 - 00:15.000: 35mm wide shot, static, capturing the empty exit space after 小羽 leaves.",
+          "shot_size": "medium",
+          "ending": "15.0s cut to black."
+        }
+      ]
+    }
+  ]
+}
