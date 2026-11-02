@@ -14,6 +14,8 @@ CAMERA_FILE = "camera_motion_h3_lora_v1_3000_pruned.safetensors"
 PHYSICS_FILE = "wushu_spatial_physics_clean_3000_pruned.safetensors"
 ORBIT_FILE = "minimax_h3_flf2v_lora_v1.safetensors"
 SWAP_FILE = "h3_character_swap_pro4500_1000.safetensors"
+SWAP_V15_FILE = "h3_character_swap_v1.5.safetensors"
+MOTION_REPAIR_FILE = "Motion_Repair_V2.safetensors"
 REALISM_FILE = "h3-realism-people-t2v-i2v-r2v.safetensors"
 ANIMATION_FILE = "3dsrx_minimax_h3_rank16-step00001250.safetensors"
 
@@ -84,7 +86,7 @@ _CUSTOM = {
         "size": 155111424,
     },
     SWAP_FILE.casefold(): {
-        "title": "Character Swap · 影片角色替換",
+        "title": "Character Swap V1 · 影片角色替換（保留版）",
         "purpose": "依角色圖片替換來源影片的指定人物，嘗試保留原場景。",
         "family": "ref2va", "trigger": "", "trigger_required": False,
         "default_strength": 1.0, "requires_source_video": True,
@@ -95,6 +97,32 @@ _CUSTOM = {
         "revision": "62407e0cc8089c363abd9ce4b0b27662abb237af",
         "sha256": "4b2a3f420ae804c0aa3422761ff84dbd1bf52eef6900ffab6d2e66df63cb4e79",
         "size": 155110320,
+    },
+    SWAP_V15_FILE.casefold(): {
+        "title": "Character Swap v1.5 · 影片角色替換",
+        "purpose": "作者新版角色替換 LoRA，針對來源表演影片中的風格化臉、髮型與人物身份保留。",
+        "family": "ref2va", "trigger": "", "trigger_required": False,
+        "default_strength": 1.0, "requires_source_video": True,
+        "usage": "到角色替換模式提供來源表演影片與角色圖片，指名替換對象；作者建議強度 1.0。舊版 V1 保留供對照，兩版擇一使用。",
+        "limits": "屬來源影片角色替換，不是純圖片生影片或通用臉部修復。作者只提供選例改善，身份、遮擋與動作仍可能漂移；本機畫質需依鏡頭比較。",
+        "source_url": "https://huggingface.co/akatz-ai/MiniMax-H3-Character-Swap-LoRA",
+        "known": True, "license": "minimax-h3-community-license-agreement",
+        "revision": "0f409f0c2a18f123f3985041ec52982c813f5a9c",
+        "sha256": "8f2c3c3eba161df8d0c6099598b4730f641f5ce01e04cd16d2427cff8a35218f",
+        "size": 155110792,
+    },
+    MOTION_REPAIR_FILE.casefold(): {
+        "title": "Motion Repair V2 · 動作連續修正",
+        "purpose": "補強翻轉、落地、肢體銜接與人物互動的動作連續性。",
+        "family": None, "trigger": "bunny_crisp_motion", "trigger_required": False,
+        "default_strength": 0.5,
+        "usage": "先選擇適用的 FL2VA／Ref2VA 家族，以單一可讀動作短片比較。bunny_crisp_motion 是可選觸發詞，不會自動加入；作者單用約 0.9、搭 Combat 約 0.5～0.7，本工具從 0.5 起始並可停用。",
+        "limits": "作者未明確區分兩個模型家族，本機相容與改善程度仍需比較。這是動作 adapter，不能恢復低解析度臉部細節，也不保證修正全部肢體錯誤；避免同時堆疊多個強動態 LoRA。",
+        "source_url": "https://huggingface.co/JOKER141/MiniMax-H3-General-Motion-Continuity-Repair",
+        "known": True, "license": "undeclared",
+        "revision": "7ed4f7ad3d5a4b7cc27d3ff0a6dd7c219064bbfb",
+        "sha256": "edfa0e2858caeba7be9108883f61da8525d3c58af998c94ac7a449d9603d7574",
+        "size": 155110272,
     },
     REALISM_FILE.casefold(): {
         "title": "Realism People · 寫實人物",
@@ -160,6 +188,22 @@ _BUILTINS = (
      "以 8 步比較多模態參考品質；相較 4 步會增加運算量。",
      "Euler、simple、Shift 12/3、參考圖 match；從 Ref Turbo 品質比較選項使用。",
      ("minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",)),
+    ("fl2v_768_fast_v13", "turbo_fast_v13", "FL2VA Turbo v1.3 · 4 步", "fl2va",
+     "2026/10 新權重；保留舊版供同素材對照，作者未提供完整新版畫質基準。",
+     "Euler、simple、Shift 6/3；從 FL2VA Turbo v1.3 選項使用。",
+     ("minimax_h3_fl2v_turbo_4step_v1.3_768p_comfyui_bf16.safetensors",)),
+    ("fl2v_768_quality_v11", "turbo_quality_v11", "FL2VA Turbo v1.1 · 8 步", "fl2va",
+     "新版 8 步圖生／文生比較選項；不會取代已保存的舊版配方。",
+     "Euler、simple、Shift 6/3；從 FL2VA Turbo v1.1 選項使用。",
+     ("minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",)),
+    ("ref2v_768_fast_v10", "turbo_ref_fast_v10", "Ref2VA Turbo v1.0 · 4 步", "ref2va",
+     "新版多參考 4 步預覽；與舊 v0.1 分開保存。",
+     "Euler、simple、Shift 12/3、參考圖 match；只適用多參考家族。",
+     ("minimax_h3_ref2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",)),
+    ("ref2v_768_quality_v11", "turbo_ref_quality_v11", "Ref2VA Turbo v1.1 · 8 步", "ref2va",
+     "新版多參考 8 步比較；是否改善人物畫質需用同一素材與尺寸實測。",
+     "Euler、simple、Shift 12/3、參考圖 match；只適用多參考家族。",
+     ("minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",)),
 )
 
 
@@ -216,7 +260,8 @@ def recommended_lora_items(names):
     for filename, metadata in _CUSTOM.items():
         # Metadata keys are casefolded; recover the exact public filename.
         exact = next(value for value in (WUSHU_FILE, COMBAT_FILE, CAMERA_FILE,
-                     PHYSICS_FILE, ORBIT_FILE, SWAP_FILE, REALISM_FILE, ANIMATION_FILE)
+                     PHYSICS_FILE, ORBIT_FILE, SWAP_FILE, SWAP_V15_FILE,
+                     MOTION_REPAIR_FILE, REALISM_FILE, ANIMATION_FILE)
                      if value.casefold() == filename)
         installed = filename in available
         details = {"trigger_placement": "visual", "requires_source_video": False, **deepcopy(metadata)}
@@ -232,7 +277,9 @@ def builtin_lora_items(names):
     items = []
     for key, quality_mode, title, family, purpose, usage, candidates in _BUILTINS:
         chosen = next((available[n.casefold()] for n in candidates if n.casefold() in available), candidates[0])
-        source = "Kijai/MiniMax-H3_comfy" if "lightx2v" in chosen else "Comfy-Org/MiniMax-H3"
+        source = ("lightx2v/Minimax-h3-Turbo" if quality_mode in {
+            "turbo_fast_v13", "turbo_quality_v11", "turbo_ref_fast_v10", "turbo_ref_quality_v11"
+        } else "Kijai/MiniMax-H3_comfy" if "lightx2v" in chosen else "Comfy-Org/MiniMax-H3")
         items.append(dict(name=chosen, key=key, profile=key, quality_mode=quality_mode,
                           title=title, family=family, purpose=purpose, trigger="", trigger_required=False, usage=usage,
                           limits="只由生成品質選項自動套用，不可再當作自訂 LoRA 疊加。少步數會改變生成結果，速度、畫質與聲音需依鏡頭比較。",

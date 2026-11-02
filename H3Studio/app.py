@@ -30,7 +30,7 @@ from PIL import Image, ImageOps
 from comfy_client import ComfyClient
 from video_generation_errors import video_generation_error_fields
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, validate_runtime_inventory, resolve_video_vae
-from video_models import VIDEO_MODEL_H3, video_model_profiles
+from video_models import VIDEO_MODEL_H3, PIKA_LORA_FILENAMES, video_model_profiles
 from h3_media import prepare_media_payload, normalized_reference_video, reference_video_ids
 from h3_prompt_translation import H3PromptTranslator, original_h3_payload, prepare_h3_payload
 from shortfilm_batch import ShortFilmBatchManager, ShortFilmBatchError, generation_source
@@ -2370,6 +2370,7 @@ def create_app() -> web.Application:
         try:
             names = await comfy.list_loras()
             reserved = {name for candidates in TURBO_LORA_CANDIDATES.values() for name in candidates}
+            reserved.update(PIKA_LORA_FILENAMES.values())
             custom_names = [name.replace("\\", "/") for name in names if name.replace("\\", "/").split("/")[-1] not in reserved]
             return web.json_response({
                 "names": custom_names,

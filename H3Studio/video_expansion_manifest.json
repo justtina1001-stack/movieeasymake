@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "version": "2026.11.02-1",
+  "minimum_comfyui_version": "0.42.0",
+  "title": "Pika H3 Flex, updated Turbo and character/motion adapters",
+  "files": [
+    {
+      "repo_id": "Comfy-Org/MiniMax-H3",
+      "revision": "912b6e38b2092ec4d2e86d24183e0d59ea059d48",
+      "source": "loras/pika_h3_flex_fl2va_v1_bf16.safetensors",
+      "target": "loras/pika_h3_flex_fl2va_v1_bf16.safetensors",
+      "size": 1956172304,
+      "sha256": "cc5453aeecd6189468409003fe4cf1b57e52ff3a830a0a154b87decbe07358b7"
+    },
+    {
+      "repo_id": "Comfy-Org/MiniMax-H3",
+      "revision": "912b6e38b2092ec4d2e86d24183e0d59ea059d48",
+      "source": "loras/pika_h3_flex_ref2va_v1_bf16.safetensors",
+      "target": "loras/pika_h3_flex_ref2va_v1_bf16.safetensors",
+      "size": 1956172304,
+      "sha256": "de3745ceb7d8d5c20898dd8fa3a05f1c0b00089ccd55297b2a8bab95c766b0e0"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source": "minimax_h3_fl2v_turbo_4step_v1.3_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_fl2v_turbo_4step_v1.3_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "70103fd0d80a947ed4e7fe6f88915863d54ef22c5cab03bd5d2fd649385ffe1e"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source": "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "fb4c00361c94bad47f878d5e096c6cab2f45063b0968bd5756dcb7da6936f53e"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source": "minimax_h3_ref2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_ref2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "b4da466e43588004097dfbcde245ccc439c34a26bc997cb76a0b53a1d549ea0d"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source": "minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "e56863a7524e0300729cbb7b64cc8b548d90698c1abbf7d83898b0122fbe1e81"
+    },
+    {
+      "repo_id": "akatz-ai/MiniMax-H3-Character-Swap-LoRA",
+      "revision": "0f409f0c2a18f123f3985041ec52982c813f5a9c",
+      "source": "h3_character_swap_v1.5.safetensors",
+      "target": "loras/h3studio_custom/h3_character_swap_v1.5.safetensors",
+      "size": 155110792,
+      "sha256": "8f2c3c3eba161df8d0c6099598b4730f641f5ce01e04cd16d2427cff8a35218f"
+    },
+    {
+      "repo_id": "JOKER141/MiniMax-H3-General-Motion-Continuity-Repair",
+      "revision": "7ed4f7ad3d5a4b7cc27d3ff0a6dd7c219064bbfb",
+      "source": "Motion_Repair_V2.safetensors",
+      "target": "loras/h3studio_custom/Motion_Repair_V2.safetensors",
+      "size": 155110272,
+      "sha256": "edfa0e2858caeba7be9108883f61da8525d3c58af998c94ac7a449d9603d7574"
+    },
+    {
+      "repo_id": "lihaoyun6/MiniMax-H3-Ref-Patch",
+      "revision": "39c65470eb9b42df5168b63e641a64d1d15c6df8",
+      "source": "minimax_h3_ref_patch.safetensors",
+      "target": "model_patches/minimax_h3_ref_patch.safetensors",
+      "size": 147907688,
+      "sha256": "80e9d0d5c9356ce81b90296465b8ba76e3373e3ae3d4c4701287f6e14c35a8fe"
+    }
+  ],
+  "custom_nodes": [
+    {
+      "repo_url": "https://github.com/lihaoyun6/ComfyUI-MiniMaxH3_Ref-Patch.git",
+      "revision": "c6807df8eb38fcd70b489b989638c6cfd31c4f7b",
+      "target": "ComfyUI-MiniMaxH3_Ref-Patch"
+    }
+  ]
+}

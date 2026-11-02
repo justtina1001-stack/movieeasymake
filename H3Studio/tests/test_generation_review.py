@@ -5,12 +5,24 @@ from unittest.mock import AsyncMock, patch
 
 import app as studio
 from domain import compile_request
-from generation_review import GenerationReviewStore, GenerationReviewError
+from generation_review import GenerationReviewStore, GenerationReviewError, prompt_review_item
 from shortfilm import new_project, new_scene, new_shot
 from tests import test_dialogue_compile as fixture
 
 
 class GenerationReviewStoreTests(unittest.TestCase):
+    def test_batch_review_item_reports_exact_special_recipe_without_sharing_schedule(self):
+        compiled = compile_request(fixture.request_payload("A cup rotates.", video_model="pika_h3_flex"))
+        item = prompt_review_item(compiled)
+        self.assertEqual((item["steps"], item["sampler_name"], item["scheduler"]), (6, "lcm", "manual"))
+        self.assertEqual(item["model_adapter"], "pika_h3_flex_fl2va_v1_bf16.safetensors")
+        self.assertEqual(item["model_adapter_strength"], 1.0)
+        self.assertEqual(item["manual_sigmas"], compiled.manual_sigmas)
+        item["manual_sigmas"][1] = .5
+        self.assertEqual(compiled.manual_sigmas[1], .972973)
+        turbo = compile_request(fixture.request_payload("A cup rotates.", quality_mode="turbo_quality_v11"))
+        self.assertEqual(prompt_review_item(turbo)["turbo_lora"], "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors")
+
     def test_receipts_are_bound_expiring_single_use_and_server_owned(self):
         source = fixture.request_payload("Original direction.")
         prepared = {**source, "prompt": "Prepared direction."}
@@ -51,6 +63,19 @@ class GenerationReviewStoreTests(unittest.TestCase):
 
 
 class GenerationReviewAPITests(fixture.DialogueSubmissionAPITests):
+    async def test_pika_confirmed_submission_keeps_preview_adapter_and_exact_schedule(self):
+        source = fixture.request_payload("The toy robot raises an arm.", video_model="pika_h3_flex")
+        preview = await self.preview(source)
+        self.assertEqual((preview["steps"], preview["sampler_name"], preview["scheduler"]), (6, "lcm", "manual"))
+        self.assertEqual(preview["model_adapter"], "pika_h3_flex_fl2va_v1_bf16.safetensors")
+        with patch.object(self.app["jobs"], "create", return_value={"id": "a" * 32, "status": "queued"}) as create:
+            response = await self.client.post("/api/render", json={**preview["prepared_payload"], "review_receipt": preview["review_receipt"]})
+            self.assertEqual(response.status, 202, await response.text())
+            frozen, _ = create.call_args.args
+            self.assertEqual((frozen.model_adapter, frozen.model_adapter_strength), (preview["model_adapter"], preview["model_adapter_strength"]))
+            self.assertEqual(frozen.manual_sigmas, preview["manual_sigmas"])
+            self.assertEqual((frozen.steps, frozen.sampler_name, frozen.scheduler), (6, "lcm", "manual"))
+
     async def preview(self, payload):
         response = await self.client.post("/api/compile", json=payload)
         self.assertEqual(response.status, 200, await response.text())

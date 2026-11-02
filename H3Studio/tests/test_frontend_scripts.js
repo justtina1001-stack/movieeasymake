@@ -1375,6 +1375,19 @@ test('persisted awaiting-review pipelines expose full literal prompts and never 
   await ui.startVideoPipeline(); assert.equal(calls.some(call => call.options?.method === 'POST'), false);
 });
 
+test('script review displays actual versioned quality and adapter without changing the saved draft', () => {
+  const pipeline=reviewPipeline();Object.assign(pipeline.review.prompts[0],{
+    video_model:'h3',quality_mode:'turbo_ref_quality_v11',steps:8,
+    turbo_lora:'folder/minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors',
+  });
+  const {ui,elements,calls}=fixture();prepareVideo(ui);const before=JSON.stringify(ui.readProject());
+  ui.state.pipeline=pipeline;ui.renderPipelines();
+  const text=flatText(elements.get('scriptPromptReviewList'));
+  assert.match(text,/生成品質：Ref Turbo · 8 步 v1\.1/);assert.match(text,/採樣步數：8 步/);
+  assert.match(text,/內建組件：minimax_h3_ref2v_turbo_8step_v1\.1_768p_comfyui_bf16\.safetensors/);
+  assert.doesNotMatch(text,/folder\//);assert.equal(JSON.stringify(ui.readProject()),before);assert.equal(calls.length,0);
+});
+
 test('unchanged prompt review polling and original-text choice preserve card identity and reading positions', async () => {
   const pipeline = reviewPipeline(); pipeline.review.prompts[0].h3_translation = { status: 'unavailable' };
   const { ui, elements } = fixture(); prepareVideo(ui); ui.bindEvents(); ui.state.pipeline = pipeline; ui.renderPipelines();
@@ -2227,6 +2240,26 @@ test('script model selector persists Fast drafts and keeps H3 LoRA choices avail
   assert.equal(ui.readProject().video_settings.video_model,'h3');
   assert.equal(ui.readProject().custom_loras[0].name,'h3-kept.safetensors');
   assert.equal(elements.get('scriptVideoLoraSection').classes.has('hidden'),false);
+});
+
+test('Pika and Ref Patch script drafts retain model identities and H3 LoRA preferences through switching', async () => {
+  for (const model of ['pika_h3_flex','h3_ref_patch']) {
+    const {ui,elements,stored}=fixture();
+    ui.writeProject(project({custom_loras:[lora({name:'h3-kept.safetensors'})]}));ui.bindEvents();
+    elements.get('scriptVideoModel').value=model;await elements.get('scriptVideoModel').dispatch('change');
+    assert.equal(ui.readProject().video_settings.video_model,model);
+    assert.equal(ui.readProject().custom_loras[0].name,'h3-kept.safetensors');
+    assert.equal(elements.get('scriptVideoLoraSection').classes.has('hidden'),true);
+    const saved=JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))['project-a'].project;
+    ui.writeProject(saved);assert.equal(elements.get('scriptVideoModel').value,model);
+    ui.state.videoModelSupported=true;ui.state.videoModels=[{id:model,ready:true,modes:['r2v'],mode_ready:{r2v:true}}];
+    assert.equal(ui.scriptVideoModelError(ui.readProject()),'');
+    ui.state.videoModels[0].ready=false;ui.state.videoModels[0].error='尚未安裝對應模型';
+    assert.equal(ui.scriptVideoModelError(ui.readProject()),'尚未安裝對應模型');
+    elements.get('scriptVideoModel').value='h3';await elements.get('scriptVideoModel').dispatch('change');
+    assert.equal(ui.readProject().custom_loras[0].name,'h3-kept.safetensors');
+    assert.equal(elements.get('scriptVideoLoraSection').classes.has('hidden'),false);
+  }
 });
 
 test('script model gating distinguishes old hosts and each model readiness', () => {

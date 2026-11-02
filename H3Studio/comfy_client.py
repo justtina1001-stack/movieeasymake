@@ -17,7 +17,9 @@ from urllib.parse import urlencode
 import aiohttp
 
 from domain import TURBO_LORA_CANDIDATES, VIDEO_VAE_FILENAMES
-from video_models import FASTH3_FILENAME, FASTH3_SIZE, VIDEO_MODEL_FAST, blackwell_device, fasth3_node_support
+from video_models import (FASTH3_FILENAME, FASTH3_SIZE, VIDEO_MODEL_FAST, PIKA_LORA_FILENAMES,
+                          PIKA_LORA_SIZE, REF_PATCH_FILENAME, REF_PATCH_SIZE, blackwell_device,
+                          fasth3_node_support, input_choices, pika_node_support, ref_patch_node_support)
 
 from settings import ConnectionSettings
 from runtime_env import inspect_python_candidates
@@ -166,13 +168,16 @@ class ComfyClient:
                for precision, filename in VIDEO_VAE_FILENAMES.items()},
             "audio_vae": ("VAELoader", "vae_name", "minimax_h3_audio_vae_fp32.safetensors"),
             VIDEO_MODEL_FAST: ("UNETLoader", "unet_name", FASTH3_FILENAME),
+            **{f"pika_{family}": ("LoraLoaderModelOnly", "lora_name", filename)
+               for family, filename in PIKA_LORA_FILENAMES.items()},
         }
         result = {name: False for name in expected}
         result.update({f"turbo_{profile}": False for profile in TURBO_LORA_CANDIDATES})
         result.update({"h3_memory_optimization": False, "h3_optimizations": False,
                        "h3_sla_attention": False, "h3_sigma_shift": False,
                        "video_vae_int8_supported": False, "fasth3_blackwell": False,
-                       "fasth3_core_supported": False, "fasth3_nodes_ready": False})
+                       "fasth3_core_supported": False, "fasth3_nodes_ready": False,
+                       "pika_nodes_ready": False, "ref_patch_nodes_ready": False})
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -181,7 +186,7 @@ class ComfyClient:
                     if node not in loader_schemas:
                         async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
                             loader_schemas[node] = await response.json() if response.status == 200 else {}
-                    values = loader_schemas[node].get(node, {}).get("input", {}).get("required", {}).get(field, [[]])[0]
+                    values = input_choices(loader_schemas[node].get(node, {}), field)
                     result[name] = filename in values
                 async with session.get(f"{self.base_url}/object_info/LoraLoaderModelOnly", headers=self.auth_headers()) as response:
                     if response.status == 200:
@@ -191,7 +196,8 @@ class ComfyClient:
                             result[f"turbo_{profile}"] = any(candidate in available_loras for candidate in candidates)
                 node_schemas = {}
                 for node in ("H3MemoryOptimization", "H3SparseAttention", "BlockSparseAttention", "MiniMaxH3SigmaShift",
-                             "MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide"):
+                             "MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide",
+                             "ManualSigmas", "KSamplerSelect", "MiniMaxH3RefPatchLoader"):
                     async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
                         if response.status == 200:
                             payload = await response.json()
@@ -200,6 +206,8 @@ class ComfyClient:
                 result["h3_optimizations"] = result["h3_memory_optimization"] and bool(node_schemas.get("H3SparseAttention"))
                 result["h3_sigma_shift"] = bool(node_schemas.get("MiniMaxH3SigmaShift"))
                 result["fasth3_nodes_ready"] = fasth3_node_support(node_schemas)
+                result["pika_nodes_ready"] = pika_node_support(node_schemas)
+                result["ref_patch_nodes_ready"] = ref_patch_node_support(node_schemas)
                 sparse_inputs = node_schemas.get("BlockSparseAttention", {}).get("input", {}).get("required", {})
                 selection = sparse_inputs.get("selection", [])
                 options = selection[1].get("options", []) if len(selection) > 1 and isinstance(selection[1], dict) else []
@@ -225,6 +233,11 @@ class ComfyClient:
             result["fasth3_blackwell"] = blackwell_device(stats)
             result["fasth3_core_supported"] = bool(match and tuple(map(int, match.group(1, 2, 3))) >= (0, 42, 0))
             if self.mode == "local":
+                patch = self.comfy_dir / "models" / "model_patches" / REF_PATCH_FILENAME
+                result["ref_patch_nodes_ready"] = result["ref_patch_nodes_ready"] and patch.is_file() and patch.stat().st_size == REF_PATCH_SIZE
+                for family, filename in PIKA_LORA_FILENAMES.items():
+                    adapter = self.comfy_dir / "models" / "loras" / filename
+                    result[f"pika_{family}"] = result[f"pika_{family}"] and adapter.is_file() and adapter.stat().st_size == PIKA_LORA_SIZE
                 path = self.comfy_dir / "models" / "diffusion_models" / FASTH3_FILENAME
                 result[VIDEO_MODEL_FAST] = result[VIDEO_MODEL_FAST] and path.is_file() and path.stat().st_size == FASTH3_SIZE
                 # Full PDD checkpoints need the output-head constructor added in

@@ -8,7 +8,10 @@ from dialogue import format_dialogue, visual_direction_text
 from h3_prompt_format import base_prompt as format_base_prompt, combine_storyboards, cut_time, language_warning, number_speakers, rewrite_aliases, unpack_prompt, parse_prompt_sections, has_unassigned_dialogue
 from h3_prompt_references import validate_reference_sections, validate_uploaded_labels
 from typing import Any
-from video_models import FASTH3_FILENAME, FASTH3_STEPS, VIDEO_MODEL_FAST, VIDEO_MODEL_H3, normalize_video_model, video_model_profiles
+from video_models import (FASTH3_FILENAME, FASTH3_STEPS, VIDEO_MODEL_FAST, VIDEO_MODEL_H3,
+                          VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH,
+                          REFERENCE_VIDEO_MODES, PIKA_LORA_FILENAMES, PIKA_STEPS, PIKA_SIGMAS,
+                          PIKA_SIGMAS_TEXT, REF_PATCH_FILENAME, normalize_video_model, video_model_profiles)
 
 
 FPS = 24
@@ -31,8 +34,14 @@ TURBO_PROFILE_REF_544 = "ref2v_544"
 TURBO_PROFILE_FL_768_SLA = "fl2v_768_sla"
 TURBO_PROFILE_FL_768_AUDIO_V12 = "fl2v_768_audio_v12"
 TURBO_PROFILE_REF_768_QUALITY_V10 = "ref2v_768_quality_v10"
-FL_ONLY_QUALITY_MODES = {"turbo_fast", "turbo_quality", "sparse_experimental", "turbo_sla", "turbo_audio"}
-QUALITY_MODES = {"native", "turbo", "turbo_ref_quality"} | FL_ONLY_QUALITY_MODES
+TURBO_PROFILE_FL_768_FAST_V13 = "fl2v_768_fast_v13"
+TURBO_PROFILE_FL_768_QUALITY_V11 = "fl2v_768_quality_v11"
+TURBO_PROFILE_REF_768_FAST_V10 = "ref2v_768_fast_v10"
+TURBO_PROFILE_REF_768_QUALITY_V11 = "ref2v_768_quality_v11"
+FL_ONLY_QUALITY_MODES = {"turbo_fast", "turbo_quality", "sparse_experimental", "turbo_sla", "turbo_audio",
+                         "turbo_fast_v13", "turbo_quality_v11"}
+REF_ONLY_QUALITY_MODES = {"turbo_ref_quality", "turbo_ref_fast_v10", "turbo_ref_quality_v11"}
+QUALITY_MODES = {"native", "turbo"} | REF_ONLY_QUALITY_MODES | FL_ONLY_QUALITY_MODES
 TURBO_LORA_CANDIDATES: dict[str, tuple[str, ...]] = {
     TURBO_PROFILE_FL_544: (
         "minimax_h3_fl2v_lightx2v_turbo_8step_v1.0_resized_avg_rank_24_bf16.safetensors",
@@ -61,6 +70,10 @@ TURBO_LORA_CANDIDATES: dict[str, tuple[str, ...]] = {
     TURBO_PROFILE_REF_768_QUALITY_V10: (
         "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
     ),
+    TURBO_PROFILE_FL_768_FAST_V13: ("minimax_h3_fl2v_turbo_4step_v1.3_768p_comfyui_bf16.safetensors",),
+    TURBO_PROFILE_FL_768_QUALITY_V11: ("minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",),
+    TURBO_PROFILE_REF_768_FAST_V10: ("minimax_h3_ref2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",),
+    TURBO_PROFILE_REF_768_QUALITY_V11: ("minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",),
 }
 
 MOTION_PROFILES = {
@@ -138,6 +151,9 @@ class CompiledRequest:
     warnings: list[str] = field(default_factory=list)
     official_mode: str = "T2VA"
     video_model: str = VIDEO_MODEL_H3
+    model_adapter: str | None = None
+    model_adapter_strength: float = 0.0
+    manual_sigmas: list[float] = field(default_factory=list)
 
 
 def resolve_video_vae(compiled: CompiledRequest, inventory: dict[str, bool]) -> str:
@@ -172,6 +188,12 @@ def validate_runtime_inventory(compiled: CompiledRequest, inventory: dict[str, b
         profile = next(item for item in video_model_profiles(inventory) if item["id"] == VIDEO_MODEL_FAST)
         if not profile["ready"]:
             raise RequestError(profile["error"])
+        resolve_video_vae(compiled, inventory)
+        return
+    if compiled.video_model in {VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH}:
+        profile = next(item for item in video_model_profiles(inventory) if item["id"] == compiled.video_model)
+        if not profile["mode_ready"].get(compiled.mode):
+            raise RequestError(profile["error"] or "所選影片模型的模式、底模或節點尚未就緒，請補齊對應元件。")
         resolve_video_vae(compiled, inventory)
         return
     family = "ref2va" if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"} else "fl2va"
@@ -471,6 +493,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     mode = _clean_text(payload.get("mode")) or "t2v"
     if mode not in {"t2v", "fl2va", "r2v", "replace", "extend", "symbol_loop", "popup_panel", "mg_animation"}:
         raise RequestError("不支援的生成模式。")
+    if video_model == VIDEO_MODEL_REF_PATCH and mode not in REFERENCE_VIDEO_MODES:
+        raise RequestError("Ref Patch 只支援多模態參考、角色替換、彈窗面板與 MG 動畫；文生、首尾、續接與圖騰循環請選擇其他模型。")
 
     aspect_ratio = _clean_text(payload.get("aspect_ratio")) or "16:9"
     megapixels = _safe_float(payload.get("megapixels"), 0.4)
@@ -480,8 +504,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     except ValueError as error:
         raise RequestError(str(error)) from error
     reserved_loras = {name for candidates in TURBO_LORA_CANDIDATES.values() for name in candidates}
+    reserved_loras.update(PIKA_LORA_FILENAMES.values())
     if any(item["name"].split("/")[-1] in reserved_loras for item in custom_loras if item["enabled"]):
-        raise RequestError("內建 Turbo LoRA 請從生成品質選擇，避免重複載入或使用錯誤的取樣設定。")
+        raise RequestError("內建 Turbo／Pika LoRA 請從影片模型或生成品質選擇，避免重複載入或使用錯誤的取樣設定。")
     requested_duration = min(15.0, max(5.0, _safe_float(payload.get("duration"), 5.0)))
     length = aligned_frame_count(requested_duration)
     seed = _safe_int(payload.get("seed"), 1)
@@ -496,11 +521,13 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     quality_mode = _clean_text(payload.get("quality_mode")) or "native"
     if video_model == VIDEO_MODEL_FAST and quality_mode != "native":
         raise RequestError("FastH3 已內建 8 步生成，請關閉原版 H3 的 Turbo／SLA／品質加速選項。")
+    if video_model in {VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH} and quality_mode != "native":
+        raise RequestError("Pika H3 Flex／Ref Patch 使用獨立配方，請關閉額外 Turbo／SLA／品質加速選項。")
     if quality_mode not in QUALITY_MODES:
         quality_mode = "native"
     if reference_mode and quality_mode in FL_ONLY_QUALITY_MODES:
         raise RequestError("這個新版加速模式目前只支援文生、首尾、續接與圖騰循環；多模態參考請改用 Turbo 穩定或 Ref 8 步品質模式。")
-    if not reference_mode and quality_mode == "turbo_ref_quality":
+    if not reference_mode and quality_mode in REF_ONLY_QUALITY_MODES:
         raise RequestError("Ref 8 步品質模式只支援多模態參考、角色替換、彈窗面板與 MG 動畫；文生與首尾請改用 FL2VA 品質模式。")
     memory_optimization = payload.get("memory_optimization") is True
     if video_model == VIDEO_MODEL_FAST:
@@ -508,6 +535,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
             raise RequestError("FastH3 尚未驗證與額外 H3 省顯存節點疊加，請關閉獨立省顯存。")
         if any(item["enabled"] and item["strength"] > 0 for item in custom_loras):
             raise RequestError("FastH3 尚未驗證額外 H3 LoRA，請停用自訂 LoRA，或切回原版 H3。")
+    if video_model in {VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH}:
+        if memory_optimization or any(item["enabled"] and item["strength"] != 0 for item in custom_loras):
+            raise RequestError("Pika H3 Flex／Ref Patch 尚未驗證額外省顯存或自訂 LoRA；請停用後再生成，或切回原版 H3。")
     if quality_mode == "turbo_sla" and memory_optimization:
         raise RequestError("SLA 已內建分塊 QKV，請關閉額外省顯存以避免節點衝突。")
     sampler_name = "res_multistep"
@@ -516,12 +546,22 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     turbo_lora_strength = 0.0
     shift_video = None
     shift_audio = None
+    model_adapter = None
+    model_adapter_strength = 0.0
+    manual_sigmas = []
     if video_model == VIDEO_MODEL_FAST:
         steps = FASTH3_STEPS
         scheduler = "simple"
         sampler_name = "euler"
         shift_video = 12.0
         shift_audio = 3.0
+    elif video_model == VIDEO_MODEL_PIKA:
+        steps, scheduler, sampler_name, ref_image_size = PIKA_STEPS, "manual", "lcm", "match"
+        model_adapter = PIKA_LORA_FILENAMES["ref2va" if reference_mode else "fl2va"]
+        model_adapter_strength = 1.0
+        manual_sigmas = list(PIKA_SIGMAS)
+    elif video_model == VIDEO_MODEL_REF_PATCH:
+        steps, scheduler, sampler_name, ref_image_size = 20, "simple", "res_multistep", "match"
     if quality_mode != "native":
         scheduler = "simple"
         sampler_name = "euler"
@@ -555,6 +595,16 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         elif quality_mode == "turbo_audio":
             steps = 4
             turbo_profile = TURBO_PROFILE_FL_768_AUDIO_V12
+            shift_video = 6.0
+        elif quality_mode in {"turbo_ref_fast_v10", "turbo_ref_quality_v11"}:
+            steps = 4 if quality_mode == "turbo_ref_fast_v10" else 8
+            ref_image_size = "match"
+            turbo_profile = TURBO_PROFILE_REF_768_FAST_V10 if steps == 4 else TURBO_PROFILE_REF_768_QUALITY_V11
+            turbo_lora_strength = 1.0
+            shift_video = 12.0
+        elif quality_mode in {"turbo_fast_v13", "turbo_quality_v11"}:
+            steps = 4 if quality_mode == "turbo_fast_v13" else 8
+            turbo_profile = TURBO_PROFILE_FL_768_FAST_V13 if steps == 4 else TURBO_PROFILE_FL_768_QUALITY_V11
             shift_video = 6.0
         elif quality_mode == "turbo_ref_quality":
             steps = 8
@@ -1073,6 +1123,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         warnings=list(dict.fromkeys(warnings)),
         official_mode=official_mode,
         video_model=video_model,
+        model_adapter=model_adapter,
+        model_adapter_strength=model_adapter_strength,
+        manual_sigmas=manual_sigmas,
     )
 
 
@@ -1105,12 +1158,36 @@ def build_workflow(
         workflow[node_id] = {"class_type": class_type, "inputs": inputs, "_meta": {"title": title}}
         return node_id
 
+    if compiled.video_model in {VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH}:
+        if (compiled.quality_mode != "native" or compiled.memory_optimization or compiled.face_repair
+                or any(item["enabled"] and item["strength"] != 0 for item in compiled.custom_loras)
+                or compiled.turbo_profile is not None or compiled.turbo_lora is not None
+                or compiled.shift_video is not None or compiled.shift_audio is not None):
+            raise RequestError("Pika H3 Flex／Ref Patch 不可疊加其他加速、LoRA 或省顯存配方；請重新預覽。")
+        if compiled.video_model == VIDEO_MODEL_PIKA:
+            expected_adapter = PIKA_LORA_FILENAMES["ref2va" if compiled.mode in REFERENCE_VIDEO_MODES else "fl2va"]
+            if (compiled.steps != PIKA_STEPS or compiled.scheduler != "manual" or compiled.sampler_name != "lcm"
+                    or compiled.model_adapter != expected_adapter or compiled.model_adapter_strength != 1.0
+                    or tuple(compiled.manual_sigmas) != PIKA_SIGMAS or compiled.ref_image_size != "match"):
+                raise RequestError("Pika H3 Flex 必須使用相符家族的 LoRA、LCM 與固定 6 步排程，請重新預覽。")
+        elif (compiled.mode not in REFERENCE_VIDEO_MODES or compiled.steps != 20 or compiled.scheduler != "simple"
+              or compiled.sampler_name != "res_multistep" or compiled.model_adapter or compiled.manual_sigmas
+              or compiled.ref_image_size != "match"):
+            raise RequestError("Ref Patch 需要參考模式與固定原生配方，請重新預覽。")
+    elif compiled.model_adapter or compiled.manual_sigmas:
+        raise RequestError("此影片模型不支援額外的內建 adapter 或手動排程，請重新預覽。")
     diffusion_model = FASTH3_FILENAME if compiled.video_model == VIDEO_MODEL_FAST else (
         "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
-        if compiled.mode in {"r2v", "replace", "popup_panel", "mg_animation"}
+        if compiled.mode in REFERENCE_VIDEO_MODES and compiled.video_model != VIDEO_MODEL_REF_PATCH
         else "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
     )
     model = add("UNETLoader", {"unet_name": diffusion_model, "weight_dtype": "default"}, "MiniMax H3 Model")
+    if compiled.video_model == VIDEO_MODEL_PIKA:
+        model = add("LoraLoaderModelOnly", {"model": [model, 0], "lora_name": compiled.model_adapter,
+                                           "strength_model": compiled.model_adapter_strength}, "Pika H3 Flex Adapter")
+    elif compiled.video_model == VIDEO_MODEL_REF_PATCH:
+        model = add("MiniMaxH3RefPatchLoader", {"model": [model, 0], "patch_name": REF_PATCH_FILENAME,
+                                              "ref_strength": 1.0}, "H3 FL2VA Reference Patch")
     if compiled.video_model == VIDEO_MODEL_FAST:
         if (compiled.quality_mode != "native" or compiled.memory_optimization
                 or any(item["enabled"] and item["strength"] > 0 for item in compiled.custom_loras)
@@ -1243,12 +1320,15 @@ def build_workflow(
 
     noise = add("RandomNoise", {"noise_seed": compiled.seed}, "Seed")
     sampler = add("KSamplerSelect", {"sampler_name": compiled.sampler_name}, "Sampler")
-    sigmas = add("BasicScheduler", {
-        "model": [model, 0],
-        "scheduler": compiled.scheduler,
-        "steps": compiled.steps,
-        "denoise": 1.0,
-    }, "Scheduler")
+    if compiled.video_model == VIDEO_MODEL_PIKA:
+        sigmas = add("ManualSigmas", {"sigmas": PIKA_SIGMAS_TEXT}, "Pika H3 Flex Six-Step Schedule")
+    else:
+        sigmas = add("BasicScheduler", {
+            "model": [model, 0],
+            "scheduler": compiled.scheduler,
+            "steps": compiled.steps,
+            "denoise": 1.0,
+        }, "Scheduler")
     guider = add("BasicGuider", {"model": [model, 0], "conditioning": [positive_source, 0]}, "Guider")
     sampled = add("SamplerCustomAdvanced", {
         "noise": [noise, 0],

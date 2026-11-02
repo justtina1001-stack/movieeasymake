@@ -37,11 +37,11 @@ function fixture() {
   return {c,element,storage};
 }
 
-test('quick and short-film pages offer H3 and FastH3 with labelled status',()=>{
+test('quick and short-film pages retain H3 and FastH3 and offer the installed dedicated models',()=>{
   for(const id of ['videoModel','sfVideoModel']){
     const select=html.match(new RegExp(`<select id="${id}" aria-describedby="${id}Hint">([\\s\\S]*?)</select>`));
     assert.ok(select,id);
-    assert.deepEqual([...select[1].matchAll(/value="([^"]+)"/g)].map(m=>m[1]),['h3',fast]);
+    assert.deepEqual([...select[1].matchAll(/value="([^"]+)"/g)].map(m=>m[1]),['h3',fast,'pika_h3_flex','h3_ref_patch']);
   }
 });
 
@@ -69,6 +69,35 @@ test('Fast drafts reload without losing H3 settings and legacy drafts choose H3'
   element('#videoModel').value='h3';c.changeVideoModel();assert.equal(element('#memoryOptimization').checked,true);
   c.state.form={quality_mode:'native'};element('#videoModel').value=fast;c.restoreForm();
   assert.equal(element('#videoModel').value,'h3');assert.equal(c.currentSettings().video_model,'h3');
+});
+
+test('Pika and Ref Patch send fixed recipes and restore the original H3 choices after a reload',()=>{
+  for (const [model,steps,scheduler] of [['pika_h3_flex',6,'manual'],['h3_ref_patch',20,'simple']]) {
+    const {c,element,storage}=fixture();
+    c.state.customLoras=[{name:'kept.safetensors',strength:0.5}];
+    element('#memoryOptimization').checked=true;element('#qualityMode').value='turbo_fast';
+    element('#steps').value=4;element('#scheduler').value='beta';c.persistForm();
+    element('#videoModel').value=model;c.changeVideoModel();
+    const payload=c.currentSettings();
+    assert.equal(payload.video_model,model);assert.equal(payload.steps,steps);assert.equal(payload.scheduler,scheduler);
+    assert.equal(payload.quality_mode,'native');assert.equal(payload.memory_optimization,false);assert.equal(payload.custom_loras.length,0);
+    assert.equal(element('#qualityMode').disabled,true);assert.equal(element('#scheduler').disabled,true);
+    c.state=JSON.parse(storage.get('state'));c.restoreForm();
+    assert.equal(element('#videoModel').value,model);
+    element('#videoModel').value='h3';c.changeVideoModel();
+    assert.equal(element('#qualityMode').value,'turbo_fast');assert.equal(element('#memoryOptimization').checked,true);
+    assert.equal(c.state.customLoras[0].name,'kept.safetensors');
+  }
+  assert.match(html,/<option value="manual" hidden>Pika 專用時間表/);
+});
+
+test('dedicated models remain selected when unavailable and Ref Patch explicitly rejects non-reference modes',()=>{
+  const {c}=fixture();c.videoModelSupported=true;
+  c.videoModelProfiles=[{id:'pika_h3_flex',ready:false,error:'缺少 Pika LoRA'},
+    {id:'h3_ref_patch',ready:true,modes:['r2v','replace','popup_panel','mg_animation'],mode_ready:{r2v:true}}];
+  assert.equal(c.videoModelSelectionError('pika_h3_flex','r2v'),'缺少 Pika LoRA');
+  for (const mode of ['t2v','fl2va','extend','symbol_loop']) assert.match(c.videoModelSelectionError('h3_ref_patch',mode),/僅支援/);
+  assert.equal(c.videoModelSelectionError('h3_ref_patch','r2v'),'');
 });
 
 test('unknown draft identities remain selected in a real-select contract and history import is explicitly rejected',async()=>{
@@ -105,9 +134,19 @@ test('short-film Fast controls project fixed settings without overwriting saved 
   assert.equal(c.project.quality_mode,'turbo_fast');assert.equal(c.project.memory_optimization,true);assert.equal(c.project.custom_loras[0].name,'kept');
 });
 
+test('short-film dedicated model controls preserve stored H3 preferences',()=>{
+  for(const model of ['pika_h3_flex','h3_ref_patch']){
+    const {c,element}=fixture();
+    c.project={video_model:model,quality_mode:'turbo_ref_quality_v11',memory_optimization:true,custom_loras:[{name:'kept'}]};
+    const before=JSON.stringify(c.project);c.syncShortFilmAcceleration();
+    assert.equal(element('#sfQuality').value,'native');assert.equal(element('#sfQuality').disabled,true);
+    assert.equal(element('#sfMemoryOptimization').checked,false);assert.equal(JSON.stringify(c.project),before);
+  }
+});
+
 test('job reuse restores the actual model and legacy history clears a previous Fast choice',async()=>{
   const {c,element}=fixture();c.state.replacement={};
-  for(const selection of [fast,undefined]){
+  for(const selection of [fast,'pika_h3_flex','h3_ref_patch',undefined]){
     c.recipe={request:{mode:'t2v',video_model:selection,quality_mode:'native',steps:selection?8:20},assets:{},job:{}};
     await c.applyJobRecipe('job');
     assert.equal(element('#videoModel').value,selection||'h3');

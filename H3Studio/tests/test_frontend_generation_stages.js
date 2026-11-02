@@ -68,6 +68,21 @@ test('preparation pauses on the complete prompt until explicit approval and prev
   assert.equal(f.element('#compileButton').disabled, false);
 });
 
+test('final review shows server-prepared quality version, step count and exact builtin adapter', () => {
+  const {c}=fixture();
+  const text=c.generationReviewPromptText({video_model:'h3',quality_mode:'turbo_ref_quality_v11',steps:8,
+    turbo_lora:'folder/minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors',
+    width:864,height:480,seed:42,prompt:'Approved direction.'}, {quality_mode:'native',steps:20});
+  assert.match(text,/生成品質：Ref Turbo · 8 步 v1\.1/);
+  assert.match(text,/採樣步數：8 步/);
+  assert.match(text,/內建組件：minimax_h3_ref2v_turbo_8step_v1\.1_768p_comfyui_bf16\.safetensors/);
+  assert.doesNotMatch(text,/folder\//);assert.doesNotMatch(text,/採樣步數：20/);
+  const pika=c.generationReviewPromptText({video_model:'pika_h3_flex',steps:6,scheduler:'manual',quality_mode:'native',
+    model_adapter:'pika_h3_ref2va.safetensors',prompt:'Pika direction.'});
+  assert.match(pika,/模型：Pika H3 Flex/);assert.match(pika,/採樣步數：6 步/);
+  assert.match(pika,/內建組件：pika_h3_ref2va\.safetensors/);assert.match(pika,/時間表：作者專用設定/);
+});
+
 test('edits during slow preparation never submit the previous settings', async () => {
   const f = fixture(), running = f.c.renderVideo();
   f.c.input.prompt = 'A new scene.';

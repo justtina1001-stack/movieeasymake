@@ -1,30 +1,30 @@
 {
   "schema_version": 1,
-  "version": "2026.09.22-1",
-  "published_at": "2026-09-22",
+  "version": "2026.11.02-1",
+  "published_at": "2026-11-02",
   "channel": "stable",
-  "title": "H3 INT8 影片解碼與 FP16 回退",
-  "summary": "新增官方 INT8 ConvRot 影片 VAE，改善解碼階段的時間與資源使用，保留 FP16 回退。自動模式在 ComfyUI 0.37.0 以上且已安裝 INT8 時優先使用；這不是主模型採樣加速。模型更新不會自動升級既有引擎核心。",
+  "title": "Pika H3 Flex、Ref Patch 與新版影片 LoRA",
+  "summary": "新增 Pika H3 Flex 六步專用流程、FL2VA + Ref Patch 實驗參考路徑、四個新版 Turbo 與角色／動作 LoRA。保留原版 H3、FastH3、舊 Turbo 及既有 VAE；新選項仍需生成前確認稿件。",
   "minimum_vram_gb": 12,
   "recommended_vram_gb": 16,
   "changes": [
-    "新增官方 INT8 ConvRot 影片 VAE，固定來源版本、檔案大小及 SHA-256",
-    "影片 VAE 提供自動／INT8／FP16 選擇；自動模式不符合條件時使用 FP16，明選 INT8 缺件或版本不符時報錯",
-    "保留既有 FP16 VAE；本次新增下載約 2.81 GB（2.62 GiB），收益限影片解碼階段",
-    "Pruned INT8 ConvRot：降低基礎模型的顯存與系統記憶體需求",
-    "FL2VA Turbo 4-step v1.1 768p：新版快速生成選項",
-    "FL2VA Turbo 8-step v1.0 768p：新版高品質與音訊選項",
-    "H3-Optimizations 0.2.42：獨立省顯存選項與相容性修正",
-    "FL2VA Turbo-SLA：專用 4 步 LoRA，保留 15% 注意力區塊；實驗選項，不與舊稀疏／額外省顯存節點疊加",
-    "FL2VA 4 步 v1.2：音訊改善選項，非速度升級",
-    "Ref2VA 8 步 v1.0：參考品質比較選項；保留現有 4 步預覽",
-    "新安裝固定 ComfyUI 0.37.0；既有核心與配套依賴需另行升級，模型更新不會代為處理"
+    "Pika H3 Flex 提供 FL2VA／Ref2VA 兩份 adapter，使用專用六步 LCM 與固定 Sigma；不疊加 FastH3 或其他加速設定",
+    "FL2VA + Ref Patch 提供獨立實驗參考模式，固定 patch 權重及自訂節點版本；不覆寫原 Ref2VA",
+    "新增 FL2VA Turbo 4-step v1.3、8-step v1.1，以及 Ref2VA 4-step v1.0、8-step v1.1；保留舊版以利對照",
+    "新增 Character Swap v1.5（來源影片角色替換）與 Motion Repair V2（動作連續性），不預設套用或承諾改善所有臉部",
+    "保留 H3／FastH3、既有自訂 LoRA、INT8／FP16 VAE 與所有歷史配方",
+    "新安裝需相容 ComfyUI 0.42.0 與配套依賴；此次模型更新不會自行升級既有引擎核心"
   ],
   "custom_nodes": [
     {
       "repo_url": "https://github.com/Zironic/H3-Optimizations.git",
       "revision": "52b5f1e2345c2d06b9c7457131dbada2872ae7d2",
       "target": "H3-Optimizations"
+    },
+    {
+      "repo_url": "https://github.com/lihaoyun6/ComfyUI-MiniMaxH3_Ref-Patch.git",
+      "revision": "c6807df8eb38fcd70b489b989638c6cfd31c4f7b",
+      "target": "ComfyUI-MiniMaxH3_Ref-Patch"
     }
   ],
   "files": [
@@ -131,6 +131,79 @@
       "target": "loras/minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
       "size": 1956193000,
       "sha256": "6a56f41ab4229c9dd845b9501bbd475ee57e112d846cf2e819d534a1ae928c5a"
+    },
+    {
+      "repo_id": "Comfy-Org/MiniMax-H3",
+      "revision": "912b6e38b2092ec4d2e86d24183e0d59ea059d48",
+      "source": "loras/pika_h3_flex_fl2va_v1_bf16.safetensors",
+      "target": "loras/pika_h3_flex_fl2va_v1_bf16.safetensors",
+      "size": 1956172304,
+      "sha256": "cc5453aeecd6189468409003fe4cf1b57e52ff3a830a0a154b87decbe07358b7"
+    },
+    {
+      "repo_id": "Comfy-Org/MiniMax-H3",
+      "revision": "912b6e38b2092ec4d2e86d24183e0d59ea059d48",
+      "source": "loras/pika_h3_flex_ref2va_v1_bf16.safetensors",
+      "target": "loras/pika_h3_flex_ref2va_v1_bf16.safetensors",
+      "size": 1956172304,
+      "sha256": "de3745ceb7d8d5c20898dd8fa3a05f1c0b00089ccd55297b2a8bab95c766b0e0"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source": "minimax_h3_fl2v_turbo_4step_v1.3_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_fl2v_turbo_4step_v1.3_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "70103fd0d80a947ed4e7fe6f88915863d54ef22c5cab03bd5d2fd649385ffe1e"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source": "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "fb4c00361c94bad47f878d5e096c6cab2f45063b0968bd5756dcb7da6936f53e"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source": "minimax_h3_ref2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_ref2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "b4da466e43588004097dfbcde245ccc439c34a26bc997cb76a0b53a1d549ea0d"
+    },
+    {
+      "repo_id": "lightx2v/Minimax-h3-Turbo",
+      "revision": "30f485ed874aa44c8183348ad361c5eabad318da",
+      "source": "minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+      "target": "loras/minimax_h3_ref2v_turbo_8step_v1.1_768p_comfyui_bf16.safetensors",
+      "size": 1956193000,
+      "sha256": "e56863a7524e0300729cbb7b64cc8b548d90698c1abbf7d83898b0122fbe1e81"
+    },
+    {
+      "repo_id": "akatz-ai/MiniMax-H3-Character-Swap-LoRA",
+      "revision": "0f409f0c2a18f123f3985041ec52982c813f5a9c",
+      "source": "h3_character_swap_v1.5.safetensors",
+      "target": "loras/h3studio_custom/h3_character_swap_v1.5.safetensors",
+      "size": 155110792,
+      "sha256": "8f2c3c3eba161df8d0c6099598b4730f641f5ce01e04cd16d2427cff8a35218f"
+    },
+    {
+      "repo_id": "JOKER141/MiniMax-H3-General-Motion-Continuity-Repair",
+      "revision": "7ed4f7ad3d5a4b7cc27d3ff0a6dd7c219064bbfb",
+      "source": "Motion_Repair_V2.safetensors",
+      "target": "loras/h3studio_custom/Motion_Repair_V2.safetensors",
+      "size": 155110272,
+      "sha256": "edfa0e2858caeba7be9108883f61da8525d3c58af998c94ac7a449d9603d7574"
+    },
+    {
+      "repo_id": "lihaoyun6/MiniMax-H3-Ref-Patch",
+      "revision": "39c65470eb9b42df5168b63e641a64d1d15c6df8",
+      "source": "minimax_h3_ref_patch.safetensors",
+      "target": "model_patches/minimax_h3_ref_patch.safetensors",
+      "size": 147907688,
+      "sha256": "80e9d0d5c9356ce81b90296465b8ba76e3373e3ae3d4c4701287f6e14c35a8fe"
     }
-  ]
+  ],
+  "minimum_comfyui_version": "0.42.0"
 }

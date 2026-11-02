@@ -29,7 +29,7 @@ from script_skills import SKILLS_VERSION, list_skills, normalize_skill_id, skill
 from script_performance import normalize_screenplay, storyboard_to_performance
 from script_video_format import ScriptVideoFormatError, normalize_video_settings
 from custom_loras import normalize_loras, validate_loras_for_family, validate_lora_requirements
-from video_models import VIDEO_MODEL_FAST
+from video_models import FIXED_RECIPE_MODELS
 from h3_official_policy import official_storyboard_rules, OFFICIAL_PROMPT_VERSION
 
 
@@ -1364,7 +1364,7 @@ class ScriptwritingManager:
         try:
             video_settings = normalize_video_settings(job["input"]["project"].get("video_settings"))
             selected_loras = job["input"]["project"].get("custom_loras", [])
-            if video_settings.get("video_model") == VIDEO_MODEL_FAST:
+            if video_settings.get("video_model") in FIXED_RECIPE_MODELS:
                 custom_loras = normalize_loras(selected_loras)
             else:
                 custom_loras = validate_loras_for_family(selected_loras, "ref2va")

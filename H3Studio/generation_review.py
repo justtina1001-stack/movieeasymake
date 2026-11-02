@@ -33,6 +33,10 @@ def prompt_review_item(compiled, *, scene_id=None, shot_id=None, title=None, sce
             "prompt": compiled.prompt, "video_model": compiled.video_model,
             "duration": compiled.actual_duration, "width": compiled.width, "height": compiled.height,
             "seed": compiled.seed, "steps": compiled.steps, "quality_mode": compiled.quality_mode,
+            "sampler_name": compiled.sampler_name, "scheduler": compiled.scheduler,
+            "turbo_lora": compiled.turbo_lora, "turbo_lora_strength": compiled.turbo_lora_strength,
+            "model_adapter": compiled.model_adapter, "model_adapter_strength": compiled.model_adapter_strength,
+            "manual_sigmas": copy.deepcopy(compiled.manual_sigmas),
             "asset_ids": required_asset_ids(compiled), "mapping": copy.deepcopy(compiled.mapping),
             "warnings": list(dict.fromkeys([*compiled.warnings, *((prepared or {}).get("h3_preparation_warnings") or [])])),
             "h3_translation": copy.deepcopy((prepared or {}).get("h3_translation") or {})}

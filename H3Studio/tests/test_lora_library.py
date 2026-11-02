@@ -28,12 +28,12 @@ def ref_payload(*, video=False, **changes):
 
 
 class RecommendationCatalogTests(unittest.TestCase):
-    def test_all_eight_choices_are_visible_without_inventing_installed_weights(self):
+    def test_all_ten_choices_are_visible_without_inventing_installed_weights(self):
         original = [name(WUSHU_FILE).replace("/", "\\"), name(CAMERA_FILE), "other.safetensors"]
         before = copy.deepcopy(original)
         items = recommended_lora_items(original)
         self.assertEqual(original, before)
-        self.assertEqual(len(items), 8)
+        self.assertEqual(len(items), 10)
         installed = [item for item in items if item["installed"]]
         self.assertEqual([item["name"] for item in installed], [name(WUSHU_FILE), name(CAMERA_FILE)])
         self.assertTrue(all(item["manual_selectable"] for item in installed))

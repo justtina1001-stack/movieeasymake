@@ -7,7 +7,7 @@ const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "../static/app.js"), "utf8");
 const html = fs.readFileSync(path.join(__dirname, "../static/index.html"), "utf8");
-const qualityModes = ["native", "turbo", "turbo_fast", "turbo_quality", "turbo_audio", "turbo_ref_quality", "turbo_sla", "sparse_experimental"];
+const qualityModes = ["native", "turbo", "turbo_fast", "turbo_quality", "turbo_audio", "turbo_ref_quality", "turbo_sla", "sparse_experimental", "turbo_fast_v13", "turbo_quality_v11", "turbo_ref_fast_v10", "turbo_ref_quality_v11"];
 
 function fixture() {
   const elements = new Map();
@@ -106,6 +106,10 @@ test("missing capability is explicit and does not silently select another mode",
 test("quality versions show correct step counts and family restrictions", () => {
   const { context, element, run } = fixture();
   for (const [mode, steps, key] of [
+    ["turbo_fast_v13", 4, "fl2v_768_fast_v13"],
+    ["turbo_quality_v11", 8, "fl2v_768_quality_v11"],
+    ["turbo_ref_fast_v10", 4, "ref2v_768_fast_v10"],
+    ["turbo_ref_quality_v11", 8, "ref2v_768_quality_v11"],
     ["turbo_audio", 4, "fl2v_768_audio_v12"],
     ["turbo_sla", 4, "fl2v_768_sla"],
     ["turbo_ref_quality", 8, "ref2v_768_quality_v10"],
@@ -116,6 +120,14 @@ test("quality versions show correct step counts and family restrictions", () => 
   assert.equal(run("qualityModeCompatible('turbo_audio', true)"), false);
   assert.equal(run("qualityModeCompatible('turbo_ref_quality', false)"), false);
   assert.equal(run("qualityModeCompatible('turbo_ref_quality', true)"), true);
+  for (const mode of ["turbo_fast_v13", "turbo_quality_v11"]) {
+    assert.equal(run(`qualityModeCompatible('${mode}', true)`), false);
+    assert.equal(run(`qualityModeCompatible('${mode}', false)`), true);
+  }
+  for (const mode of ["turbo_ref_fast_v10", "turbo_ref_quality_v11"]) {
+    assert.equal(run(`qualityModeCompatible('${mode}', true)`), true);
+    assert.equal(run(`qualityModeCompatible('${mode}', false)`), false);
+  }
   context.state.mode = "replace";
   element("#qualityMode").value = "turbo_ref_quality";
   run("syncQualityMode(864, 480)");

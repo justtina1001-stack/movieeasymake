@@ -55,7 +55,7 @@ class LoraMetadataTests(unittest.TestCase):
     def test_builtin_metadata_matches_all_existing_compiler_profiles(self):
         names = [candidates[0] for candidates in TURBO_LORA_CANDIDATES.values()]
         items = builtin_lora_items(names)
-        self.assertEqual(len(items), 8)
+        self.assertEqual(len(items), 12)
         self.assertEqual({item["key"] for item in items}, set(TURBO_LORA_CANDIDATES))
         for item in items:
             self.assertEqual(item["key"], item["profile"])
@@ -134,8 +134,8 @@ class LoraMetadataAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["name"] for item in data["items"]], data["names"])
         self.assertEqual(data["mode"], self.app["comfy"].mode)
         self.assertIn("folder", data)
-        self.assertEqual(len(data["builtin_items"]), 8)
-        self.assertEqual(len(data["recommended_items"]), 8)
+        self.assertEqual(len(data["builtin_items"]), 12)
+        self.assertEqual(len(data["recommended_items"]), 10)
         self.assertEqual([item["name"] for item in data["recommended_items"] if item["installed"]], [WUSHU, COMBAT])
         self.assertTrue(all(not item["manual_selectable"] for item in data["recommended_items"] if not item["installed"]))
         self.assertNotIn(builtin, data["names"])

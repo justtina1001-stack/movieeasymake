@@ -11,8 +11,9 @@ from typing import Any
 from custom_loras import normalize_loras
 from dialogue import format_dialogue
 from h3_prompt_format import number_speakers
-from domain import FL_ONLY_QUALITY_MODES, QUALITY_MODES
-from video_models import VIDEO_MODEL_FAST, normalize_video_model
+from domain import FL_ONLY_QUALITY_MODES, REF_ONLY_QUALITY_MODES, QUALITY_MODES
+from video_models import (VIDEO_MODEL_FAST, VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH,
+                          FIXED_RECIPE_MODELS, normalize_video_model)
 
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -730,11 +731,11 @@ def compile_shot_payload(
         "voice_mode": asset["voice_mode"],
     } for asset in referenced]
     use_reference_mode = bool(references or shot["storyboard_asset_id"] or prepared_continuation)
-    quality_mode = "native" if project.get("video_model") == VIDEO_MODEL_FAST else project["quality_mode"]
+    quality_mode = "native" if project.get("video_model") in FIXED_RECIPE_MODELS else project["quality_mode"]
     if use_reference_mode and quality_mode in FL_ONLY_QUALITY_MODES:
         quality_mode = "turbo"
         warnings.append("這個鏡頭使用 Ref2VA 素材，已自動改用相容的 Turbo 穩定模式。")
-    elif not use_reference_mode and quality_mode == "turbo_ref_quality":
+    elif not use_reference_mode and quality_mode in REF_ONLY_QUALITY_MODES:
         quality_mode = "turbo"
         warnings.append("這個鏡頭沒有 Ref2VA 素材，已自動改用相容的 FL2VA Turbo 穩定模式。")
     payload: dict[str, Any] = {
@@ -785,6 +786,10 @@ def compile_shot_payload(
         payload["video_model"] = project["video_model"]
     if project.get("video_model") == VIDEO_MODEL_FAST:
         payload.update(quality_mode="native", steps=8, scheduler="simple", memory_optimization=False, custom_loras=[])
+    elif project.get("video_model") == VIDEO_MODEL_PIKA:
+        payload.update(quality_mode="native", steps=6, scheduler="manual", memory_optimization=False, custom_loras=[])
+    elif project.get("video_model") == VIDEO_MODEL_REF_PATCH:
+        payload.update(quality_mode="native", steps=20, scheduler="simple", memory_optimization=False, custom_loras=[])
     return payload, warnings
 
 

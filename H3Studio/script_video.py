@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from custom_loras import normalize_loras, validate_loras_for_family, validate_lora_requirements
 from script_video_format import normalize_video_settings, video_dimensions
-from video_models import VIDEO_MODEL_FAST
+from video_models import FIXED_RECIPE_MODELS
 from dataclasses import asdict
 from domain import compile_request
 from generation_review import compiled_from_review, prompt_review_item, review_digest
@@ -120,7 +120,7 @@ class ScriptVideoManager:
     def _check_snapshot(self, snapshot: dict[str, Any]) -> None:
         try:
             settings = normalize_video_settings(snapshot.get("video_settings"))
-            if settings.get("video_model") == VIDEO_MODEL_FAST:
+            if settings.get("video_model") in FIXED_RECIPE_MODELS:
                 snapshot["custom_loras"] = normalize_loras(snapshot.get("custom_loras", []))
             else:
                 snapshot["custom_loras"] = validate_loras_for_family(snapshot.get("custom_loras", []), "ref2va")
