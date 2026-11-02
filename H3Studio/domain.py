@@ -15,6 +15,7 @@ from video_models import (FASTH3_FILENAME, FASTH3_STEPS, VIDEO_MODEL_FAST, VIDEO
 
 
 FPS = 24
+IMAGE_ONLY_LORA_FILENAMES = {"anima_rgba_lora.safetensors"}
 MAX_REFERENCE_IMAGES = 9
 MAX_REFERENCE_AUDIOS = 3
 MAX_REFERENCE_VIDEOS = 3
@@ -505,6 +506,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         raise RequestError(str(error)) from error
     reserved_loras = {name for candidates in TURBO_LORA_CANDIDATES.values() for name in candidates}
     reserved_loras.update(PIKA_LORA_FILENAMES.values())
+    if any(item["name"].split("/")[-1] in IMAGE_ONLY_LORA_FILENAMES
+           for item in custom_loras if item["enabled"] and item["strength"] > 0):
+        raise RequestError("Anima RGBA LoRA 僅供圖片工作室使用，不適用 H3 影片模型。")
     if any(item["name"].split("/")[-1] in reserved_loras for item in custom_loras if item["enabled"]):
         raise RequestError("內建 Turbo／Pika LoRA 請從影片模型或生成品質選擇，避免重複載入或使用錯誤的取樣設定。")
     requested_duration = min(15.0, max(5.0, _safe_float(payload.get("duration"), 5.0)))

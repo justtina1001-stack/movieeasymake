@@ -15,13 +15,19 @@ const fluxVariants = (flux=true, standard=true, turbo=true) => {
   status.variants.push({id:'flux3',label:'FLUX 3 Image Klein',ready:flux,steps:16,modes:['generate','edit'],mode_ready:{generate:flux,edit:flux},generation_max_pixels:1048576,reference_limit:1,transparent_supported:false,lora_supported:false,error:flux?'':'FLUX 3 模型尚未安裝'});
   return status;
 };
+const negativePrompt = 'worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts';
+const animaVariants = (ready=true) => {
+  const status=fluxVariants();
+  status.variants.push({id:'anima_rgba',ready,modes:['generate'],mode_ready:{generate:ready,edit:false},native_alpha:true,fixed_steps:30,generation_min_dimension:512,generation_max_dimension:1536,generation_dimension_step:64,generation_max_pixels:2359296,reference_limit:0,lora_supported:false,error:ready?'':'Anima RGBA 模型尚未安裝'});
+  return status;
+};
 const imageJob = extra => ({id:a,name:'來源圖片',mode:'generate',status:'completed',width:1024,height:1024,steps:25,seed:42,prompt:'來源描述',transparent:false,reference_resolution:1024,image_asset_ids:[],...extra});
 function deferred() { let resolve; const promise=new Promise(done=>{resolve=done;}); return {promise,resolve}; }
 
 async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscaleStatus={}, referenceWait=null}={}) {
   const elements = new Map(), calls=[];
   let stored = JSON.stringify(draft);
-  const defaults={imageMode:'generate',imageModel:'standard',imageWidth:'1024',imageHeight:'1024',imageSteps:'25',imageSeed:'42',referenceResolution:'1024',imageLoraStrength:'1'};
+  const defaults={imageMode:'generate',imageModel:'standard',imageNegativePrompt:negativePrompt,imageWidth:'1024',imageHeight:'1024',imageSteps:'25',imageSeed:'42',referenceResolution:'1024',imageLoraStrength:'1'};
   function el(id) {
     const classes=new Set();
     if(!elements.has(id)) elements.set(id, {
@@ -157,7 +163,7 @@ test('upscale results use their recorded source variant for editing and never tr
 test('result cards and details distinguish Qwen models legacy and Real-ESRGAN models',async()=>{
   const f=await fixture({jobs:[imageJob({model_variant:'turbo'}),imageJob({id:b}),imageJob({id:c,mode:'upscale',scale:2,source_model_variant:'turbo'})]});
   assert.match(f.el('imageJobs').innerHTML,/模型：Qwen 官方 Turbo · 快速 8 步/); assert.match(f.el('imageJobs').innerHTML,/模型：Qwen 原版 · 精細生成/); assert.match(f.el('imageJobs').innerHTML,/模型：Real-ESRGAN · 增強放大/);
-  const html=fs.readFileSync(path.join(__dirname,'../static/images.html'),'utf8'); assert.match(html,/id="imageModel"/); assert.match(html,/images.js\?v=20261027-flux3-t2i/); assert.match(html,/<option value="flux3">FLUX 3 Image Klein/);
+  const html=fs.readFileSync(path.join(__dirname,'../static/images.html'),'utf8'); assert.match(html,/id="imageModel"/); assert.match(html,/images.js\?v=20261102-anima-rgba/); assert.match(html,/<option value="flux3">FLUX 3 Image Klein/);
 });
 
 test('FLUX edit selection preserves Qwen options across reload and submits only its fixed edit settings',async()=>{
@@ -514,4 +520,101 @@ test('upscale results expose compare and further editing without invalid seed re
   const html=f.el('imageJobs').innerHTML;
   assert.match(html,/2 倍增強放大/);assert.match(html,/data-compare/);assert.match(html,/data-continue/);
   assert.equal(html.includes('data-reuse'),false);assert.equal(html.includes('Seed null'),false);
+});
+
+test('Anima sends native transparent text generation without translating the draft or mixing Qwen references and LoRA',async()=>{
+  const name='qwen_image_2_1/style.safetensors',prompt='九尾狐, red dress, full body';
+  const f=await fixture({status:{...animaVariants(),loras:[name]},draft:{imageMode:'edit',imagePrompt:prompt,imageName:'原始工作',imageSteps:'37',imageTransparent:false,referenceResolution:'512',editTemplate:'style',imageLora:name,imageLoraStrength:'0.65',refs:[{id:a},{id:b}]}});
+  f.el('imageModel').value='anima_rgba'; await f.fire('imageModel','input');
+  assert.equal(f.el('imageMode').value,'generate'); assert.equal(f.el('imageEditOption').disabled,true); assert.equal(f.el('imageMode').disabled,true);
+  assert.equal(f.el('imageTransparent').checked,true); assert.equal(f.el('imageTransparent').disabled,true);
+  assert.equal(f.el('referenceSection').classList.contains('hidden'),true); assert.equal(f.el('referenceFiles').disabled,true); assert.equal(f.el('imageLoraSection').classList.contains('hidden'),true);
+  assert.equal(f.el('imageSteps').value,'30'); assert.equal(f.el('imageSteps').disabled,true); assert.equal(f.el('imageNegativePrompt').disabled,false);
+  assert.match(f.el('imageTransparentHint').textContent,/無法替既有圖片去背/); assert.match(f.el('imagePrompt').placeholder,/Danbooru/);
+  f.el('imageSteps').value='1'; f.el('imageTransparent').checked=false;
+  await f.fire('imageForm','submit');
+  const payload=JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body);
+  assert.equal(payload.model_variant,'anima_rgba'); assert.equal(payload.mode,'generate'); assert.equal(payload.steps,30); assert.equal(payload.transparent,true);
+  assert.equal(payload.prompt,prompt); assert.equal(payload.negative_prompt,negativePrompt); assert.deepEqual(payload.image_asset_ids,[]); assert.equal(payload.lora_name,''); assert.equal(payload.lora_strength,0);
+  assert.deepEqual(f.draft().refs,[{id:a},{id:b}]); assert.equal(f.draft().imageLora,name); assert.equal(f.draft().standardImageSteps,'37'); assert.equal(f.el('imageName').value,'原始工作');
+  assert.equal(f.calls.some(call=>/translate|rewrite|expand/.test(call.url)),false);
+});
+
+test('leaving Anima restores original Qwen controls dimensions transparency and references after draft reload',async()=>{
+  for (const transparent of [false,true]) {
+    const f=await fixture({status:animaVariants(),draft:{imageMode:'edit',imagePrompt:'保留原文',imageWidth:'1280',imageHeight:'736',imageSteps:'39',imageTransparent:transparent,referenceResolution:'2048',editTemplate:'cutout',refs:[{id:a},{id:b}]}});
+    f.el('imageModel').value='anima_rgba'; await f.fire('imageModel','input');
+    assert.equal(f.el('imageWidth').value,'1280'); assert.equal(f.el('imageHeight').value,'736'); assert.match(f.el('generationSizeStatus').textContent,/原尺寸已保留/);
+    f.el('imageWidth').value='768'; f.el('imageHeight').value='1024'; f.el('imageNegativePrompt').value=''; await f.fire('imageNegativePrompt','input');
+    const saved=f.draft(), restored=await fixture({status:animaVariants(),draft:saved});
+    assert.equal(restored.el('imageModel').value,'anima_rgba'); assert.equal(restored.el('imageSteps').value,'30'); assert.equal(restored.el('imageNegativePrompt').value,''); assert.equal(restored.el('imageTransparent').checked,true);
+    restored.el('imageModel').value='standard'; await restored.fire('imageModel','input');
+    assert.equal(restored.el('imageWidth').value,'1280'); assert.equal(restored.el('imageHeight').value,'736'); assert.equal(restored.el('imageSteps').value,'39'); assert.equal(restored.el('imageMode').value,'edit');
+    assert.equal(restored.el('imageTransparent').checked,transparent); assert.equal(restored.el('imageTransparent').disabled,false); assert.equal(restored.el('referenceResolution').value,'2048'); assert.equal(restored.el('editTemplate').value,'cutout');
+    assert.equal(restored.el('imageEditOption').disabled,false); assert.equal(restored.el('imageNegativePrompt').disabled,true); assert.equal(restored.el('imagePrompt').value,'保留原文'); assert.deepEqual(restored.draft().refs,[{id:a},{id:b}]);
+  }
+});
+
+test('Qwen and FLUX modes remain separate through Anima switching and returning to Turbo restores native eight steps',async()=>{
+  const f=await fixture({status:animaVariants(),draft:{imageMode:'edit',imageTransparent:true,referenceResolution:'512',imageSteps:'40',refs:[{id:a}]}});
+  for(const variant of ['flux3','anima_rgba','flux3']) { f.el('imageModel').value=variant; await f.fire('imageModel','input'); }
+  assert.equal(f.el('imageMode').value,'edit'); assert.equal(f.el('imageSteps').value,'16'); assert.equal(f.el('imageTransparent').checked,false);
+  for(const variant of ['anima_rgba','turbo']) { f.el('imageModel').value=variant; await f.fire('imageModel','input'); }
+  assert.equal(f.el('imageSteps').value,'8'); assert.equal(f.el('imageMode').value,'edit'); assert.equal(f.el('imageTransparent').checked,true); assert.equal(f.el('referenceResolution').value,'512');
+  f.el('imageModel').value='standard'; await f.fire('imageModel','input'); assert.equal(f.el('imageSteps').value,'40');
+});
+
+test('Anima rejects incompatible sizes without replacing user values and accepts both supported bounds',async()=>{
+  for(const [width,height] of [[256,1024],[1025,1024],[1024,1537],[2048,1024],[1024,736]]) {
+    const f=await fixture({status:animaVariants(),draft:{imageModel:'anima_rgba',imageWidth:String(width),imageHeight:String(height)}});
+    assert.equal(f.el('imageWidth').value,String(width)); assert.equal(f.el('imageHeight').value,String(height)); assert.equal(f.el('generateImage').disabled,true); assert.match(f.el('generationSizeStatus').textContent,/512～1536.*64/);
+    await f.fire('imageForm','submit'); assert.equal(f.calls.some(call=>call.url==='/api/images/jobs'),false);
+  }
+  for(const size of [512,1536]) {
+    const f=await fixture({status:animaVariants(),draft:{imageModel:'anima_rgba',imageWidth:String(size),imageHeight:String(size)}});
+    assert.equal(f.el('imageWidth').min,'512'); assert.equal(f.el('imageWidth').max,'1536'); assert.equal(f.el('imageWidth').step,'64'); assert.equal(f.el('generateImage').disabled,false);
+    await f.fire('imageForm','submit'); const payload=JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body); assert.equal(payload.width,size); assert.equal(payload.height,size);
+  }
+});
+
+test('unavailable or unsupported Anima capabilities never silently submit a Qwen request',async()=>{
+  const wrongMode=animaVariants(); wrongMode.variants.at(-1).mode_ready.generate=false; wrongMode.variants.at(-1).mode_errors={generate:'透明節點尚未安裝'};
+  for(const status of [animaVariants(false),variants(),{},wrongMode]) {
+    const f=await fixture({status,draft:{imageModel:'anima_rgba',imagePrompt:'原稿'}});
+    assert.equal(f.el('imageModel').value,'anima_rgba'); assert.equal(f.el('generateImage').disabled,true);
+    await f.fire('imageForm','submit'); assert.equal(f.calls.some(call=>call.url==='/api/images/jobs'),false); assert.equal(f.el('imagePrompt').value,'原稿');
+  }
+});
+
+test('Anima rejects reference drops reference actions and edit templates before changing the existing draft',async()=>{
+  const f=await fixture({status:animaVariants(),draft:{imageModel:'anima_rgba',imagePrompt:'原稿',editTemplate:'cutout',refs:[{id:b}]},jobs:[imageJob({model_variant:'anima_rgba',steps:30})]});
+  await f.fire('referenceDrop','drop',{dataTransfer:{files:[{name:'test.png'}]}}); await f.fire('insertTemplate','click');
+  await f.click('imageJobs',{reference:a}); await f.click('imageJobs',{continue:a});
+  assert.match(f.el('formMessage').textContent,/先.*選擇 Qwen 或 FLUX 3/);
+  assert.equal(f.calls.some(call=>call.url==='/api/assets' || call.url.endsWith('/reference')),false); assert.equal(f.el('imagePrompt').value,'原稿'); assert.deepEqual(f.draft().refs,[{id:b}]);
+});
+
+test('Anima jobs keep model identity actual prompts alpha warnings and empty negative prompt during reuse',async()=>{
+  const job=imageJob({model_variant:'anima_rgba',steps:30,transparent:true,rgba:true,original_prompt:'1girl, red dress',prompt:'masterpiece, best quality, newest, safe, 1girl, red dress, transparent background',original_negative_prompt:'',negative_prompt:'',alpha_warning:'透明度未達建議 <check>'});
+  const f=await fixture({status:animaVariants(),jobs:[job,imageJob({id:c})],draft:{imagePrompt:'舊稿',refs:[{id:b}]}});
+  const markup=f.el('imageJobs').innerHTML;
+  assert.match(markup,/Anima RGBA · 動漫透明圖/); assert.match(markup,/實際生成描述與排除內容/); assert.match(markup,/transparent background/); assert.match(markup,/透明度未達建議 &lt;check&gt;/); assert.match(markup,/模型：Qwen 原版/);
+  await f.click('imageJobs',{reuse:a}); assert.equal(f.el('imageModel').value,'anima_rgba'); assert.equal(f.el('imagePrompt').value,job.original_prompt); assert.equal(f.el('imageNegativePrompt').value,''); assert.deepEqual(f.draft().refs,[{id:b}]);
+  await f.fire('imageForm','submit'); const payload=JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body); assert.equal(payload.prompt,job.original_prompt); assert.equal(payload.negative_prompt,''); assert.equal(payload.transparent,true);
+});
+
+test('Anima output can explicitly continue in the chosen Qwen or FLUX model without selecting an unsupported edit workflow',async()=>{
+  for(const variant of ['standard','flux3']) {
+    const f=await fixture({status:animaVariants(),draft:{imageModel:variant,refs:[{id:b}]},jobs:[imageJob({model_variant:'anima_rgba',steps:30,transparent:true})]});
+    await f.click('imageJobs',{continue:a}); assert.equal(f.el('imageModel').value,variant); assert.equal(f.el('imageMode').value,'edit'); assert.deepEqual(f.draft().refs,[{id:c}]);
+    await f.fire('imageForm','submit'); const payload=JSON.parse(f.calls.find(call=>call.url==='/api/images/jobs').options.body); assert.equal(payload.model_variant,variant); assert.deepEqual(payload.image_asset_ids,[c]);
+  }
+});
+
+test('Anima interface explains native transparency author recipe and both licenses while preserving other model help',async()=>{
+  const f=await fixture({status:animaVariants(),draft:{imageModel:'anima_rgba'}});
+  assert.match(f.el('imageTransparentLabel').textContent,/透明動漫 PNG.*原生 Alpha/); assert.equal(f.el('animaPromptHelp').classList.contains('hidden'),false); assert.equal(f.el('animaBaseLicense').classList.contains('hidden'),false);
+  assert.match(f.el('imageLicenseText').textContent,/Apache-2.0.*基礎模型.*生成圖片商用.*付費.*另取得授權/);
+  const html=fs.readFileSync(path.join(__dirname,'../static/images.html'),'utf8'); assert.match(html,/<option value="anima_rgba">Anima RGBA · 動漫透明圖/); assert.match(html,/circlestone-labs\/Anima/); assert.match(html,/不經 AI 翻譯或改寫/); assert.match(html,/worst quality, low quality/);
+  f.el('imageModel').value='standard'; await f.fire('imageModel','input'); assert.equal(f.el('animaPromptHelp').classList.contains('hidden'),true); assert.equal(f.el('animaBaseLicense').classList.contains('hidden'),true); assert.equal(f.el('imageLoraSection').classList.contains('hidden'),false);
 });

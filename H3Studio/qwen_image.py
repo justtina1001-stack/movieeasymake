@@ -1,4 +1,4 @@
-"""Qwen and FLUX image jobs on the existing local or shared ComfyUI engine."""
+"""Qwen, FLUX and Anima image jobs on the existing local or shared engine."""
 from __future__ import annotations
 
 import asyncio
@@ -21,10 +21,12 @@ from lora_catalog import describe_loras
 from image_upscale import compile_upscale, build_upscale_workflow, upscale_capabilities, MODELS as UPSCALE_MODELS
 from flux3_image import build_workflow as build_flux3_workflow, capabilities as flux3_capabilities, validate_request as validate_flux3_request
 from flux3_image_models import STEPS as FLUX3_STEPS
+from anima_rgba import (build_workflow as build_anima_workflow, capabilities as anima_capabilities,
+                        validate_request as validate_anima_request, compiled_fields as anima_compiled_fields)
 
 ACTIVE = {"queued", "preparing", "running"}
 MAX_SEED = 2**53 - 1
-MODEL_VARIANTS = ("standard", "turbo", "flux3")
+MODEL_VARIANTS = ("standard", "turbo", "flux3", "anima_rgba")
 
 
 def node_enum_choices(schema, name):
@@ -77,12 +79,14 @@ def compile_image_request(payload):
         raise RequestError("圖片模式必須是文字生圖或參考圖編輯。")
     variant = payload.get("model_variant", "standard")
     if variant not in MODEL_VARIANTS:
-        raise RequestError("圖片模型必須是 Qwen 標準、官方 Turbo 或 FLUX 3。")
+        raise RequestError("圖片模型必須是 Qwen 標準、官方 Turbo、FLUX 3 或 Anima RGBA。")
     refs = payload.get("image_asset_ids", [])
     if not isinstance(refs, list) or len(refs) > 10 or any(not isinstance(x, str) or not re.fullmatch(r"[a-f0-9]{32}", x) for x in refs):
         raise RequestError("參考圖片最多 10 張，且必須先上傳。")
     if variant == "flux3":
         validate_flux3_request(payload)
+    elif variant == "anima_rgba":
+        validate_anima_request(payload)
     if mode == "edit" and not refs:
         raise RequestError("圖片編輯至少需要一張參考圖片。")
     if mode == "generate" and refs:
@@ -107,7 +111,9 @@ def compile_image_request(payload):
         if flag in payload and not isinstance(payload[flag], bool):
             raise RequestError(f"{flag} 必須為布林值。")
     seed = secrets.randbelow(MAX_SEED + 1) if payload.get("seed_auto", True) else integer("seed", 42, 0, MAX_SEED)
-    name = str(payload.get("name") or (("FLUX 3 改圖" if mode == "edit" else "FLUX 3 生圖") if variant == "flux3" else "Qwen 圖片")).strip()
+    default_name = ("Anima 透明動漫圖" if variant == "anima_rgba" else
+                    ("FLUX 3 改圖" if mode == "edit" else "FLUX 3 生圖") if variant == "flux3" else "Qwen 圖片")
+    name = str(payload.get("name") or default_name).strip()
     if len(name) > 80:
         raise RequestError("圖片名稱最多 80 字。")
     text = prompt.strip()
@@ -118,7 +124,7 @@ def compile_image_request(payload):
     if isinstance(strength, bool) or not isinstance(strength, (int, float)) or not math.isfinite(strength) or not 0 <= strength <= 1.5:
         raise RequestError("LoRA 強度必須介於 0～1.5。")
     validate_variant_lora(variant, lora, strength)
-    if payload.get("transparent", False):
+    if payload.get("transparent", False) and variant != "anima_rgba":
         text = f"This is an RGBA format image with transparency. {text}\nThe image has an alpha channel and a transparent background."
     result = dict(name=name, prompt=text, original_prompt=prompt, mode=mode, model_variant=variant, image_asset_ids=refs,
                 width=width, height=height, steps=steps, seed=seed,
@@ -129,15 +135,19 @@ def compile_image_request(payload):
                       output_size_policy="reference_aspect_1mp" if mode == "edit" else "requested_dimensions")
         if mode == "edit":
             result["reference_megapixels"] = 1.0
+    elif variant == "anima_rgba":
+        result.update(anima_compiled_fields(payload))
     return result
 
 
 def build_image_workflow(compiled, uploaded, job_id):
     variant = compiled.get("model_variant", "standard")
     if variant not in MODEL_VARIANTS:
-        raise RequestError("圖片模型必須是 Qwen 標準、官方 Turbo 或 FLUX 3。")
+        raise RequestError("圖片模型必須是 Qwen 標準、官方 Turbo、FLUX 3 或 Anima RGBA。")
     if variant == "flux3":
         return build_flux3_workflow(compiled, uploaded, job_id)
+    if variant == "anima_rgba":
+        return build_anima_workflow(compiled, uploaded, job_id)
     validate_variant_lora(variant, compiled.get("lora_name"), compiled.get("lora_strength", 1))
     def node(kind, **inputs):
         return {"class_type": kind, "inputs": inputs}
@@ -284,7 +294,7 @@ async def _qwen_capabilities(comfy):
 
 async def image_capabilities(comfy):
     # Independent probes keep either family usable when the other is absent.
-    qwen, flux = await asyncio.gather(_qwen_capabilities(comfy), flux3_capabilities(comfy))
+    qwen, flux, anima = await asyncio.gather(_qwen_capabilities(comfy), flux3_capabilities(comfy), anima_capabilities(comfy))
     for profile in qwen["variants"]:
         profile.update(modes=["generate", "edit"], reference_limit=10, transparent_supported=True,
                        lora_supported=profile["id"] == "standard", license_url=LICENSE_URL)
@@ -292,6 +302,8 @@ async def image_capabilities(comfy):
                              [{"filename": TURBO_MODEL_FILE[1], "size": TURBO_MODEL_FILE[2],
                                "installed": profile.get("model_installed", False)}] + [dict(item) for item in qwen["models"][1:]])
     qwen["variants"].append(flux)
+    qwen["variants"].append(anima)
+    qwen["anima_rgba"] = anima
     qwen["ready"] = any(profile["ready"] for profile in qwen["variants"])
     if qwen["ready"]:
         qwen["error"] = None
@@ -394,9 +406,28 @@ class ImageJobManager:
             if job.get("model_variant") == "flux3" and job["mode"] == "generate" and (width, height) != (job["width"], job["height"]):
                 raise RequestError("FLUX 3 生圖結果尺寸與要求不符，請檢查目前引擎。")
             rgba = image.mode == "RGBA"
+            if job.get("model_variant") == "anima_rgba":
+                if (width, height) != (job["width"], job["height"]):
+                    raise RequestError("Anima RGBA 生圖結果尺寸與要求不符，請檢查目前引擎。")
+                if not rgba:
+                    raise RequestError("Anima RGBA 未輸出真正的 RGBA PNG，請檢查專用 VAE 與引擎版本。")
             image.verify()
-        temporary.replace(path)
         changes = {}
+        if self.jobs[job_id].get("model_variant") == "anima_rgba":
+            with Image.open(temporary) as image:
+                alpha = image.getchannel("A")
+                extrema, histogram = alpha.getextrema(), alpha.histogram()
+                transparent_count = sum(histogram[:255])
+                meaningful_fraction = sum(histogram[:128]) / (width * height)
+                alpha_warning = None
+                if extrema[0] == 255:
+                    alpha_warning = "本張 Alpha 全部不透明，請調整構圖或提高 transparent background 的提示詞權重後再比較。"
+                elif meaningful_fraction < 0.05:
+                    alpha_warning = "本張背景近乎不透明，實際透明背景不到 5%；請調整構圖或提高 transparent background 的提示詞權重後再比較。"
+                changes.update(alpha_extrema=list(extrema), alpha_transparent_pixels=transparent_count,
+                               alpha_transparent_fraction=transparent_count / (width * height),
+                               alpha_meaningful_fraction=meaningful_fraction, alpha_warning=alpha_warning)
+        temporary.replace(path)
         if self.jobs[job_id].get("model_variant") == "flux3":
             captions = history.get("outputs", {}).get("48", {}).get("text", [])
             if isinstance(captions, str):
@@ -425,24 +456,26 @@ class ImageJobManager:
                 else:
                     variant = job.get("model_variant", "standard")
                     if variant not in MODEL_VARIANTS:
-                        raise RequestError("圖片模型必須是 Qwen 標準、官方 Turbo 或 FLUX 3。")
+                        raise RequestError("圖片模型必須是 Qwen 標準、官方 Turbo、FLUX 3 或 Anima RGBA。")
                     profiles = status.get("variants")
                     profile = next((item for item in profiles or [] if item.get("id") == variant), None)
                     # Older standard-job consumers can still supply legacy status;
                     # Turbo always requires its own positive readiness result.
                     ready = profile.get("ready", False) if profile else variant == "standard" and profiles is None and status.get("ready", False)
-                    if variant == "flux3" and profile:
+                    if variant in {"flux3", "anima_rgba"} and profile:
                         mode_ready = profile.get("mode_ready")
                         ready = (ready and mode_ready.get(job["mode"]) is True) if isinstance(mode_ready, dict) else \
                             (ready and job["mode"] in profile.get("modes", ["edit"]))
                     if not ready:
-                        mode_error = (profile or {}).get("mode_errors", {}).get(job["mode"]) if variant == "flux3" else None
+                        mode_error = (profile or {}).get("mode_errors", {}).get(job["mode"]) if variant in {"flux3", "anima_rgba"} else None
                         if variant == "flux3" and profile and job["mode"] == "generate" and "generate" not in profile.get("modes", []):
                             mode_error = "FLUX 3 文字生圖需要新版 Studio，請更新並重新啟動 Studio。"
                         raise RequestError(mode_error or (profile or {}).get("error") or status.get("error") or "所選圖片模型尚未在目前引擎就緒，請重新檢查模型。")
                     validate_variant_lora(variant, job.get("lora_name"), job.get("lora_strength", 1))
                     if variant == "flux3":
                         validate_flux3_request(job)
+                    elif variant == "anima_rgba":
+                        validate_anima_request(job)
                 if is_upscale and not any(m["id"] == job["upscale_model"] and m["installed"] for m in status["models"]):
                     raise RequestError("所選放大模型已不在目前引擎中。")
                 if job.get("lora_name") and job.get("lora_strength", 1) > 0:
@@ -453,7 +486,9 @@ class ImageJobManager:
                     uploaded[asset_id] = await self.comfy.upload_asset(self.assets.path_for(asset_id), f"h3studio/{job_id}")
                 if event.is_set():
                     raise asyncio.CancelledError
-                workflow = (build_upscale_workflow if is_upscale else build_image_workflow)(job, uploaded, job_id)
+                workflow_job = ({**job, "native_model_names": profile.get("loader_names", {})}
+                                if not is_upscale and variant == "anima_rgba" else job)
+                workflow = (build_upscale_workflow if is_upscale else build_image_workflow)(workflow_job, uploaded, job_id)
                 (self.job_dir / f"{job_id}.workflow.json").write_text(json.dumps(workflow, ensure_ascii=False), encoding="utf-8")
                 self.update(job_id, status="running", current_node="送出圖片工作", generation_started_at=now())
                 async def callback(update):

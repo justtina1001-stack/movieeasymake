@@ -1,5 +1,17 @@
 # MiniMax H3 Studio
 
+## Anima RGBA 動漫透明圖（2026-11-02）
+
+「圖片」工作室的「圖片模型」可選 **Anima RGBA · 動漫透明圖**，以文字直接生成帶真實 Alpha 通道的 PNG。這是 Anima 的專用 RGBA VAE 與 LoRA，適合動漫立繪、道具及貼圖；不是將既有圖片去背的工具，不支援參考圖編輯。原有 Qwen 與 FLUX 選項保留。
+
+使用 Anima Base v1.0、Qwen3 0.6B 文字編碼器、RGBA VAE 與強度 1.0 的專用 LoRA，固定作者範例的 30 步、CFG 4.5、er_sde／simple、單張輸出。建議從 1024 × 1024 開始，寬高各為 512～1536、64 的倍數。描述可使用英文動漫標籤或完整英文句子；系統會補上透明背景觸發詞，工作紀錄保留實際提示詞與採樣設定。這個選項的透明輸出固定啟用，Qwen LoRA 不會混用，切回原模型可繼續使用原設定。
+
+在 GPU 主機執行根目錄 `setup_anima_rgba.bat`，安裝四份固定版本的權重並完整校驗 SHA-256；合計約 6.07 GB。沿用現有 ComfyUI 0.42.0 原生節點，無須額外節點或引擎升級。透明 PNG 直接保存模型輸出的 RGBA，不會另跑背景移除或轉成 RGB。細髮、玻璃、煙霧與半透明衣物仍可能不理想，滿版特寫也可能留下不透明底色，需檢查輸出 Alpha。
+
+RGBA 擴充標示 Apache-2.0；Anima 底模另有 CircleStone 授權。底模作者明確允許生成圖片用於商業美術與遊戲素材，付費模型服務等用途需另取得授權。請同時閱讀 [Anima RGBA 模型卡](https://huggingface.co/localai0301/Anima-RGBA) 與 [Anima 底模授權說明](https://huggingface.co/circlestone-labs/Anima#license)。
+
+本機 1024 單張實測約 26～31 秒；人物與道具透明效果良好，火焰需要提高透明提示權重才得到有效 Alpha，且構圖會變動。詳細數據、顯存量測範圍與限制見 [Anima RGBA 驗收紀錄](ANIMA_RGBA_REVIEW_2026-11-02.md)。
+
 ## 新增影片模型與 LoRA（2026-11-02）
 
 「影片模型」新增 **Pika H3 Flex · 6 步** 與 **H3 FL2VA + Ref Patch · 實驗參考**；原有 H3、FastH3 與歷史配方保留。快速生成、短片及劇本工作室都可選擇新模型。Pika 可使用原有文生、圖片、參考與專用動畫模式；Ref Patch 使用 FL2VA 底模搭配參考條件，只支援多模態參考、角色替換、彈窗及 MG 參考模式，其他模式會先提示。
