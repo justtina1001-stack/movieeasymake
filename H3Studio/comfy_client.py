@@ -28,6 +28,8 @@ from queue_cancel import cancel_queue_prompt
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+MODEL_INVENTORY_TIMEOUT = 7
+MODEL_INVENTORY_CONCURRENCY = 4
 
 
 class ComfyExecutionError(RuntimeError):
@@ -53,6 +55,8 @@ class ComfyClient:
         self.log_handle = None
         self.start_lock = asyncio.Lock()
         self._model_cache: tuple[float, dict[str, bool]] | None = None
+        self._model_inventory_task: asyncio.Task | None = None
+        self._model_inventory_revision = 0
 
     def configure(self, settings: ConnectionSettings) -> None:
         self.mode = settings.mode
@@ -61,6 +65,8 @@ class ComfyClient:
         self.auto_start_local = settings.auto_start_local
         self.remote_access_token = settings.remote_access_token
         self._model_cache = None
+        self._model_inventory_revision += 1
+        self._model_inventory_task = None
 
     @property
     def can_start(self) -> bool:
@@ -160,6 +166,33 @@ class ComfyClient:
     async def model_inventory(self, *, refresh: bool = False) -> dict[str, bool]:
         if not refresh and self._model_cache and self._model_cache[0] > time.monotonic():
             return dict(self._model_cache[1])
+        task = self._model_inventory_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._refresh_model_inventory(self._model_inventory_revision))
+            self._model_inventory_task = task
+            task.add_done_callback(self._finish_model_inventory)
+        # A disconnected page must not cancel a refresh shared by other callers.
+        return dict(await asyncio.shield(task))
+
+    def _finish_model_inventory(self, task: asyncio.Task) -> None:
+        if self._model_inventory_task is task:
+            self._model_inventory_task = None
+        if not task.cancelled():
+            task.exception()  # Retrieve failures even if every HTTP caller disconnected.
+
+    async def _refresh_model_inventory(self, revision: int) -> dict[str, bool]:
+        try:
+            async with asyncio.timeout(MODEL_INVENTORY_TIMEOUT):
+                result, cacheable = await self._fetch_model_inventory()
+        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError) as error:
+            raise RuntimeError("暫時無法讀取引擎模型清單，請稍後重試；這不代表模型已移除。") from error
+        if revision != self._model_inventory_revision:
+            raise RuntimeError("引擎連線設定已變更，請重新讀取模型清單。")
+        if cacheable:
+            self._model_cache = (time.monotonic() + 60, dict(result))
+        return result
+
+    async def _fetch_model_inventory(self) -> tuple[dict[str, bool], bool]:
         expected = {
             "fl2va": ("UNETLoader", "unet_name", "minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
             "ref2va": ("UNETLoader", "unet_name", "minimax_h3_ref2va_pruned_int8_convrot.safetensors"),
@@ -178,46 +211,53 @@ class ComfyClient:
                        "video_vae_int8_supported": False, "fasth3_blackwell": False,
                        "fasth3_core_supported": False, "fasth3_nodes_ready": False,
                        "pika_nodes_ready": False, "ref_patch_nodes_ready": False})
-        try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                loader_schemas = {}
-                for name, (node, field, filename) in expected.items():
-                    if node not in loader_schemas:
-                        async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
-                            loader_schemas[node] = await response.json() if response.status == 200 else {}
-                    values = input_choices(loader_schemas[node].get(node, {}), field)
-                    result[name] = filename in values
-                async with session.get(f"{self.base_url}/object_info/LoraLoaderModelOnly", headers=self.auth_headers()) as response:
-                    if response.status == 200:
+        capability_nodes = (
+            "H3MemoryOptimization", "H3SparseAttention", "BlockSparseAttention", "MiniMaxH3SigmaShift",
+            "MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide",
+            "ManualSigmas", "KSamplerSelect", "MiniMaxH3RefPatchLoader",
+        )
+        nodes = tuple(dict.fromkeys([*(entry[0] for entry in expected.values()), *capability_nodes]))
+        base_url, headers = self.base_url, self.auth_headers()
+        semaphore = asyncio.Semaphore(MODEL_INVENTORY_CONCURRENCY)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=MODEL_INVENTORY_TIMEOUT)) as session:
+            async def fetch_schema(node: str) -> dict[str, Any]:
+                async with semaphore:
+                    async with session.get(f"{base_url}/object_info/{node}", headers=headers) as response:
+                        response.raise_for_status()
                         payload = await response.json()
-                        available_loras = payload.get("LoraLoaderModelOnly", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
-                        for profile, candidates in TURBO_LORA_CANDIDATES.items():
-                            result[f"turbo_{profile}"] = any(candidate in available_loras for candidate in candidates)
-                node_schemas = {}
-                for node in ("H3MemoryOptimization", "H3SparseAttention", "BlockSparseAttention", "MiniMaxH3SigmaShift",
-                             "MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide",
-                             "ManualSigmas", "KSamplerSelect", "MiniMaxH3RefPatchLoader"):
-                    async with session.get(f"{self.base_url}/object_info/{node}", headers=self.auth_headers()) as response:
-                        if response.status == 200:
-                            payload = await response.json()
-                            node_schemas[node] = payload.get(node, {})
-                result["h3_memory_optimization"] = bool(node_schemas.get("H3MemoryOptimization"))
-                result["h3_optimizations"] = result["h3_memory_optimization"] and bool(node_schemas.get("H3SparseAttention"))
-                result["h3_sigma_shift"] = bool(node_schemas.get("MiniMaxH3SigmaShift"))
-                result["fasth3_nodes_ready"] = fasth3_node_support(node_schemas)
-                result["pika_nodes_ready"] = pika_node_support(node_schemas)
-                result["ref_patch_nodes_ready"] = ref_patch_node_support(node_schemas)
-                sparse_inputs = node_schemas.get("BlockSparseAttention", {}).get("input", {}).get("required", {})
-                selection = sparse_inputs.get("selection", [])
-                options = selection[1].get("options", []) if len(selection) > 1 and isinstance(selection[1], dict) else []
-                result["h3_sla_attention"] = any(
-                    isinstance(option, dict) and option.get("key") == "sla"
-                    and "keep_percent" in option.get("inputs", {}).get("required", {})
-                    for option in options
-                )
-        except (aiohttp.ClientError, asyncio.TimeoutError, TypeError, ValueError):
-            pass
+                        if not isinstance(payload, dict) or not isinstance(payload.get(node, {}), dict):
+                            raise ValueError("Invalid object_info response")
+                        # Native ComfyUI returns HTTP 200 with {} for unknown nodes.
+                        return payload.get(node, {})
+
+            tasks = [asyncio.create_task(fetch_schema(node)) for node in nodes]
+            try:
+                schemas = dict(zip(nodes, await asyncio.gather(*tasks)))
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        for name, (node, field, filename) in expected.items():
+            result[name] = filename in input_choices(schemas[node], field)
+        available_loras = input_choices(schemas["LoraLoaderModelOnly"], "lora_name")
+        for profile, candidates in TURBO_LORA_CANDIDATES.items():
+            result[f"turbo_{profile}"] = any(candidate in available_loras for candidate in candidates)
+        result["h3_memory_optimization"] = bool(schemas["H3MemoryOptimization"])
+        result["h3_optimizations"] = result["h3_memory_optimization"] and bool(schemas["H3SparseAttention"])
+        result["h3_sigma_shift"] = bool(schemas["MiniMaxH3SigmaShift"])
+        result["fasth3_nodes_ready"] = fasth3_node_support(schemas)
+        result["pika_nodes_ready"] = pika_node_support(schemas)
+        result["ref_patch_nodes_ready"] = ref_patch_node_support(schemas)
+        sparse_inputs = schemas["BlockSparseAttention"].get("input", {}).get("required", {})
+        selection = sparse_inputs.get("selection", [])
+        options = selection[1].get("options", []) if len(selection) > 1 and isinstance(selection[1], dict) else []
+        result["h3_sla_attention"] = any(
+            isinstance(option, dict) and option.get("key") == "sla"
+            and "keep_percent" in option.get("inputs", {}).get("required", {})
+            for option in options
+        )
+        stats = None
         try:
             stats = await self.system_stats()
             system = stats.get("system", {}) if isinstance(stats, dict) else {}
@@ -252,8 +292,7 @@ class ComfyClient:
         result["video_vae"] = result["video_vae_fp16"] or (
             result["video_vae_int8"] and result["video_vae_int8_supported"]
         )
-        self._model_cache = (time.monotonic() + 60, dict(result))
-        return result
+        return result, isinstance(stats, dict)
 
     async def list_loras(self) -> list[str]:
         timeout = aiohttp.ClientTimeout(total=15)

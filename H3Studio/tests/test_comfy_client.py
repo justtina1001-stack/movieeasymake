@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
+from unittest.mock import patch
 
 from aiohttp import web
 
@@ -162,6 +163,15 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
         self.stats_invalid_json = False
         self.requests = Counter()
         self.authorization = []
+        self.object_status = {}
+        self.object_invalid_json = set()
+        self.object_disconnect = set()
+        self.object_payload = {}
+        self.object_gate = None
+        self.object_delay = 0
+        self.object_started = asyncio.Event()
+        self.object_active = 0
+        self.object_peak = 0
         self.schemas = {
             "UNETLoader": {"input": {"required": {"unet_name": [[
                 "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
@@ -191,6 +201,8 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
         self.client = ComfyClient(settings, Path(self.temporary.name))
 
     async def asyncTearDown(self):
+        if self.object_gate is not None:
+            self.object_gate.set()
         await self.runner.cleanup()
         self.temporary.cleanup()
 
@@ -198,8 +210,24 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
         node = request.match_info["node"]
         self.requests[node] += 1
         self.authorization.append(request.headers.get("Authorization"))
-        # Comfy returns HTTP 200 with an empty object for unknown nodes.
-        return web.json_response({node: self.schemas[node]} if node in self.schemas else {})
+        self.object_active += 1
+        self.object_peak = max(self.object_peak, self.object_active)
+        self.object_started.set()
+        try:
+            if self.object_gate is not None:
+                await self.object_gate.wait()
+            if self.object_delay:
+                await asyncio.sleep(self.object_delay)
+            if node in self.object_disconnect:
+                request.transport.close()
+                return web.Response()
+            if node in self.object_invalid_json:
+                return web.Response(text="{", content_type="application/json")
+            # Comfy returns HTTP 200 with an empty object for unknown nodes.
+            payload = self.object_payload.get(node, {node: self.schemas[node]} if node in self.schemas else {})
+            return web.json_response(payload, status=self.object_status.get(node, 200))
+        finally:
+            self.object_active -= 1
 
     async def system_stats(self, request):
         self.requests["system_stats"] += 1
@@ -270,9 +298,9 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(inventory["video_vae_int8_supported"])
 
     async def test_stats_error_preserves_known_inventory(self):
-        for invalid_json in (False, True):
-            with self.subTest(invalid_json=invalid_json):
-                self.stats_status = 503
+        for stats_status, invalid_json in ((503, False), (503, True), (200, True)):
+            with self.subTest(stats_status=stats_status, invalid_json=invalid_json):
+                self.stats_status = stats_status
                 self.stats_invalid_json = invalid_json
                 inventory = await self.client.model_inventory(refresh=True)
                 self.assertTrue(inventory["video_vae"])
@@ -280,6 +308,7 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(inventory["audio_vae"])
                 self.assertTrue(inventory["h3_memory_optimization"])
                 self.assertFalse(inventory["video_vae_int8_supported"])
+                self.assertIsNone(self.client._model_cache)
 
     async def test_inventory_cache_is_defensive_and_refresh_updates_models_and_version(self):
         inventory = await self.client.model_inventory()
@@ -299,6 +328,96 @@ class ComfyClientInventoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(refreshed["video_vae"])
         self.assertEqual(self.requests["VAELoader"], 2)
         self.assertEqual(self.requests["system_stats"], 2)
+
+    async def test_overlapping_refreshes_share_bounded_parallel_requests(self):
+        self.object_gate = asyncio.Event()
+        calls = [asyncio.create_task(self.client.model_inventory(refresh=refresh)) for refresh in (False, True, False)]
+        await asyncio.wait_for(self.object_started.wait(), 1)
+        # Hold actual HTTP requests open so the concurrency limit is observable.
+        await asyncio.sleep(0.03)
+        self.assertEqual(self.object_active, 4)
+        self.object_gate.set()
+        results = await asyncio.wait_for(asyncio.gather(*calls), 2)
+        self.assertEqual(self.object_peak, 4)
+        self.assertTrue(all(value["video_vae_fp16"] for value in results))
+        self.assertTrue(all(count == 1 for count in self.requests.values()))
+        self.assertEqual(self.requests["LoraLoaderModelOnly"], 1)
+        results[0]["video_vae_fp16"] = False
+        self.assertTrue(results[1]["video_vae_fp16"])
+
+    async def test_cancelled_waiter_does_not_cancel_other_inventory_callers(self):
+        self.object_gate = asyncio.Event()
+        abandoned = asyncio.create_task(self.client.model_inventory())
+        remaining = asyncio.create_task(self.client.model_inventory())
+        await asyncio.wait_for(self.object_started.wait(), 1)
+        abandoned.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await abandoned
+        self.object_gate.set()
+        inventory = await asyncio.wait_for(remaining, 2)
+        self.assertTrue(inventory["video_vae_fp16"])
+        self.assertEqual(self.requests["VAELoader"], 1)
+        self.assertEqual(self.requests["system_stats"], 1)
+
+    async def test_object_info_failures_never_cache_an_incomplete_snapshot(self):
+        for failure in ("http", "disconnect", "json", "shape", "node_shape"):
+            with self.subTest(failure=failure):
+                self.client._model_cache = None
+                self.object_status = {"VAELoader": 503} if failure == "http" else {}
+                self.object_disconnect = {"VAELoader"} if failure == "disconnect" else set()
+                self.object_invalid_json = {"VAELoader"} if failure == "json" else set()
+                self.object_payload = {"VAELoader": []} if failure == "shape" else (
+                    {"VAELoader": {"VAELoader": None}} if failure == "node_shape" else {})
+                with self.assertRaisesRegex(RuntimeError, "暫時無法讀取引擎模型清單"):
+                    await self.client.model_inventory()
+                self.assertIsNone(self.client._model_cache)
+        self.object_payload = {}
+        recovered = await self.client.model_inventory()
+        self.assertTrue(recovered["video_vae_fp16"])
+        self.assertIsNotNone(self.client._model_cache)
+
+    async def test_forced_refresh_failure_does_not_return_stale_success(self):
+        await self.client.model_inventory()
+        old_cache = self.client._model_cache
+        self.object_status["VAELoader"] = 503
+        with self.assertRaises(RuntimeError):
+            await self.client.model_inventory(refresh=True)
+        self.assertIs(self.client._model_cache, old_cache)
+        self.client._model_cache = (0, old_cache[1])
+        with self.assertRaises(RuntimeError):
+            await self.client.model_inventory()
+        self.object_status.clear()
+        self.set_video_vaes("int8")
+        recovered = await self.client.model_inventory()
+        self.assertTrue(recovered["video_vae_int8"])
+        self.assertFalse(recovered["video_vae_fp16"])
+
+    async def test_inventory_deadline_covers_the_whole_probe_and_allows_retry(self):
+        # Each response is healthy within its own timeout; their combined waves
+        # exceed the probe budget, which must apply to the entire refresh.
+        self.object_delay = 0.25
+        with patch("comfy_client.MODEL_INVENTORY_TIMEOUT", 0.8):
+            with self.assertRaisesRegex(RuntimeError, "暫時無法讀取引擎模型清單"):
+                await asyncio.wait_for(self.client.model_inventory(), 2)
+        self.assertIsNone(self.client._model_cache)
+        self.assertIsNone(self.client._model_inventory_task)
+        self.assertGreater(sum(self.requests.values()), 4)
+        self.object_delay = 0
+        recovered = await asyncio.wait_for(self.client.model_inventory(), 2)
+        self.assertTrue(recovered["video_vae_fp16"])
+
+    async def test_reconfigured_connection_cannot_publish_an_old_probe(self):
+        self.object_gate = asyncio.Event()
+        old = asyncio.create_task(self.client.model_inventory())
+        await asyncio.wait_for(self.object_started.wait(), 1)
+        self.client.configure(ConnectionSettings(
+            mode="remote", base_url=self.client.base_url, comfy_dir=self.temporary.name,
+            auto_start_local=False, remote_access_token="new-test-token"))
+        self.object_gate.set()
+        with self.assertRaisesRegex(RuntimeError, "引擎連線設定已變更"):
+            await asyncio.wait_for(old, 2)
+        self.assertIsNone(self.client._model_cache)
+        self.assertTrue((await self.client.model_inventory())["video_vae_fp16"])
 
     async def test_missing_sparse_node_does_not_hide_independent_memory(self):
         inventory = await self.client.model_inventory()

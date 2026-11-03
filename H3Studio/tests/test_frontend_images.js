@@ -25,7 +25,8 @@ const imageJob = extra => ({id:a,name:'來源圖片',mode:'generate',status:'com
 function deferred() { let resolve; const promise=new Promise(done=>{resolve=done;}); return {promise,resolve}; }
 
 async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscaleStatus={}, referenceWait=null}={}) {
-  const elements = new Map(), calls=[];
+  const elements = new Map(), calls=[], timeouts=new Map(), intervals=[], docEvents=new Map(), winEvents=new Map();
+  let timerSerial=0, fetchOverride=null;
   let stored = JSON.stringify(draft);
   const defaults={imageMode:'generate',imageModel:'standard',imageNegativePrompt:negativePrompt,imageWidth:'1024',imageHeight:'1024',imageSteps:'25',imageSeed:'42',referenceResolution:'1024',imageLoraStrength:'1'};
   function el(id) {
@@ -39,9 +40,11 @@ async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscale
     return elements.get(id);
   }
   let statusError = false, statusData = status, jobsData = jobs;
-  const context=vm.createContext({document:{getElementById:el,hidden:false},localStorage:{getItem:()=>stored,setItem:(_,s)=>stored=s},setInterval(){},FormData,URL,
+  const context=vm.createContext({document:{getElementById:el,hidden:false,addEventListener:(name,fn)=>docEvents.set(name,fn)},window:{addEventListener:(name,fn)=>winEvents.set(name,fn)},localStorage:{getItem:()=>stored,setItem:(_,s)=>stored=s},
+    setInterval(fn,delay){intervals.push({fn,delay});},setTimeout(fn,delay){const id=++timerSerial;timeouts.set(id,{fn,delay});return id;},clearTimeout(id){timeouts.delete(id);},AbortController,FormData,URL,
     async fetch(url,options) {
       calls.push({url,options});
+      if(fetchOverride) {const result=fetchOverride(url,options);if(result!==undefined) return result;}
       if (url === '/api/images/status' && statusError) throw new Error('連線失敗');
       if(options?.method === 'DELETE') return {ok:!deleteError,json:async()=>deleteError?{error:'刪除失敗'}:{deleted:true}};
       if(url.endsWith('/reference') && referenceWait) return {ok:true,json:async()=>referenceWait};
@@ -58,8 +61,89 @@ async function fixture({draft={}, status={}, jobs=[], deleteError=false, upscale
   await new Promise(setImmediate);
   const fire=async(id,type,event={})=>{await el(id).listeners[type]({preventDefault(){},...event});};
   const click=(id,dataset)=>fire(id,'click',{target:{closest:()=>({dataset,disabled:false})}});
-  return {el,fire,click,calls,draft:()=>JSON.parse(stored),setStatusError:()=>{statusError=true;},setStatus:value=>{statusData=value;statusError=false;},setJobs:value=>{jobsData=value;}};
+  return {el,fire,click,calls,context,intervals,timeouts,docEvents,winEvents,draft:()=>JSON.parse(stored),setFetch:value=>{fetchOverride=value;},setStatusError:()=>{statusError=true;},setStatus:value=>{statusData=value;statusError=false;},setJobs:value=>{jobsData=value;}};
 }
+
+test('image status recovers automatically on resume and keeps the selected model and unsaved prompt',async()=>{
+  const f=await fixture({status:fluxVariants(),draft:{imageModel:'flux3',imagePrompt:'保留這份原稿',imageSeed:'321'}});
+  f.setStatusError(); await f.fire('refreshStatus','click');
+  assert.equal(f.el('generateImage').disabled,true);
+  assert.equal(f.el('imageModel').value,'flux3');
+  f.el('imagePrompt').value='尚未儲存的描述';
+  f.setStatus(fluxVariants());
+  assert.equal(typeof f.docEvents.get('visibilitychange'),'function');
+  await f.docEvents.get('visibilitychange')(); await new Promise(setImmediate);
+  assert.equal(f.el('generateImage').disabled,false);
+  assert.equal(f.el('imageModel').value,'flux3'); assert.equal(f.el('imagePrompt').value,'尚未儲存的描述');
+  assert.equal(f.calls.some(call=>call.options?.method==='POST'),false);
+  for(const event of ['online','pageshow']) assert.equal(typeof f.winEvents.get(event),'function');
+});
+
+test('periodic image status refresh retries a temporary unavailable probe without submitting work',async()=>{
+  const f=await fixture({status:variants()});
+  f.setStatusError(); await f.fire('refreshStatus','click');
+  assert.equal(f.el('generateImage').disabled,true);
+  f.setStatus(variants());
+  const retry=f.intervals.find(item=>item.delay===15000);
+  assert.ok(retry,'a bounded status retry interval exists');
+  await retry.fn(); await new Promise(setImmediate);
+  assert.equal(f.el('generateImage').disabled,false);
+  assert.equal(f.calls.some(call=>call.options?.method==='POST'),false);
+});
+
+test('stalled image job polling times out, releases its guard and resumes without duplicate reads',async()=>{
+  const f=await fixture({status:variants()});
+  f.setFetch((url,options)=>url.startsWith('/api/images/jobs?page=') ? new Promise((resolve,reject)=>options?.signal?.addEventListener('abort',()=>reject(new Error('aborted')),{once:true})) : undefined);
+  const before=f.calls.length, pending=f.fire('refreshJobs','click');
+  f.intervals.find(item=>item.delay===4000).fn();
+  assert.equal(f.calls.length-before,2);
+  assert.ok(f.timeouts.size>0,'polling reads have a deadline');
+  for(const timer of [...f.timeouts.values()]) timer.fn();
+  await pending;
+  f.setFetch(null); await f.fire('refreshJobs','click');
+  assert.equal(f.calls.length-before,4);
+  assert.equal(f.timeouts.size,0);
+});
+
+test('image pagination during an in-flight poll follows the newest page without restoring stale rows',async()=>{
+  const f=await fixture({status:variants()});
+  const reply=data=>({ok:true,json:async()=>data});
+  f.setFetch(url=>url.startsWith('/api/images/jobs?page=')?reply({items:[],page:1,total_pages:3}):undefined);
+  await f.fire('refreshJobs','click');
+  const reads=[];
+  f.setFetch(url=>{if(!url.startsWith('/api/images/jobs?page='))return;const wait=deferred();reads.push({url,...wait});return wait.promise;});
+  const first=f.fire('refreshJobs','click');
+  const latest=f.fire('nextPage','click'); assert.equal(reads.length,1);
+  reads[0].resolve(reply({items:[imageJob({name:'過時第一頁'})],page:1,total_pages:3}));
+  await new Promise(setImmediate);
+  assert.equal(reads.length,2);assert.match(reads[1].url,/page=2/);
+  assert.doesNotMatch(f.el('imageJobs').innerHTML,/過時第一頁/);
+  reads[1].resolve(reply({items:[imageJob({name:'最新第二頁'})],page:2,total_pages:3}));
+  await Promise.all([first,latest]);
+  assert.match(f.el('pageLabel').textContent,/第 2 \/ 3 頁/);assert.match(f.el('imageJobs').innerHTML,/最新第二頁/);
+});
+
+test('manual image refresh while a poll is pending waits for one fresh follow-up response',async()=>{
+  const f=await fixture({status:variants()}),reads=[];
+  const reply=data=>({ok:true,json:async()=>data});
+  f.setFetch(url=>{if(!url.startsWith('/api/images/jobs?page='))return;const wait=deferred();reads.push({url,...wait});return wait.promise;});
+  const first=f.fire('refreshJobs','click');
+  let done=false;const latest=f.fire('refreshJobs','click').then(()=>{done=true;});
+  reads[0].resolve(reply({items:[],page:1,total_pages:1}));await new Promise(setImmediate);
+  assert.equal(reads.length,2);assert.equal(done,false);
+  reads[1].resolve(reply({items:[imageJob({name:'最新工作'})],page:1,total_pages:1}));
+  await Promise.all([first,latest]);assert.equal(done,true);assert.match(f.el('imageJobs').innerHTML,/最新工作/);
+});
+
+test('a malformed image history response cannot permanently lock out later polling',async()=>{
+  const f=await fixture({status:variants(),jobs:[imageJob({})]});
+  f.setJobs(null);
+  await f.fire('refreshJobs','click').catch(()=>{});
+  const before=f.calls.length;
+  f.setJobs([imageJob({name:'恢復讀取'})]); await f.fire('refreshJobs','click');
+  assert.equal(f.calls.length-before,2);
+  assert.match(f.el('imageJobs').innerHTML,/恢復讀取/);
+});
 
 test('legacy drafts and jobs select standard while an old backend blocks Turbo without changing the draft',async()=>{
   const f=await fixture({draft:{imagePrompt:'舊稿',imageSteps:'33'},jobs:[imageJob({})]});
@@ -163,7 +247,7 @@ test('upscale results use their recorded source variant for editing and never tr
 test('result cards and details distinguish Qwen models legacy and Real-ESRGAN models',async()=>{
   const f=await fixture({jobs:[imageJob({model_variant:'turbo'}),imageJob({id:b}),imageJob({id:c,mode:'upscale',scale:2,source_model_variant:'turbo'})]});
   assert.match(f.el('imageJobs').innerHTML,/模型：Qwen 官方 Turbo · 快速 8 步/); assert.match(f.el('imageJobs').innerHTML,/模型：Qwen 原版 · 精細生成/); assert.match(f.el('imageJobs').innerHTML,/模型：Real-ESRGAN · 增強放大/);
-  const html=fs.readFileSync(path.join(__dirname,'../static/images.html'),'utf8'); assert.match(html,/id="imageModel"/); assert.match(html,/images.js\?v=20261102-anima-rgba/); assert.match(html,/<option value="flux3">FLUX 3 Image Klein/);
+  const html=fs.readFileSync(path.join(__dirname,'../static/images.html'),'utf8'); assert.match(html,/id="imageModel"/); assert.match(html,/images.js\?v=20261103-connection-recovery/); assert.match(html,/<option value="flux3">FLUX 3 Image Klein/);
 });
 
 test('FLUX edit selection preserves Qwen options across reload and submits only its fixed edit settings',async()=>{

@@ -76,6 +76,8 @@ let jobPage = 1;
 let jobTotalPages = 1;
 let jobSearch = "";
 let lastJobOptionsLoad = 0;
+let jobsPoll = null;
+let statusLoading = false;
 const expandedJobIds = new Set();
 let toastTimer;
 let engineStartingAt = 0;
@@ -91,8 +93,10 @@ let sharedGatewayStatus = null;
 let sharedQueueData = null;
 let sharedQueueLoading = false;
 let installerPreflightData = null;
+let installerStatusLoading = false;
 let lastInstallerStatus = "idle";
 let modelUpdateData = null;
+let modelUpdateLoading = false;
 let lastModelUpdateStatus = "idle";
 let modelUpdateDismissedThisSession = false;
 let engineModelInventory = {};
@@ -255,16 +259,30 @@ function installInteractionMotion() {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, options);
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(data?.error || `HTTP ${response.status}`);
-    error.status = response.status;
-    error.details = data;
-    error.current_revision = data.current_revision;
+  const { readTimeoutMs = 15000, ...requestOptions } = options;
+  const read = ["GET", "HEAD"].includes((requestOptions.method || "GET").toUpperCase());
+  const controller = read && !requestOptions.signal ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), readTimeoutMs) : null;
+  try {
+    const response = await fetch(url, { ...requestOptions, ...(read ? { cache: "no-store" } : {}), ...(controller ? { signal: controller.signal } : {}) });
+    const data = await response.json().catch(error => {
+      if (controller?.signal.aborted || requestOptions.signal?.aborted || (read && response.ok)) throw error;
+      return {};
+    });
+    if (!response.ok) {
+      const error = new Error(data?.error || `HTTP ${response.status}`);
+      error.status = response.status;
+      error.details = data;
+      error.current_revision = data.current_revision;
+      throw error;
+    }
+    return data;
+  } catch (error) {
+    if (controller?.signal.aborted) throw new Error("讀取狀態逾時，稍後會自動重新連線。");
     throw error;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
   }
-  return data;
 }
 
 function connectionPayload() {
@@ -896,9 +914,13 @@ function renderInstallerStatus(data) {
 }
 
 async function loadInstallerStatus() {
-  const data = await api("/api/engine-installer/status");
-  renderInstallerStatus(data);
-  return data;
+  if (installerStatusLoading) return;
+  installerStatusLoading = true;
+  try {
+    const data = await api("/api/engine-installer/status");
+    renderInstallerStatus(data);
+    return data;
+  } finally { installerStatusLoading = false; }
 }
 
 function closeModelUpdates() {
@@ -986,9 +1008,13 @@ function renderModelUpdate(data, autoPrompt = false) {
 }
 
 async function loadModelUpdateStatus(autoPrompt = false) {
-  const data = await api("/api/model-updates");
-  renderModelUpdate(data, autoPrompt);
-  return data;
+  if (modelUpdateLoading) return;
+  modelUpdateLoading = true;
+  try {
+    const data = await api("/api/model-updates");
+    renderModelUpdate(data, autoPrompt);
+    return data;
+  } finally { modelUpdateLoading = false; }
 }
 
 async function openModelUpdates() {
@@ -2768,32 +2794,70 @@ async function useContinuationFile(file) {
   await prepareContinuation({ asset_id: asset.id });
 }
 
-async function loadJobs(force = false) {
+function loadJobs(force = false) {
+  if (jobsPoll) {
+    if (force || jobsPoll.page !== jobPage || jobsPoll.search !== jobSearch) {
+      jobsPoll.pending = true;
+      jobsPoll.force ||= Boolean(force);
+    }
+    return jobsPoll.promise;
+  }
+  const poll = { page: jobPage, search: jobSearch, force: Boolean(force), pending: true, promise: null };
+  jobsPoll = poll;
+  poll.promise = (async () => {
+    try {
+      do {
+        poll.pending = false;
+        poll.page = jobPage;
+        poll.search = jobSearch;
+        const force = poll.force;
+        poll.force = false;
+        await loadJobsPage(poll, force);
+      } while (poll.pending);
+    } finally { if (jobsPoll === poll) jobsPoll = null; }
+  })();
+  return poll.promise;
+}
+
+async function loadJobsPage(request, force) {
+  const current = () => {
+    if (request.pending || request.page !== jobPage || request.search !== jobSearch) { request.pending = true; return false; }
+    return true;
+  };
   try {
-    const query = encodeURIComponent(jobSearch);
-    const response = await api(`/api/jobs?page=${jobPage}&page_size=20&q=${query}&workspace=quick`);
+    const query = encodeURIComponent(request.search);
+    const response = await api(`/api/jobs?page=${request.page}&page_size=20&q=${query}&workspace=quick`);
+    if (!current()) return;
     let jobs;
     let meta;
+    let page = request.page;
+    let totalPages;
     if (Array.isArray(response)) {
-      const filtered = jobSearch ? response.filter(job => `${job.name || ""} ${job.id} ${job.mode}`.toLowerCase().includes(jobSearch.toLowerCase())) : response;
-      jobTotalPages = Math.max(1, Math.ceil(filtered.length / 20));
-      jobPage = Math.min(jobPage, jobTotalPages);
-      jobs = filtered.slice((jobPage - 1) * 20, jobPage * 20);
-      meta = { total: filtered.length, total_pages: jobTotalPages, page: jobPage };
+      const filtered = request.search ? response.filter(job => `${job.name || ""} ${job.id} ${job.mode}`.toLowerCase().includes(request.search.toLowerCase())) : response;
+      totalPages = Math.max(1, Math.ceil(filtered.length / 20));
+      page = Math.min(page, totalPages);
+      jobs = filtered.slice((page - 1) * 20, page * 20);
+      meta = { total: filtered.length, total_pages: totalPages, page };
     } else {
       jobs = response.items || [];
-      jobPage = response.page || 1;
-      jobTotalPages = response.total_pages || 1;
+      page = response.page || 1;
+      totalPages = response.total_pages || 1;
       meta = response;
     }
     if (force || Date.now() - lastJobOptionsLoad > 10000) {
       try {
-        renderContinuationJobs(await api("/api/jobs/options"));
+        const options = await api("/api/jobs/options");
+        if (!current()) return;
+        renderContinuationJobs(options);
         lastJobOptionsLoad = Date.now();
       } catch {
+        if (!current()) return;
         renderContinuationJobs(jobs);
       }
     }
+    if (!current()) return;
+    jobPage = page;
+    jobTotalPages = totalPages;
     $("#jobPagination").classList.toggle("hidden", jobTotalPages <= 1);
     $("#jobPageLabel").textContent = `第 ${jobPage} / ${jobTotalPages} 頁 · 共 ${meta.total || 0} 筆`;
     $("#previousJobPage").disabled = jobPage <= 1;
@@ -2857,7 +2921,7 @@ async function loadJobs(force = false) {
       if (!video.src) video.src = video.dataset.src;
     });
   } catch (error) {
-    console.warn(error);
+    if (current()) console.warn(error);
   }
 }
 
@@ -2873,8 +2937,11 @@ function showEngineStarting() {
 }
 
 async function checkStatus() {
+  if (statusLoading) return;
+  statusLoading = true;
   try {
-    const data = await api("/api/status");
+    const data = await api("/api/status", { readTimeoutMs: 30000 });
+    if (typeof data.ready !== "boolean") throw new Error("引擎狀態回應不完整。");
     if (data.studio_role) applyStudioRole({ studio_role: data.studio_role });
     engineModelInventory = data.models || {};
     videoModelSupported = data.video_model_supported === true;
@@ -2907,19 +2974,22 @@ async function checkStatus() {
       $("#startEngine").textContent = "啟動引擎";
     }
   } catch {
-    engineModelInventory = {};
-    videoModelSupported = false;
-    videoModelProfiles = [];
-    syncVideoModelStatus();
-    syncVideoVaeHints();
-    syncQualityMode(...dimensions());
-    syncShortFilmAcceleration();
     if (engineStartingAt) showEngineStarting();
     else {
       $("#statusDot").className = "status-dot error";
-      $("#statusText").textContent = "無法檢查引擎";
+      $("#statusText").textContent = "暫時無法檢查引擎 · 正在重新連線";
+      $("#deviceName").textContent = "連線恢復後會自動更新，工作仍可能進行中";
     }
+  } finally {
+    statusLoading = false;
   }
+}
+
+function refreshStudioConnection() {
+  if (document.hidden) return;
+  checkStatus();
+  loadSharedQueue();
+  loadJobs();
 }
 
 function addReference() {
@@ -5306,6 +5376,9 @@ function initialize() {
   $("#copyShortfilmDraft").addEventListener("click", () => recoverShortFilmDraft(true).catch(error => toast(error.message, true)));
   $("#discardShortfilmDraft").addEventListener("click", () => recoverShortFilmDraft(false).catch(error => toast(error.message, true)));
   window.addEventListener("pagehide", () => shortFilmSaveCoordinator?.flushAll().catch(() => {}));
+  document.addEventListener("visibilitychange", refreshStudioConnection);
+  window.addEventListener("online", refreshStudioConnection);
+  window.addEventListener("pageshow", refreshStudioConnection);
   window.addEventListener("beforeunload", event => {
     if (shortFilmProjects.some(project => shortFilmSaveCoordinator && shortFilmSaveCoordinator.status(project.id).state !== "saved")) { event.preventDefault(); event.returnValue = ""; }
   });
@@ -5343,30 +5416,30 @@ function initialize() {
   checkStatus();
   loadSharedQueue();
   loadJobs(true);
-  setInterval(loadSharedQueue, 3000);
-  setInterval(checkStatus, 10000);
-  setInterval(() => loadInstallerStatus().catch(error => console.warn(error)), 2500);
+  setInterval(() => { if (!document.hidden) loadSharedQueue(); }, 3000);
+  setInterval(() => { if (!document.hidden) checkStatus(); }, 10000);
+  setInterval(() => { if (!document.hidden) loadInstallerStatus().catch(error => console.warn(error)); }, 2500);
   setInterval(() => {
     const active = ["starting", "running", "cancelling"].includes(modelUpdateData?.installer?.status);
     const modalOpen = !$("#modelUpdateModal").classList.contains("hidden");
-    if (active || modalOpen) loadModelUpdateStatus(false).catch(error => console.warn(error));
+    if (!document.hidden && (active || modalOpen)) loadModelUpdateStatus(false).catch(error => console.warn(error));
   }, 2500);
   setInterval(() => engineStartingAt && showEngineStarting(), 1000);
-  setInterval(loadJobs, 3000);
+  setInterval(() => { if (!document.hidden) loadJobs(); }, 3000);
   setInterval(() => {
-    if (studioWorkspace === "shortfilm") loadShortFilmJobs().catch(error => console.warn("短片作品更新失敗：", error));
+    if (!document.hidden && studioWorkspace === "shortfilm") loadShortFilmJobs().catch(error => console.warn("短片作品更新失敗：", error));
   }, 3000);
-  setInterval(() => refreshShortFilmShotStatuses().catch(error => console.warn("短片工作狀態更新失敗：", error)), 5000);
+  setInterval(() => { if (!document.hidden) refreshShortFilmShotStatuses().catch(error => console.warn("短片工作狀態更新失敗：", error)); }, 5000);
   setInterval(() => {
-    if (studioWorkspace === "shortfilm") loadShortFilmBatchStatus();
+    if (!document.hidden && studioWorkspace === "shortfilm") loadShortFilmBatchStatus();
   }, 3000);
   setInterval(() => {
-    if ($("#musicModal").classList.contains("hidden")) return;
+    if (document.hidden || $("#musicModal").classList.contains("hidden")) return;
     loadMusicStatus().catch(error => console.warn(error));
     loadMusicJobs().catch(error => console.warn(error));
   }, 2500);
   setInterval(() => {
-    if ($("#voiceModal").classList.contains("hidden")) return;
+    if (document.hidden || $("#voiceModal").classList.contains("hidden")) return;
     loadVoiceStatus().catch(error => console.warn(error));
     loadVoiceJobs().catch(error => console.warn(error));
   }, 2500);

@@ -28,8 +28,10 @@ function h3SkillCatalog() {
   }))];
 }
 
-function fixture(handler, { confirm = () => true, referencesSupported = true, referencesSupportKnown = true, skillsSupported = true, skillsSupportKnown = true, skillsCatalogReady = true, lorasSupported = true, lorasSupportKnown = true } = {}) {
+function fixture(handler, { confirm = () => true, referencesSupported = true, referencesSupportKnown = true, skillsSupported = true, skillsSupportKnown = true, skillsCatalogReady = true, lorasSupported = true, lorasSupportKnown = true, timers = {} } = {}) {
   const elements = new Map(), stored = new Map(), calls = [], downloads = [], clipboard = [];
+  const documentEvents = new Map(), windowEvents = new Map();
+  const listen = (events, name, handler) => events.set(name, [...(events.get(name) || []), handler]);
   class Option { constructor(text, value) { this.textContent = text; this.value = value; } }
   class Element {
     constructor(tagName = '') {
@@ -63,22 +65,22 @@ function fixture(handler, { confirm = () => true, referencesSupported = true, re
   class TestURL extends URL { static createObjectURL(blob) { downloads.push(blob); return 'blob:script-test'; } static revokeObjectURL() {} }
   let uuids = 0;
   const context = vm.createContext({
-    document: { hidden: false, body: new Element('body'), getElementById(id) { assert.ok(elements.has(id), `HTML has ${id}`); return elements.get(id); }, querySelectorAll: () => actions, createElement: name => new Element(name), addEventListener() {} },
-    window: { confirm, location: { search: '' }, addEventListener() {} },
+    document: { hidden: false, body: new Element('body'), getElementById(id) { assert.ok(elements.has(id), `HTML has ${id}`); return elements.get(id); }, querySelectorAll: () => actions, createElement: name => new Element(name), addEventListener: (name, handler) => listen(documentEvents, name, handler) },
+    window: { confirm, location: { search: '' }, addEventListener: (name, handler) => listen(windowEvents, name, handler) },
     localStorage: { get length() { return stored.size; }, key: i => Array.from(stored.keys())[i], getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) },
-    crypto: { randomUUID: () => uuids++ === 0 ? 'this-tab' : `${String(uuids).padStart(8, '0')}-0000-4000-8000-000000000000` }, Option, URL: TestURL, URLSearchParams, FormData: TestFormData, Blob, setTimeout, clearTimeout, setInterval() {},
+    crypto: { randomUUID: () => uuids++ === 0 ? 'this-tab' : `${String(uuids).padStart(8, '0')}-0000-4000-8000-000000000000` }, Option, URL: TestURL, URLSearchParams, FormData: TestFormData, Blob, AbortController, setTimeout, clearTimeout, setInterval() {}, ...timers,
     navigator: { clipboard: { async writeText(value) { clipboard.push(value); } } },
     async fetch(url, options) { calls.push({ url, options }); return handler ? handler(url, options) : response({}); },
   });
   const exposed = source.replace('start().catch(error => message(error.message, true));', 'globalThis.scriptTest = { state, message, writeProject, readProject, markDirty, saveProject, switchProject, applyMonkeyExample, loadJobs, renderHistory, renderPreview, selectJob, deleteJob, changeHistoryScope, openJobProject, applyResult, restoreDraft, offerDraft, generate, crossTabChanged, saveSettings, addReference, removeReference, uploadReferenceImage, renderReferences, exportDraft, refreshEngine, renderPipelines, selectPipeline, loadPipelines, startVideoPipeline, cancelPipeline, resumePipeline, selectedVideoSourceJob, scriptVideoModelError, bindEvents, renderWritingSkills, renderWritingSkillDetails, applyWritingSkillRecommendation, loadWritingSkills, receiveVideoHistory, renderVideoHistory, selectHistoryVideo, changeVideoHistoryScope, refreshVideoHistory }; writeProject(state.project);');
   vm.runInContext(loraHelpSource, context);
-  vm.runInContext(exposed.replace('globalThis.scriptTest = { state,', 'globalThis.scriptTest = { loadScriptLoras, renderScriptLoras, addScriptLora, importStoryboard, state,'), context);
+  vm.runInContext(exposed.replace('globalThis.scriptTest = { state,', 'globalThis.scriptTest = { api, start, refreshAfterResume, loadScriptLoras, renderScriptLoras, addScriptLora, importStoryboard, state,'), context);
   Object.assign(context.scriptTest.state, { lorasSupported, lorasSupportKnown, promptReviewSupported: true });
   context.scriptTest.state.referencesSupported = referencesSupported;
   context.scriptTest.state.referencesSupportKnown = referencesSupportKnown;
   Object.assign(context.scriptTest.state, { skillsSupported, skillsSupportKnown, skillsCatalogReady, writingSkills: skillsCatalogReady ? skillCatalog() : [] });
   context.scriptTest.renderWritingSkills(); context.scriptTest.renderPreview();
-  return { ui: context.scriptTest, elements, stored, calls, actions, downloads, clipboard };
+  return { ui: context.scriptTest, elements, stored, calls, actions, downloads, clipboard, context, documentEvents, windowEvents };
 }
 
 function response(data, status = 200) { return { ok: status >= 200 && status < 300, status, async json() { return data; } }; }
@@ -546,7 +548,7 @@ test('old short-cut validation failures show a recovery hint without changing th
     ui.state.job = { ...ui.state.job, error, action: 'storyboard', status: 'failed', ...change }; ui.renderPreview();
     assert.doesNotMatch(elements.get('scriptJobDetail').textContent, /短切鏡需合併/);
   }
-  assert.match(html, /scripts\.js\?v=20261102-independent-translation/);
+  assert.match(html, /scripts\.js\?v=20261103-connection-recovery/);
 });
 
 function cameraCorrection(overrides = {}) { return { scene_index: 0, shot_index: 0, original_camera: '35mm low-angle tracking shot', original_camera_detail: '鏡頭跟隨主角前進', camera: 'custom', camera_detail: '35mm low-angle tracking shot\n鏡頭跟隨主角前進', ...overrides }; }
@@ -1363,13 +1365,13 @@ test('direct manuscript saves pasted text before launch and protects edits or a 
   }
 });
 
-test('direct manuscript capability is explicitly advertised and a failed status check disables it', async () => {
+test('a failed status check disables generation while retaining known manuscript capability', async () => {
   let fails = false;
   const { ui, elements } = fixture(async url => url === '/api/scripts/status' ? fails ? response({ error: '離線' }, 503) : response({ ready: true, manuscript_video_supported: true, prompt_review_supported: true, video_pipelines_supported: true, video_ready: true }) : response({ items: [] }));
   prepareVideo(ui, { idea: '' }); await ui.refreshEngine(); ui.renderPreview();
   assert.equal(ui.state.manuscriptVideoSupported, true); assert.equal(elements.get('startManuscriptVideo').disabled, false);
   fails = true; await ui.refreshEngine();
-  assert.equal(ui.state.manuscriptVideoSupported, false); assert.equal(elements.get('startManuscriptVideo').disabled, true);
+  assert.equal(ui.state.manuscriptVideoSupported, true); assert.equal(ui.state.ready, false); assert.equal(ui.state.videoReady, false); assert.equal(elements.get('startManuscriptVideo').disabled, true);
 });
 
 test('selected completed screenplay or rewrite can source video without replacing a newer manuscript', async () => {
@@ -1702,7 +1704,7 @@ test('H3 sources retain reviewed provenance and repository counts without presen
   assert.equal(rendered.children[3].rel, 'noopener noreferrer');
   assert.equal(elements.get('scriptSkillVersion').textContent, '方法版本：20261006-h3');
   assert.match(html, /Stars 為倉庫關注度，並非成片品質評分/);
-  assert.match(html, /scripts\.js\?v=20261102-independent-translation/);
+  assert.match(html, /scripts\.js\?v=20261103-connection-recovery/);
   elements.get('scriptWritingSkill').value = 'h3-performance-beats'; ui.renderWritingSkillDetails();
   assert.match(elements.get('scriptSkillSources').children[0].children[2].textContent, /社群來源.*倉庫 ⭐ 175.*Forks 4/);
 });
@@ -2515,4 +2517,86 @@ test('unknown model drafts and exports preserve identity while saves imports and
   ui.state.job={id:'unknown-storyboard',project_id:'project-a',status:'completed',action:'storyboard',content:'{}',input:{project:project({video_settings:unknown})}};
   await ui.importStoryboard();assert.equal(calls.length,0);assert.match(elements.get('scriptMessage').textContent,/未匯入分鏡/);
   elements.get('scriptVideoModel').value='h3';await elements.get('scriptVideoModel').dispatch('change');assert.equal(ui.readProject().video_settings.video_model,'h3');
+});
+
+test('stalled script reads time out during headers or body and allow the next read to succeed', async () => {
+  for (const phase of ['headers', 'body']) {
+    const deadlines = new Map(); let nextId = 0, stalled = true;
+    const f = fixture(async (url, options) => {
+      if (!stalled) return response({ recovered: true });
+      const wait = () => new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true }));
+      return phase === 'headers' ? wait() : { ok: true, status: 200, json: wait };
+    }, { timers: { setTimeout(fn, ms) { const id = ++nextId; deadlines.set(id, { fn, ms }); return id; }, clearTimeout(id) { deadlines.delete(id); } } });
+    const reading = f.ui.api('/api/scripts/jobs');
+    const rejected = assert.rejects(reading, /讀取逾時/);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(deadlines.size, 1); const deadline = [...deadlines.values()][0]; assert.equal(deadline.ms, 15000); deadline.fn();
+    await rejected; assert.equal(deadlines.size, 0);
+    stalled = false; assert.equal((await f.ui.api('/api/scripts/jobs')).recovered, true);
+    assert.equal(deadlines.size, 0); assert.equal(f.calls.length, 2);
+  }
+});
+
+test('script mutation requests are neither given read deadlines nor retried', async () => {
+  const pending = deferred(); let deadlines = 0;
+  const f = fixture(async () => pending.promise, { timers: { setTimeout() { deadlines++; return 1; }, clearTimeout() {} } });
+  const saving = f.ui.api('/api/scripts/projects', { method: 'PUT', body: '{}' });
+  assert.equal(deadlines, 0); assert.equal(f.calls.length, 1); assert.equal(f.calls[0].options.signal, undefined);
+  pending.resolve(response({ saved: true })); assert.equal((await saving).saved, true); assert.equal(f.calls.length, 1);
+});
+
+test('script resume and online events recover readiness without replacing drafts or unsaved model selections', async () => {
+  let offline = false, delayed = null;
+  const settings = { model: 'gemma4:12b', vision_model: 'qwen3.8:27b', translation_model: 'qwen3.5:4b' };
+  const models = Object.values(settings);
+  const f = fixture(async url => {
+    if (url === '/api/scripts/status') {
+      if (offline) throw new Error('offline');
+      if (delayed) return delayed.promise;
+      return response({ ready: true, translation_ready: true, settings, models, video_model_supported: true, video_models: [{ id: 'h3', ready: true }] });
+    }
+    return response({ items: [], active: [] });
+  });
+  await f.ui.refreshEngine(); f.ui.writeProject(project()); f.elements.get('scriptContent').value = '尚未儲存的新稿'; f.ui.markDirty();
+  f.ui.state.settingsDirty = true; f.elements.get('scriptModel').value = 'hermes:local'; f.elements.get('scriptTranslationModel').value = 'translator:local';
+  const before = JSON.stringify(f.ui.readProject()), draft = f.stored.get('h3studio.scripts.draft.this-tab');
+  offline = true; await f.ui.refreshEngine(); assert.equal(f.ui.state.ready, false);
+  assert.equal(f.ui.state.videoModelSupported, true); assert.equal(f.ui.state.videoModels[0].id, 'h3'); assert.equal(f.ui.state.translationSupported, true);
+  offline = false; f.ui.bindEvents(); delayed = deferred();
+  const count = f.calls.filter(call => call.url === '/api/scripts/status').length;
+  for (const event of [...f.documentEvents.get('visibilitychange'), ...f.windowEvents.get('online'), ...f.windowEvents.get('pageshow')]) event();
+  assert.equal(f.calls.filter(call => call.url === '/api/scripts/status').length, count + 1);
+  delayed.resolve(response({ ready: true, translation_ready: true, settings, models })); await f.ui.state.engineCheckPromise;
+  assert.equal(f.ui.state.ready, true); assert.equal(JSON.stringify(f.ui.readProject()), before); assert.equal(f.stored.get('h3studio.scripts.draft.this-tab'), draft);
+  assert.equal(f.elements.get('scriptModel').value, 'hermes:local'); assert.equal(f.elements.get('scriptTranslationModel').value, 'translator:local');
+  f.context.document.hidden = true; const hiddenCount = f.calls.length;
+  for (const event of f.windowEvents.get('online')) event(); assert.equal(f.calls.length, hiddenCount);
+  assert.ok(f.calls.every(call => !call.options.method || call.options.method === 'GET'));
+});
+
+test('script recovery timers are installed before initial project reads finish', async () => {
+  const pending = deferred(), intervals = [];
+  const f = fixture(async url => url === '/api/scripts/projects' ? pending.promise : url === '/api/scripts/status' ? response({ ready: false }) : response({ items: [], active: [] }),
+    { timers: { setInterval(fn, ms) { intervals.push({ fn, ms }); } } });
+  const starting = f.ui.start(); assert.deepEqual(intervals.map(item => item.ms), [2200, 30000]);
+  pending.resolve(response({ items: [] })); await starting;
+  const count = f.calls.length; f.context.document.hidden = true; for (const timer of intervals) timer.fn(); assert.equal(f.calls.length, count);
+});
+
+test('a background model check cannot overwrite settings saved while its response is pending', async () => {
+  const old = { base_url: 'http://127.0.0.1:11434', model: 'old:writer', vision_model: 'qwen:vision', translation_model: 'old:translator', num_ctx: 8192, num_predict: 4096, temperature: 0.8 };
+  let saved = { ...old }, statusCalls = 0; const pending = deferred();
+  const status = settings => response({ ready: true, translation_ready: true, settings, models: [settings.model, settings.vision_model, settings.translation_model] });
+  const f = fixture(async (url, options) => {
+    if (url.endsWith('/settings')) { saved = JSON.parse(options.body); return response(saved); }
+    if (url.endsWith('/status')) { statusCalls++; return statusCalls === 2 ? pending.promise : status(saved); }
+    return response({ items: [] });
+  });
+  await f.ui.refreshEngine(); f.ui.state.settingsDirty = true;
+  f.elements.get('scriptModel').value = 'new:writer'; f.elements.get('scriptTranslationModel').value = 'new:translator';
+  const checking = f.ui.refreshEngine(), saving = f.ui.saveSettings({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(saved.model, 'new:writer'); assert.equal(saved.translation_model, 'new:translator');
+  pending.resolve(status(old)); await Promise.all([checking, saving]);
+  assert.equal(statusCalls, 3); assert.equal(f.ui.state.settings.model, 'new:writer'); assert.equal(f.ui.state.settings.translation_model, 'new:translator');
+  assert.equal(f.elements.get('scriptModel').value, 'new:writer'); assert.equal(f.elements.get('scriptTranslationModel').value, 'new:translator');
 });

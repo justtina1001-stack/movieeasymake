@@ -353,6 +353,7 @@ if (typeof document !== "undefined") {
   Object.assign(state, { videoModelSupported: false, videoModels: [], videoModelTouched: false });
   Object.assign(state, { manuscriptVideoSupported: false });
   Object.assign(state, { promptReviewSupported: false, pipelineReviewApproving: false, pipelineOriginalChoiceId: null, pipelineReviewRenderedKey: null });
+  Object.assign(state, { engineCheckRevision: 0 });
 
   function message(text, error = false, kind = "") {
     state.messageKind = kind;
@@ -362,20 +363,29 @@ if (typeof document !== "undefined") {
   }
 
   async function api(path, options = {}) {
-    let response;
+    const { readTimeoutMs = 15000, ...requestOptions } = options;
+    const read = ["GET", "HEAD"].includes(String(requestOptions.method || "GET").toUpperCase());
+    const controller = read && !requestOptions.signal ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), readTimeoutMs) : null;
     const multipart = typeof FormData !== "undefined" && options.body instanceof FormData;
-    try { response = await fetch(path, { ...options, headers: { ...(multipart ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) }, cache: "no-store" }); }
-    catch (_) { throw new Error("無法連線到 Studio 主機。編輯稿仍保留在這個分頁；恢復連線後可再儲存。"); }
-    let data;
-    try { data = await response.json(); } catch (_) { data = {}; }
-    if (!response.ok) {
-      const detail = typeof data.detail === "string" ? data.detail : typeof data.error === "string" ? data.error : Array.isArray(data.detail) ? data.detail.map(item => item.msg || "欄位格式錯誤").join("；") : "";
-      const error = new Error(response.status === 404 && !detail ? "目前 Studio 尚未提供腳本編寫 API。請重新啟動更新後的 H3 Studio。" : detail || `Studio 請求失敗（${response.status}）。`);
-      error.status = response.status;
-      error.data = data;
-      throw error;
+    try {
+      let response;
+      try { response = await fetch(path, { ...requestOptions, ...(controller ? { signal: controller.signal } : {}), headers: { ...(multipart ? {} : { "Content-Type": "application/json" }), ...(options.headers || {}) }, cache: "no-store" }); }
+      catch (_) { throw new Error(controller?.signal.aborted ? "Studio 狀態讀取逾時，將自動重新檢查。編輯稿仍保留在這個分頁。" : "無法連線到 Studio 主機。編輯稿仍保留在這個分頁；恢復連線後可再儲存。"); }
+      let data;
+      try { data = await response.json(); } catch (_) { data = {}; }
+      if (controller?.signal.aborted) throw new Error("Studio 狀態讀取逾時，將自動重新檢查。編輯稿仍保留在這個分頁。");
+      if (!response.ok) {
+        const detail = typeof data.detail === "string" ? data.detail : typeof data.error === "string" ? data.error : Array.isArray(data.detail) ? data.detail.map(item => item.msg || "欄位格式錯誤").join("；") : "";
+        const error = new Error(response.status === 404 && !detail ? "目前 Studio 尚未提供腳本編寫 API。請重新啟動更新後的 H3 Studio。" : detail || `Studio 請求失敗（${response.status}）。`);
+        error.status = response.status;
+        error.data = data;
+        throw error;
+      }
+      return data;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
-    return data;
   }
 
   function listItems(data) { return Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : []; }
@@ -903,14 +913,18 @@ if (typeof document !== "undefined") {
   }
 
   function refreshEngine(options = {}) {
+    if (state.engineCheckPromise && options.resetSettings) return state.engineCheckPromise.then(() => refreshEngine(options));
+    if (state.settingsSaving && !options.resetSettings) return state.engineCheckPromise || Promise.resolve();
     if (!state.engineCheckPromise) state.engineCheckPromise = checkEngine(options).finally(() => { state.engineCheckPromise = null; });
     return state.engineCheckPromise;
   }
 
   async function checkEngine({ resetSettings = false } = {}) {
+    const revision = state.engineCheckRevision;
     $("refreshScriptEngine").disabled = true;
     try {
-      const status = await api("/api/scripts/status");
+      const status = await api("/api/scripts/status", { readTimeoutMs: 30000 });
+      if (revision !== state.engineCheckRevision) return;
       if (!status || typeof status !== "object" || typeof status.ready !== "boolean") throw new Error("主機狀態回應不完整，暫時無法確認連線與功能；請稍後重新檢查。");
       state.ready = Boolean(status.ready);
       state.visionReady = Boolean(status.vision_ready);
@@ -943,15 +957,11 @@ if (typeof document !== "undefined") {
       if (state.skillsSupported) await loadWritingSkills();
       if (state.videoPipelinesSupported) await loadPipelines();
     } catch (error) {
+      if (revision !== state.engineCheckRevision) return;
       state.ready = false;
       state.visionReady = false;
       state.translationReady = false;
-      state.translationSupported = false;
       state.videoReady = false;
-      state.manuscriptVideoSupported = false;
-      state.promptReviewSupported = false;
-      state.videoModelSupported = false;
-      state.videoModels = [];
       $("scriptEngineDot").className = "script-dot unavailable";
       $("scriptEngineStatus").textContent = "無法取得本機模型狀態";
       $("scriptEngineDetail").textContent = error.message;
@@ -971,6 +981,7 @@ if (typeof document !== "undefined") {
     if (state.translationSupported && !$("scriptTranslationModel").value) { message("請選擇英文整理使用的本機模型；它與劇本編寫模型分開設定。", true); return; }
     if (Number($("scriptMaxOutput").value) >= Number($("scriptContext").value)) { message("最大輸出 Token 必須小於上下文 Token。上下文也需要保留空間給故事設定與既有劇本。", true); return; }
     state.settingsSaving = true;
+    state.engineCheckRevision++;
     $("saveScriptSettings").disabled = true;
     ["scriptBaseUrl", "scriptModel", "scriptVisionModel", "scriptTranslationModel", "scriptTemperature", "scriptContext", "scriptMaxOutput"].forEach(id => { $(id).disabled = true; });
     updateControls();
@@ -1617,12 +1628,25 @@ if (typeof document !== "undefined") {
     });
     window.addEventListener("storage", crossTabChanged);
     window.addEventListener("beforeunload", event => { if (state.dirty) { storeDraft(); event.preventDefault(); event.returnValue = ""; } });
-    document.addEventListener("visibilitychange", () => { if (!document.hidden) { loadJobs(); loadPipelines(); } });
+    document.addEventListener("visibilitychange", refreshAfterResume);
+    window.addEventListener("online", refreshAfterResume);
+    window.addEventListener("pageshow", refreshAfterResume);
     document.addEventListener("keydown", event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); if (!state.saving && !state.loading && !state.starting && !state.pipelineStarting) saveProject().catch(error => message(error.message, true)); } });
+  }
+
+  function refreshAfterResume() {
+    if (document.hidden) return;
+    refreshEngine();
+    loadJobs();
+    loadPipelines();
+    if (!state.loraCatalogReady) loadScriptLoras();
   }
 
   async function start() {
     bindEvents(); writeProject(state.project); renderPipelines();
+    // Install recovery before initial requests so a failed first read can recover.
+    setInterval(() => { if (!document.hidden && !state.loading) { if (!state.pollBusy) loadJobs(); if (!state.pipelinePollBusy) loadPipelines(); } }, 2200);
+    setInterval(() => { if (!document.hidden && !state.settingsSaving) refreshEngine(); }, 30000);
     await Promise.allSettled([refreshEngine(), loadScriptLoras(), loadProjects().catch(error => message(error.message, true))]);
     const requestedId = new URLSearchParams(window.location.search).get("project");
     if (requestedId && state.projects.some(project => project.id === requestedId)) await switchProject(requestedId);
@@ -1632,7 +1656,6 @@ if (typeof document !== "undefined") {
       if (latest?.project.id && state.projects.some(project => project.id === latest.project.id)) await switchProject(latest.project.id);
       else { offerDraft(); await loadJobs(); }
     }
-    setInterval(() => { if (!document.hidden && !state.loading) { if (!state.pollBusy) loadJobs(); if (!state.pipelinePollBusy) loadPipelines(); } }, 2200);
   }
   start().catch(error => message(error.message, true));
 }

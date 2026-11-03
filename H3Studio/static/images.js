@@ -4,7 +4,8 @@
   const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const draftKey = 'h3-qwen-image-21-draft-v1';
   const fields = ['imageMode','imageModel','imageName','imagePrompt','imageNegativePrompt','imageWidth','imageHeight','imageSteps','imageSeed','imageSeedAuto','imageTransparent','referenceResolution','imageLora','imageLoraStrength','editTemplate'];
-  let refs = [], ready = false, uploading = false, submitting = false, page = 1, totalPages = 1, jobs = [], queue = null, polling = false;
+  let refs = [], ready = false, uploading = false, submitting = false, page = 1, totalPages = 1, jobs = [], queue = null, statusLoading = false;
+  let imagePoll = null;
   const deletedIds = new Set();
   let pendingDelete = null;
   let pendingUpscale = null, upscaleModels = [], upscaleReady = false;
@@ -29,12 +30,24 @@
     detail:'以圖 1 為主圖，改善【臉部／材質／邊緣】細節，保留主體身分、五官比例、構圖與色彩，不新增人物或物件。',
     cutout:'擷取圖 1 中的【指定主體】，移除背景並生成透明背景，保留主體外觀、顏色與完整輪廓。'
   };
-  async function api(url, options) {
-    const response = await fetch(url, options);
-    let data;
-    try { data = await response.json(); } catch { throw new Error('Studio 後端尚未更新或回應格式錯誤，請確認工具版本並重新啟動。'); }
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    return data;
+  async function api(url, options = {}) {
+    const {readTimeoutMs=15000,...requestOptions}=options;
+    const read=['GET','HEAD'].includes((requestOptions.method || 'GET').toUpperCase());
+    const controller=read && !requestOptions.signal ? new AbortController() : null;
+    const timeout=controller ? setTimeout(()=>controller.abort(),readTimeoutMs) : null;
+    try {
+      const response = await fetch(url, {...requestOptions,...(read?{cache:'no-store'}:{}),...(controller?{signal:controller.signal}:{})});
+      let data;
+      try { data = await response.json(); } catch (error) {
+        if(controller?.signal.aborted || requestOptions.signal?.aborted) throw error;
+        throw new Error('Studio 後端尚未更新或回應格式錯誤，請確認工具版本並重新啟動。');
+      }
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      return data;
+    } catch(error) {
+      if(controller?.signal.aborted) throw new Error('讀取狀態逾時，稍後會自動重新連線。');
+      throw error;
+    } finally {if(timeout!==null) clearTimeout(timeout);}
   }
   const currentMode = () => $('imageMode').value === 'edit' ? 'edit' : 'generate';
   const selectedProfile = () => modelVariants.find(item => item.id === selectedVariant);
@@ -240,9 +253,13 @@
     update();
   }
   async function checkStatus() {
+    if(statusLoading) return;
+    statusLoading=true;
     $('refreshStatus').disabled = true;
     try {
-      const result = await api('/api/images/status'); ready = result.ready === true; engineError = result.error || '';
+      const result = await api('/api/images/status',{readTimeoutMs:30000});
+      if(typeof result.ready!=='boolean') throw new Error('圖片引擎狀態回應不完整。');
+      ready = result.ready === true; engineError = result.error || '';
       modelVariantSupported = result.model_variant_supported === true;
       modelVariants = Array.isArray(result.variants) ? result.variants.filter(item => item && Object.hasOwn(modelLabels,item.id)) : [];
       loraSupported = result.lora_supported === true; loraCatalog = H3LoraHelp.catalog(result,{model:'qwen'}); availableLoras = loraCatalog.names; renderLoras();
@@ -250,7 +267,7 @@
       const available = modelVariants.filter(item => item.ready === true).map(item => modelLabels[item.id]);
       $('engineDetail').textContent = result.error || `${result.mode === 'remote' ? '共用遠端' : '本機'}引擎 · ${modelVariantSupported ? available.join('／') || '模型尚未就緒' : '原版官方 INT8 模型'} · 圖片與影片依佇列順序處理`;
     } catch (error) { ready = false; engineError = error.message; $('engineStatus').textContent = '暫時無法檢查引擎'; $('engineDetail').textContent = error.message; }
-    finally { $('refreshStatus').disabled = false; update(); }
+    finally { statusLoading=false; $('refreshStatus').disabled = false; update(); }
   }
   function jobGenerationDetails(job) {
     const warning = job.alpha_warning ? `<p class="image-error">${escape(job.alpha_warning)}</p>` : '';
@@ -284,20 +301,49 @@
     $('previousPage').disabled = page <= 1; $('nextPage').disabled = page >= totalPages;
   }
   let pendingFocusedJob = typeof location === 'undefined' ? '' : new URLSearchParams(location.search).get('job') || '';
-  async function refresh() {
-    if (polling) return;
-    polling = true;
-    const results = await Promise.allSettled([api(`/api/images/jobs?page=${page}${pendingFocusedJob ? `&focus=${encodeURIComponent(pendingFocusedJob)}` : ""}`),api('/api/queue')]);
-    if (results[0].status === 'fulfilled') { const data = results[0].value; jobs = data.items.filter(job=>!deletedIds.has(job.id)); page = data.page; totalPages = data.total_pages; }
-    else $('imageQueue').textContent = results[0].reason.message;
-    queue = results[1].status === 'fulfilled' ? results[1].value : null;
-    if (results[0].status === 'fulfilled') $('imageQueue').textContent = queue?.available ? `共享引擎：執行 ${queue.running_count} 筆 · 排隊 ${queue.pending_count} 筆 · 本機待送出 ${queue.local_waiting_count} 筆` : '暫時無法取得共享引擎佇列，工作仍可能進行中。';
-    renderJobs(); polling = false;
-    if (pendingFocusedJob && results[0].status === 'fulfilled') {
-      const id = pendingFocusedJob; pendingFocusedJob = '';
-      const card = [...$('imageJobs').querySelectorAll('[data-job-id]')].find(node => node.dataset.jobId === id);
-      if (card) { const details = card.querySelector('details'); if (details) details.open = true; card.scrollIntoView({block:'center',behavior:'smooth'}); }
+  function refresh(force = false) {
+    if(imagePoll) {
+      if(force === true || imagePoll.page !== page || imagePoll.focus !== pendingFocusedJob) imagePoll.pending=true;
+      return imagePoll.promise;
     }
+    const poll={page,focus:pendingFocusedJob,pending:true,promise:null};
+    imagePoll=poll;
+    poll.promise=(async()=>{
+      try {
+        do {
+          poll.pending=false;poll.page=page;poll.focus=pendingFocusedJob;
+          await refreshPage(poll);
+        } while(poll.pending);
+      } finally {if(imagePoll===poll) imagePoll=null;}
+    })();
+    return poll.promise;
+  }
+  async function refreshPage(request) {
+    const current=()=>{
+      if(request.pending || request.page!==page || request.focus!==pendingFocusedJob) {request.pending=true;return false;}
+      return true;
+    };
+    try {
+      const results = await Promise.allSettled([api(`/api/images/jobs?page=${request.page}${request.focus ? `&focus=${encodeURIComponent(request.focus)}` : ""}`),api('/api/queue')]);
+      if(!current()) return;
+      if (results[0].status === 'fulfilled') {
+        const data = results[0].value;
+        if(!Array.isArray(data.items)) throw new Error('圖片工作清單回應不完整，已保留上次讀取的結果。');
+        jobs = data.items.filter(job=>!deletedIds.has(job.id)); page = data.page; totalPages = data.total_pages;
+      } else $('imageQueue').textContent = results[0].reason.message;
+      queue = results[1].status === 'fulfilled' ? results[1].value : null;
+      if (results[0].status === 'fulfilled') $('imageQueue').textContent = queue?.available ? `共享引擎：執行 ${queue.running_count} 筆 · 排隊 ${queue.pending_count} 筆 · 本機待送出 ${queue.local_waiting_count} 筆` : '暫時無法取得共享引擎佇列，工作仍可能進行中。';
+      renderJobs();
+      if (request.focus && results[0].status === 'fulfilled') {
+        const id = request.focus; pendingFocusedJob = '';
+        const card = [...$('imageJobs').querySelectorAll('[data-job-id]')].find(node => node.dataset.jobId === id);
+        if (card) { const details = card.querySelector('details'); if (details) details.open = true; card.scrollIntoView({block:'center',behavior:'smooth'}); }
+      }
+    } catch(error) { if(current()) $('imageQueue').textContent=`工作狀態暫時無法更新：${error.message}`; }
+  }
+  function resumeConnection() {
+    if(document.hidden) return;
+    checkStatus(); refresh();
   }
   $('imageForm').addEventListener('submit', async event => {
     event.preventDefault();
@@ -317,7 +363,7 @@
       const job = await api('/api/images/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
       $('imageSeed').value = job.seed; saveDraft(); page = 1;
       $('formMessage').textContent = `${modelLabels[selectedVariant]}圖片工作已加入佇列 · Seed ${job.seed}`;
-      await refresh();
+      await refresh(true);
     } catch(error) { $('formMessage').textContent = error.message; }
     finally { submitting = false; update(); }
   });
@@ -351,7 +397,7 @@
         $('deleteImageDialog').showModal();
         return;
       }
-      if (button.dataset.cancel) { await api(`/api/images/jobs/${button.dataset.cancel}/cancel`,{method:'POST'}); await refresh(); }
+      if (button.dataset.cancel) { await api(`/api/images/jobs/${button.dataset.cancel}/cancel`,{method:'POST'}); await refresh(true); }
       if (button.dataset.compare) {
         const job=jobs.find(j=>j.id === button.dataset.compare);
         if(job?.image_asset_ids?.length) {
@@ -420,7 +466,7 @@
     try {
       await api(`/api/images/jobs/${source.id}/upscale`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scale:Number($('upscaleScale').value),model:$('upscaleModel').value})});
       pendingUpscale=null; $('upscaleDialog').close(); page=1;
-      $('formMessage').textContent='已加入增強放大佇列，完成後會另存新圖片。'; await refresh();
+      $('formMessage').textContent='已加入增強放大佇列，完成後會另存新圖片。'; await refresh(true);
     } catch(error) { $('upscaleError').textContent=error.message; }
     finally {submitting=false; update(); updateUpscale(); $('cancelUpscale').disabled=false;}
   });
@@ -435,14 +481,18 @@
       deletedIds.add(id); jobs=jobs.filter(j=>j.id !== id); renderJobs();
       pendingDelete=null; $('deleteImageDialog').close();
       $('formMessage').textContent='圖片工作已刪除；已轉存的參考圖與 ComfyUI 原始輸出仍保留。';
-      await refresh();
+      await refresh(true);
     } catch(error) { $('deleteImageError').textContent=error.message; }
     finally {uploading=false; update(); $('confirmImageDelete').disabled=false; $('cancelImageDelete').disabled=false;}
   });
   $('closeCompare').addEventListener('click',()=> $('imageCompare').close());
-  $('refreshStatus').addEventListener('click',checkStatus); $('refreshJobs').addEventListener('click',refresh);
-  $('previousPage').addEventListener('click',()=>{ if(page>1) {page--;refresh();} });
-  $('nextPage').addEventListener('click',()=>{if(page<totalPages) {page++;refresh();} });
+  $('refreshStatus').addEventListener('click',checkStatus); $('refreshJobs').addEventListener('click',()=>refresh(true));
+  $('previousPage').addEventListener('click',()=>{ if(page>1) {page--;return refresh(true);} });
+  $('nextPage').addEventListener('click',()=>{if(page<totalPages) {page++;return refresh(true);} });
   renderRefs(); checkStatus(); refresh();
+  document.addEventListener('visibilitychange',resumeConnection);
+  window.addEventListener('online',resumeConnection);
+  window.addEventListener('pageshow',resumeConnection);
   setInterval(()=>{if(!document.hidden) refresh();},4000);
+  setInterval(()=>{if(!document.hidden) checkStatus();},15000);
 })();
