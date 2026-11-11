@@ -31,6 +31,7 @@ def prompt_review_item(compiled, *, scene_id=None, shot_id=None, title=None, sce
     return {"scene_id": scene_id, "shot_id": shot_id, "title": title,
             "scene_title": scene_title, "shot_title": title,
             "prompt": compiled.prompt, "video_model": compiled.video_model,
+            "freevideo_quality": compiled.freevideo_quality,
             "duration": compiled.actual_duration, "width": compiled.width, "height": compiled.height,
             "seed": compiled.seed, "steps": compiled.steps, "quality_mode": compiled.quality_mode,
             "sampler_name": compiled.sampler_name, "scheduler": compiled.scheduler,

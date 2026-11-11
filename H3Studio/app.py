@@ -27,7 +27,8 @@ import numpy as np
 from aiohttp import web
 from PIL import Image, ImageOps
 
-from comfy_client import ComfyClient
+from comfy_client import ComfyClient, ComfyJobMissingError
+from engine_prompt_presence import EnginePromptPresenceGuard
 from video_generation_errors import video_generation_error_fields
 from domain import CompiledRequest, RequestError, build_workflow, compile_request, compute_dimensions, required_asset_ids, TURBO_LORA_CANDIDATES, IMAGE_ONLY_LORA_FILENAMES, validate_runtime_inventory, resolve_video_vae
 from video_models import VIDEO_MODEL_H3, PIKA_LORA_FILENAMES, video_model_profiles
@@ -54,6 +55,7 @@ from voice import (
 )
 from shared_gateway import GatewayError, SharedComfyGateway
 from sound_effects import SoundEffectJobManager, register_sound_effect_routes
+from effects import register_effect_routes
 from queue_presentation import build_queue_view
 from queue_cancel import QueueCancelError
 from face_repair import repair_capabilities, repair_options
@@ -84,6 +86,7 @@ from shortfilm import (
 )
 from settings import ConnectionSettings, SettingsError, SettingsStore
 from studio_startup import _read_local_http, plan_startup, probe_studio
+from studio_runtime_identity import current_studio_identity, studio_source_fingerprint
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -107,6 +110,7 @@ ALLOWED_EXTENSIONS = {
 }
 TRANSPARENCY_EXTENSIONS = {".png", ".webp", ".bmp"}
 VIDEO_FPS = 24
+RECOVERY_POLL_INTERVAL = 10.0
 REPLACEMENT_MAX_INPUT_FRAMES = 15 * VIDEO_FPS
 REPLACEMENT_MAX_CORE_FRAMES = 14 * VIDEO_FPS
 REPLACEMENT_MIN_CORE_FRAMES = 5 * VIDEO_FPS
@@ -119,36 +123,14 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def studio_source_fingerprint(root: Path) -> str:
-    """Hash shipped code, never settings, tests, models or generated work."""
-    root = Path(root)
-    files = list(root.glob("*.py"))
-    static = root / "static"
-    if static.is_dir():
-        files.extend(path for path in static.rglob("*")
-                     if path.is_file() and path.suffix.lower() in {".html", ".js", ".css"})
-    writing_skills = root / "writing_skills"
-    if writing_skills.is_dir():
-        files.extend(path for path in writing_skills.rglob("*")
-                     if path.is_file() and path.suffix.lower() in {".md", ".json", ".txt"})
-    fingerprint = hashlib.sha256()
-    for path in sorted(files, key=lambda item: item.relative_to(root).as_posix()):
-        content = path.read_bytes()
-        fingerprint.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
-        fingerprint.update(len(content).to_bytes(8, "big"))
-        fingerprint.update(content)
-    return fingerprint.hexdigest()
-
-
 # Freeze this at import: old handlers continue running even when source and
 # static files on disk have been updated. Rehashing inside the endpoint would
 # incorrectly claim that the old process had loaded the new implementation.
 STUDIO_RUNTIME_VERSION = {
-    "studio": "minimax-h3-studio",
-    "source_fingerprint": studio_source_fingerprint(APP_DIR),
-    "workspace_fingerprint": hashlib.sha256(os.path.normcase(str(APP_DIR)).encode("utf-8")).hexdigest(),
+    **current_studio_identity(APP_DIR),
     "started_at": utc_now(),
     "pid": os.getpid(),
+    "supervised_recovery": os.environ.get("H3_STUDIO_SUPERVISED_RECOVERY") == "1",
 }
 
 
@@ -240,7 +222,10 @@ def sort_job_records(records: Any) -> list[dict[str, Any]]:
 
 
 def history_execution_timing(history: dict[str, Any]) -> dict[str, Any]:
-    messages = (history.get("status") or {}).get("messages") or []
+    status = history.get("status") if isinstance(history, dict) else None
+    messages = status.get("messages") if isinstance(status, dict) else None
+    if not isinstance(messages, list):
+        return {}
     started_ms: float | None = None
     finished_ms: float | None = None
     for message in messages:
@@ -248,7 +233,7 @@ def history_execution_timing(history: dict[str, Any]) -> dict[str, Any]:
             continue
         event, data = message[0], message[1]
         timestamp = data.get("timestamp")
-        if not isinstance(timestamp, (int, float)):
+        if type(timestamp) not in (int, float) or not math.isfinite(timestamp):
             continue
         if event == "execution_start":
             started_ms = float(timestamp)
@@ -256,11 +241,15 @@ def history_execution_timing(history: dict[str, Any]) -> dict[str, Any]:
             finished_ms = float(timestamp)
     if started_ms is None or finished_ms is None or finished_ms < started_ms:
         return {}
-    return {
-        "generation_started_at": datetime.fromtimestamp(started_ms / 1000, timezone.utc).isoformat(),
-        "finished_at": datetime.fromtimestamp(finished_ms / 1000, timezone.utc).isoformat(),
-        "execution_seconds": round((finished_ms - started_ms) / 1000, 3),
-    }
+    try:
+        return {
+            "generation_started_at": datetime.fromtimestamp(started_ms / 1000, timezone.utc).isoformat(),
+            "finished_at": datetime.fromtimestamp(finished_ms / 1000, timezone.utc).isoformat(),
+            "execution_seconds": round((finished_ms - started_ms) / 1000, 3),
+            "execution_timing_source": "engine",
+        }
+    except (OverflowError, OSError, ValueError):
+        return {}
 
 
 def probe_video(path: Path) -> dict[str, Any]:
@@ -1184,7 +1173,7 @@ class AssetStore:
         extension = Path(original_name).suffix.lower()
         final_path = self.directory / f"{asset_id}{extension}"
         temp_path.replace(final_path)
-        transparency_filled = False if kind == "qwen-image-reference" else flatten_transparent_image(final_path)
+        transparency_filled = False if kind in {"qwen-image-reference", "effects-source"} else flatten_transparent_image(final_path)
         metadata = {
             "id": asset_id,
             "name": original_name,
@@ -1341,6 +1330,7 @@ class JobManager:
             "segment_index": segment_index,
             "mode": compiled.mode,
             "video_model": compiled.video_model,
+            "freevideo_quality": compiled.freevideo_quality,
             "face_repair": compiled.face_repair,
             "quality_mode": compiled.quality_mode,
             "memory_optimization": compiled.memory_optimization,
@@ -1400,6 +1390,7 @@ class JobManager:
             "hidden": False,
             "mode": "replace",
             "video_model": compiled.video_model,
+            "freevideo_quality": compiled.freevideo_quality,
             "quality_mode": compiled.quality_mode,
             "memory_optimization": compiled.memory_optimization,
             "video_vae": compiled.video_vae,
@@ -1520,6 +1511,8 @@ class JobManager:
         updates: dict[str, Any] = {
             "status": "completed",
             "progress": 100,
+            "progress_is_stale": False,
+            "recovery_state": None,
             "current_node": None,
             "error": None,
             "error_code": None,
@@ -1587,23 +1580,31 @@ class JobManager:
 
     def finish_timing(self, job_id: str) -> dict[str, Any]:
         finished = datetime.now(timezone.utc)
-        updates: dict[str, Any] = {"finished_at": finished.isoformat()}
-        started_value = self.jobs[job_id].get("generation_started_at")
-        if not started_value:
-            return updates
+        job = self.jobs[job_id]
+        updates: dict[str, Any] = {"finished_at": finished.isoformat(), "execution_seconds": None,
+                                  "execution_timing_source": "unknown"}
+        # A workflow can spend days waiting for an engine that no longer knows
+        # its prompt. Wall time is diagnostic context, never engine execution.
+        started_value = job.get("created_at") or job.get("generation_started_at")
         try:
             started = datetime.fromisoformat(str(started_value))
             if started.tzinfo is None:
                 started = started.replace(tzinfo=timezone.utc)
-            updates["execution_seconds"] = round(max(0.0, (finished - started).total_seconds()), 3)
-        except ValueError:
+            updates["wall_elapsed_seconds"] = round(max(0.0, (finished - started).total_seconds()), 3)
+        except (ValueError, TypeError, OverflowError):
             pass
+        seconds = job.get("execution_seconds")
+        if type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0:
+            if job.get("execution_timing_source") in {"engine", "observed"}:
+                updates.update(execution_seconds=seconds, execution_timing_source=job["execution_timing_source"])
+            elif job.get("unverified_execution_seconds") is None:
+                updates["unverified_execution_seconds"] = seconds
         return updates
 
     async def backfill_completed_timings(self) -> None:
         candidates = [
             job for job in self.jobs.values()
-            if job.get("status") == "completed" and job.get("prompt_id") and job.get("execution_seconds") is None
+            if job.get("status") == "completed" and job.get("prompt_id") and job.get("execution_timing_source") != "engine"
         ]
         semaphore = asyncio.Semaphore(8)
 
@@ -1618,12 +1619,29 @@ class JobManager:
 
     async def reconcile_job(self, job_id: str, wait: bool = False) -> bool:
         job = self.jobs.get(job_id)
-        if not job or not job.get("prompt_id") or job.get("status") in {"completed", "cancelled"}:
+        if (not job or not job.get("prompt_id") or job.get("status") in {"completed", "cancelled"}
+                or job.get("error_code") == "engine_job_missing"):
             return False
         prompt_id = str(job["prompt_id"])
         self.cancel_events.setdefault(job_id, asyncio.Event())
+        presence = EnginePromptPresenceGuard(prompt_id)
+        if wait:
+            self.update(job_id, recovery_started_at=job.get("recovery_started_at") or utc_now(),
+                        recovery_state="monitoring", progress_is_stale=True)
         while not self.cancel_events[job_id].is_set():
-            history = await self.comfy.get_history(prompt_id)
+            snapshot_method = getattr(self.comfy, "get_history_snapshot", None)
+            try:
+                if callable(snapshot_method):
+                    snapshot = await snapshot_method(prompt_id)
+                else:
+                    # Legacy adapters cannot prove that an empty result was a
+                    # successful query. Preserve terminal history compatibility.
+                    legacy = await self.comfy.get_history(prompt_id)
+                    snapshot = {"available": bool(legacy), "history": legacy if isinstance(legacy, dict) else {}}
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError):
+                snapshot = {"available": False, "history": {}}
+            history = snapshot.get("history") if isinstance(snapshot, dict) else None
+            history = history if isinstance(history, dict) else {}
             state = self.comfy.history_state(history)
             if state == "success":
                 output = find_video_output(history)
@@ -1638,6 +1656,7 @@ class JobManager:
                             width=job["width"], height=job["height"], length=job["face_repair"]["frames"],
                             actual_duration=job["duration"], requested_duration=job["duration"])
                     await self.complete_job(job_id, compiled, prompt_id, output, history)
+                    self.update(job_id, engine_last_seen_at=utc_now())
                     return True
                 except Exception as error:
                     self.update(job_id, status="failed", current_node=None, error=f"影片已生成，但匯入操作面板失敗：{error}")
@@ -1651,23 +1670,47 @@ class JobManager:
                 return False
             if not wait:
                 return False
-            self.update(job_id, status="running", current_node="已恢復監控，等待 ComfyUI 完成", error=None)
-            await asyncio.sleep(10)
+            queue = None
+            if isinstance(snapshot, dict) and snapshot.get("available") is True and not history:
+                queue_method = getattr(self.comfy, "queue_status", None)
+                if callable(queue_method):
+                    try:
+                        queue = await queue_method()
+                    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError):
+                        pass
+            presence.observe(snapshot, queue)
+            fields = presence.fields()
+            if presence.state == "engine_missing":
+                self.update(job_id, status="interrupted", current_node=None,
+                            error=str(ComfyJobMissingError(presence.missing_checks, presence.missing_seconds)),
+                            error_code="engine_job_missing", error_detail=None, error_node=None,
+                            **self.finish_timing(job_id), **fields)
+                return False
+            message = ("已確認原工作仍在引擎執行或排隊，持續監看結果" if presence.state == "present" else
+                       "正在確認引擎是否仍保留原工作" if presence.state == "monitoring" else
+                       "暫時無法確認引擎工作狀態，正在恢復連線")
+            self.update(job_id, status="running", current_node=message, error=None, error_code=None, **fields)
+            await asyncio.sleep(RECOVERY_POLL_INTERVAL)
         return False
 
-    def resume_recoverable_jobs(self) -> None:
+    def resume_recoverable_jobs(self, *, existing_prompts_only: bool = False) -> None:
         for job_id, job in self.jobs.items():
             error = str(job.get("error") or "")
             recoverable = job.get("status") == "interrupted" or "進度連線中斷" in error
-            if not recoverable or not job.get("prompt_id"):
+            if not recoverable or not job.get("prompt_id") or job.get("error_code") == "engine_job_missing":
                 continue
             task = self.tasks.get(job_id)
             if task and not task.done():
                 continue
             self.cancel_events.setdefault(job_id, asyncio.Event())
             self.tasks[job_id] = asyncio.create_task(self._recover(job_id))
+        if existing_prompts_only:
+            # A service-only recovery may monitor accepted prompt IDs, but it
+            # must not submit the remaining segments of a replacement batch.
+            return
         for job_id, job in self.jobs.items():
-            if job.get("batch_type") != "replace_long" or job.get("status") != "interrupted":
+            if (job.get("batch_type") != "replace_long" or job.get("status") != "interrupted"
+                    or job.get("error_code") == "engine_job_missing"):
                 continue
             task = self.tasks.get(job_id)
             if task and not task.done():
@@ -1691,7 +1734,13 @@ class JobManager:
             # stale prompt block every newer job from being reconciled.
             await self.reconcile_job(job_id, wait=True)
         except asyncio.CancelledError:
-            self.update(job_id, status="cancelled", current_node=None, error="工作已取消。")
+            if self.jobs[job_id].get("status") not in {"completed", "failed", "cancelled"}:
+                if self.cancel_events.get(job_id) is not None and self.cancel_events[job_id].is_set():
+                    self.update(job_id, status="cancelled", current_node=None, error="工作已取消。")
+                else:
+                    self.update(job_id, status="interrupted", current_node=None, recovery_state="unknown",
+                                error_code="service_interrupted", error="Studio 服務已停止，原工作結果尚未確認；重新開啟後會查詢原工作，不會重新送出生成。",
+                                **self.finish_timing(job_id))
         except Exception as error:
             self.update(job_id, status="failed", current_node=None, error=f"恢復工作監控失敗：{error}")
 
@@ -1825,7 +1874,8 @@ class JobManager:
                 current_node=f"第 {segment_position + 1}/{total} 段 · {child.get('current_node') or child.get('status')}",
                 active_child_id=child_id,
             )
-            if child.get("status") in {"completed", "failed", "cancelled"}:
+            if (child.get("status") in {"completed", "failed", "cancelled"}
+                    or child.get("status") == "interrupted" and child.get("error_code") == "engine_job_missing"):
                 return child
             task = self.tasks.get(child_id)
             if task and not task.done():
@@ -2013,17 +2063,19 @@ class JobManager:
         except asyncio.CancelledError:
             self.update(
                 parent_id,
-                status="cancelled",
+                status="cancelled" if cancel_event.is_set() else "interrupted",
                 current_node=None,
                 active_child_id=None,
-                error="完整角色替換工作已取消；已完成片段會保留，可稍後接續。",
+                error=("完整角色替換工作已取消；已完成片段會保留，可稍後接續。" if cancel_event.is_set() else
+                       "Studio 服務已停止；已完成片段與原工作保留，尚未確認的生成不會當成使用者取消。"),
+                **({} if cancel_event.is_set() else {"error_code": "service_interrupted", "recovery_state": "unknown"}),
                 **self.finish_timing(parent_id),
             )
         except Exception as error:
             child_failure = self.jobs.get(str(parent.get("active_child_id") or "")) or {}
             self.update(
                 parent_id,
-                status="failed",
+                status="interrupted" if child_failure.get("error_code") == "engine_job_missing" else "failed",
                 current_node=None,
                 active_child_id=None,
                 error=str(error),
@@ -2157,8 +2209,17 @@ class JobManager:
                 if not output:
                     raise RuntimeError("ComfyUI 已完成，但沒有回傳影片檔案。")
                 await self.complete_job(job_id, compiled, prompt_id, output, history)
+        except ComfyJobMissingError as error:
+            self.update(job_id, status="interrupted", current_node=None, error=str(error),
+                        error_code="engine_job_missing", error_detail=None, error_node=None,
+                        recovery_state="engine_missing", **self.finish_timing(job_id))
         except asyncio.CancelledError:
-            self.update(job_id, status="cancelled", current_node=None, error="工作已取消。", **self.finish_timing(job_id))
+            if cancel_event.is_set():
+                self.update(job_id, status="cancelled", current_node=None, error="工作已取消。", **self.finish_timing(job_id))
+            else:
+                self.update(job_id, status="interrupted", current_node=None, error_code="service_interrupted",
+                            recovery_state="unknown", error="Studio 服務已停止，原工作結果尚未確認；未取消引擎工作或重新送出生成。",
+                            **self.finish_timing(job_id))
         except Exception as error:
             failure = video_generation_error_fields(
                 error, workflow=workflow, current_node=self.jobs[job_id].get("current_node"),
@@ -2257,7 +2318,7 @@ class JobManager:
 def find_video_output(value: Any) -> dict[str, str] | None:
     """Select generated media, never a loader's preview of its input video."""
     best: dict[str, str] | None = None
-    best_rank = 3
+    best_rank = (3, 1)
 
     def visit(item: Any) -> None:
         nonlocal best, best_rank
@@ -2276,7 +2337,12 @@ def find_video_output(value: Any) -> dict[str, str] | None:
             ):
                 # Preserve legacy descriptors without type and temporary video
                 # results, but prefer an explicitly saved output over either.
-                rank = 0 if item.get("type") == "output" else (2 if media_type == "temp" else 1)
+                kind_rank = 0 if item.get("type") == "output" else (2 if media_type == "temp" else 1)
+                # A self-saving generator may also return an internal result.
+                # Prefer Studio's named SaveVideo copy when both were saved.
+                folder = str(item.get("subfolder") or "").replace("\\", "/").strip("/")
+                named_copy = folder == "H3Studio" or folder.startswith(("H3Studio/", "H3Gateway/"))
+                rank = (kind_rank, 0 if named_copy else 1)
                 if rank < best_rank:
                     best_rank = rank
                     best = {"filename": filename, "subfolder": str(item.get("subfolder") or ""), "type": media_type}
@@ -2347,6 +2413,7 @@ def create_app() -> web.Application:
         return await prepare_h3_payload(app, prepared)
 
     app["prepare_generation_payload"] = prepare_generation_payload
+    register_effect_routes(app, STATIC_DIR, DATA_DIR)
     register_sound_effect_routes(app)
     register_job_thumbnails(app, OUTPUT_DIR)
     image_jobs = register_image_routes(app, STATIC_DIR, DATA_DIR)
@@ -3511,11 +3578,15 @@ def create_app() -> web.Application:
     app.router.add_static("/static", STATIC_DIR)
 
     async def auto_start_engine(_: web.Application) -> None:
+        supervised_recovery = os.environ.get("H3_STUDIO_SUPERVISED_RECOVERY") == "1"
         async def start_in_background() -> None:
             try:
-                if comfy.can_start:
+                if not supervised_recovery and comfy.can_start:
                     await comfy.ensure_running()
-                jobs.resume_recoverable_jobs()
+                if supervised_recovery:
+                    jobs.resume_recoverable_jobs(existing_prompts_only=True)
+                else:
+                    jobs.resume_recoverable_jobs()
                 await jobs.backfill_completed_timings()
             except Exception as error:
                 print(f"ComfyUI 自動啟動失敗：{error}", flush=True)

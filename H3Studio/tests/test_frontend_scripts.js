@@ -548,7 +548,7 @@ test('old short-cut validation failures show a recovery hint without changing th
     ui.state.job = { ...ui.state.job, error, action: 'storyboard', status: 'failed', ...change }; ui.renderPreview();
     assert.doesNotMatch(elements.get('scriptJobDetail').textContent, /短切鏡需合併/);
   }
-  assert.match(html, /scripts\.js\?v=20261103-connection-recovery/);
+  assert.match(html, /scripts\.js\?v=20261111-freevideo/);
 });
 
 function cameraCorrection(overrides = {}) { return { scene_index: 0, shot_index: 0, original_camera: '35mm low-angle tracking shot', original_camera_detail: '鏡頭跟隨主角前進', camera: 'custom', camera_detail: '35mm low-angle tracking shot\n鏡頭跟隨主角前進', ...overrides }; }
@@ -1471,6 +1471,17 @@ test('script review displays actual versioned quality and adapter without changi
   assert.doesNotMatch(text,/folder\//);assert.equal(JSON.stringify(ui.readProject()),before);assert.equal(calls.length,0);
 });
 
+test('small-resolution script FreeVideo reviews distinguish selected tiers from the effective sampling plan',()=>{
+  for(const quality of ['light','medium']){
+    const pipeline=reviewPipeline();Object.assign(pipeline.review.prompts[0],{video_model:'freevideo_vdn_h3',freevideo_quality:quality,steps:8,width:864,height:480});
+    const {ui,elements}=fixture();prepareVideo(ui);ui.state.pipeline=pipeline;ui.renderPipelines();
+    const text=flatText(elements.get('scriptPromptReviewList'));
+    assert.match(text,/採樣步數：8＋3 步（兩階段）/);assert.match(text,/小尺寸的 Light／Medium 可能使用相同計畫/);
+    assert.match(text,/不保證品質或速度差異/);
+  }
+  assert.match(html,/id="scriptFreevideoQualityHint"[^>]*>[^<]*小尺寸時可能使用相同計畫/);
+});
+
 test('unchanged prompt review polling and original-text choice preserve card identity and reading positions', async () => {
   const pipeline = reviewPipeline(); pipeline.review.prompts[0].h3_translation = { status: 'unavailable' };
   const { ui, elements } = fixture(); prepareVideo(ui); ui.bindEvents(); ui.state.pipeline = pipeline; ui.renderPipelines();
@@ -1704,7 +1715,7 @@ test('H3 sources retain reviewed provenance and repository counts without presen
   assert.equal(rendered.children[3].rel, 'noopener noreferrer');
   assert.equal(elements.get('scriptSkillVersion').textContent, '方法版本：20261006-h3');
   assert.match(html, /Stars 為倉庫關注度，並非成片品質評分/);
-  assert.match(html, /scripts\.js\?v=20261103-connection-recovery/);
+  assert.match(html, /scripts\.js\?v=20261111-freevideo/);
   elements.get('scriptWritingSkill').value = 'h3-performance-beats'; ui.renderWritingSkillDetails();
   assert.match(elements.get('scriptSkillSources').children[0].children[2].textContent, /社群來源.*倉庫 ⭐ 175.*Forks 4/);
 });
@@ -2308,6 +2319,28 @@ test('Fast video model is preserved in settings without rewriting the legacy def
   const settings = { video_model: 'fasth3_omni_nvfp4', aspect_ratio: '9:16', megapixels: 0.7, output_resolution: '1080p' };
   assert.deepEqual(normalizeScriptVideoSettings(settings), settings);
   assert.notEqual(scriptProjectSignature(project({ video_settings: settings })), scriptProjectSignature(project()));
+});
+
+test('FreeVideo quality stays in script drafts and future pipelines when switching models', async () => {
+  assert.equal(Object.hasOwn(normalizeScriptVideoSettings({}), 'freevideo_quality'), false);
+  const settings = normalizeScriptVideoSettings({ video_model:'freevideo_vdn_h3',freevideo_quality:'high' });
+  assert.equal(settings.freevideo_quality,'high');
+  assert.equal(normalizeScriptVideoSettings({video_model:'freevideo_vdn_h3'}).freevideo_quality,'medium');
+  const {ui,elements,stored}=fixture();
+  ui.writeProject(project({custom_loras:[lora({name:'h3-kept.safetensors'})],video_settings:settings}));ui.bindEvents();
+  assert.equal(elements.get('scriptFreevideoQuality').value,'high');
+  assert.equal(elements.get('scriptFreevideoQualityWrap').classes.has('hidden'),false);
+  assert.equal(elements.get('scriptVideoLoraSection').classes.has('hidden'),true);
+  elements.get('scriptFreevideoQuality').value='max';await elements.get('scriptFreevideoQuality').dispatch('change');
+  assert.equal(ui.readProject().video_settings.freevideo_quality,'max');
+  const saved=JSON.parse(stored.get('h3studio.scripts.draft.this-tab'))['project-a'].project;
+  assert.equal(saved.video_settings.freevideo_quality,'max');
+  ui.writeProject(saved);elements.get('scriptVideoModel').value='h3';await elements.get('scriptVideoModel').dispatch('change');
+  assert.equal(elements.get('scriptFreevideoQualityWrap').classes.has('hidden'),true);
+  assert.equal(ui.readProject().custom_loras[0].name,'h3-kept.safetensors');
+  assert.equal(ui.readProject().video_settings.freevideo_quality,'max');
+  elements.get('scriptVideoModel').value='freevideo_vdn_h3';await elements.get('scriptVideoModel').dispatch('change');
+  assert.equal(ui.readProject().video_settings.freevideo_quality,'max');
 });
 
 test('script model selector persists Fast drafts and keeps H3 LoRA choices available for switching back', async () => {

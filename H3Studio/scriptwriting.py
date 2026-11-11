@@ -1540,6 +1540,8 @@ class ScriptwritingManager:
         project.update(aspect_ratio=video_settings["aspect_ratio"], megapixels=video_settings["megapixels"])
         if "video_model" in video_settings:
             project["video_model"] = video_settings["video_model"]
+        if "freevideo_quality" in video_settings:
+            project["freevideo_quality"] = video_settings["freevideo_quality"]
         project["custom_loras"] = copy.deepcopy(custom_loras)
         project["id"] = project_id
         project["synopsis"] = storyboard["synopsis"]

@@ -46,7 +46,7 @@ function fixture() {
   vm.runInContext(source.slice(start, source.indexOf("\n};", start) + 3) + "\nglobalThis.defaultState = defaultState;", context);
   context.state = structuredClone(context.defaultState);
   for (const name of [
-    "currentSettings", "persistForm", "restoreForm", "saveState", "collectPayload", "recipeAsset", "originalGenerationRequest", "applyJobRecipe",
+    "currentSettings", "persistForm", "restoreForm", "saveState", "collectPayload", "recipeAsset", "originalGenerationRequest", "rememberH3ModelSettings", "applyJobRecipe",
     "videoVaeBackendIsStale", "videoVaeHint", "syncVideoVaeHints", "activeShortFilmProject", "renderShortFilmWorkspace", "saveShortFilmProject",
     "scheduleShortFilmSave", "shortFilmModelSaveError", "getShortFilmSaveCoordinator", "renderShortFilmSaveStatus",
     "shortFilmFlatten", "shortFilmAliasMentioned", "shortFilmShotAssetSelection", "shortFilmAssetShotIds", "invalidateShortFilmRenders", "updateShortFilmGenerationField",

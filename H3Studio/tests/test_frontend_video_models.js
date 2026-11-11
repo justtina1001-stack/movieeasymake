@@ -10,9 +10,10 @@ const fast = 'fasth3_omni_nvfp4';
 function fixture() {
   const elements = new Map(), storage = new Map();
   const element = key => {
-    if (!elements.has(key)) elements.set(key, {value:'',checked:false,disabled:false,textContent:'',
-      options:[{value:'native'},{value:'turbo'},{value:'turbo_fast'}],classList:{toggle(){},add(){},remove(){}},
+    if (!elements.has(key)) { const classes = new Set(); elements.set(key, {value:'',checked:false,disabled:false,textContent:'',classes,
+      options:[{value:'native'},{value:'turbo'},{value:'turbo_fast'}],classList:{toggle(name,enabled){if(enabled)classes.add(name);else classes.delete(name);},add(name){classes.add(name);},remove(name){classes.delete(name);}},
       scrollIntoView(){}, addEventListener(){}});
+    }
     return elements.get(key);
   };
   const c = vm.createContext({$:element,structuredClone, keyframePrepareVersion:0, videoModelSupported:false,videoModelProfiles:[],
@@ -25,7 +26,7 @@ function fixture() {
     renderMgAnimation(){},renderReferences(){},renderStoryboards(){},uid:()=>'',
     setMode(mode){c.state.mode=mode;},async loadJobRecipe(){return c.recipe;},toast(){},
   });
-  for (const name of ['currentSettings','persistForm','restoreForm','videoModelSelectionError','videoModelHint','syncVideoModelStatus','changeVideoModel','syncQualityMode','syncShortFilmAcceleration','recipeAsset','originalGenerationRequest','applyJobRecipe']) {
+  for (const name of ['currentSettings','persistForm','restoreForm','videoModelSelectionError','videoModelHint','syncVideoModelStatus','rememberH3ModelSettings','changeVideoModel','syncQualityMode','syncShortFilmAcceleration','recipeAsset','originalGenerationRequest','applyJobRecipe','generationReviewPromptText']) {
     const start=source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start,-1,name);
     vm.runInContext(source.slice(start,source.indexOf('\n}',start)+2),c);
@@ -41,7 +42,7 @@ test('quick and short-film pages retain H3 and FastH3 and offer the installed de
   for(const id of ['videoModel','sfVideoModel']){
     const select=html.match(new RegExp(`<select id="${id}" aria-describedby="${id}Hint">([\\s\\S]*?)</select>`));
     assert.ok(select,id);
-    assert.deepEqual([...select[1].matchAll(/value="([^"]+)"/g)].map(m=>m[1]),['h3',fast,'pika_h3_flex','h3_ref_patch']);
+    assert.deepEqual([...select[1].matchAll(/value="([^"]+)"/g)].map(m=>m[1]),['h3',fast,'pika_h3_flex','h3_ref_patch','freevideo_vdn_h3']);
   }
 });
 
@@ -169,4 +170,116 @@ test('changing a short-film model saves the choice and invalidates shots while r
   assert.equal(project.video_model,fast);assert.equal(project.quality_mode,'turbo_fast');assert.equal(project.memory_optimization,true);
   assert.equal(project.custom_loras[0].name,'saved.safetensors');assert.equal(rendered,1);assert.equal(saved,1);
   for(const shot of project.scenes[0].shots){assert.equal(shot.job_id,null);assert.equal(shot.status,'draft');}
+});
+
+test('FreeVideo quality survives reload and model switching without overwriting H3 controls',()=>{
+  const {c,element,storage}=fixture();
+  element('#videoVae').value='fp16';element('#memoryOptimization').checked=true;
+  element('#qualityMode').value='turbo_fast';element('#steps').value=4;element('#scheduler').value='beta';
+  c.state.customLoras=[{name:'kept.safetensors',strength:0.7}];c.persistForm();
+  element('#freevideoQuality').value='max';element('#videoModel').value='freevideo_vdn_h3';c.changeVideoModel();
+  const request=c.currentSettings();
+  assert.equal(request.freevideo_quality,'max');assert.equal(request.steps,20);
+  assert.equal(request.video_vae,'auto');assert.equal(request.memory_optimization,false);assert.equal(request.custom_loras.length,0);
+  assert.equal(element('#freevideoQualityWrap').classes.has('hidden'),false);
+  for(const id of ['h3QualityWrap','nativeSamplingWrap','videoVaeWrap','memoryOptimizationWrap']) assert.equal(element('#'+id).classes.has('hidden'),true);
+  c.state=JSON.parse(storage.get('state'));c.restoreForm();
+  assert.equal(element('#videoModel').value,'freevideo_vdn_h3');assert.equal(element('#freevideoQuality').value,'max');
+  element('#videoModel').value='h3';c.changeVideoModel();
+  assert.equal(element('#qualityMode').value,'turbo_fast');assert.equal(element('#scheduler').value,'simple');
+  assert.equal(element('#videoVae').value,'fp16');assert.equal(element('#memoryOptimization').checked,true);
+  assert.equal(c.state.customLoras[0].name,'kept.safetensors');assert.equal(element('#freevideoQuality').value,'max');
+  assert.equal(element('#freevideoQualityWrap').classes.has('hidden'),true);assert.equal(element('#videoVae').disabled,false);
+});
+
+test('FreeVideo history reuse restores its own quality and blocks an unready reference path',async()=>{
+  const {c,element}=fixture();c.state.replacement={};
+  c.recipe={request:{mode:'t2v',video_model:'freevideo_vdn_h3',freevideo_quality:'high',prompt:'Saved prompt'},assets:{},job:{}};
+  await c.applyJobRecipe('saved');assert.equal(c.currentSettings().video_model,'freevideo_vdn_h3');
+  assert.equal(c.currentSettings().freevideo_quality,'high');assert.equal(c.currentSettings().steps,16);
+  c.videoModelSupported=true;c.videoModelProfiles=[{id:'freevideo_vdn_h3',ready:true,modes:['t2v','r2v'],mode_ready:{t2v:true,r2v:false}}];
+  assert.equal(c.videoModelSelectionError('freevideo_vdn_h3','t2v'),'');
+  assert.match(c.videoModelSelectionError('freevideo_vdn_h3','r2v'),/尚未就緒/);
+  assert.match(c.videoModelHint('freevideo_vdn_h3'),/多模態參考仍屬實驗/);
+  assert.equal(element('#videoModel').value,'freevideo_vdn_h3');
+});
+
+test('applying FreeVideo history preserves native H3 preferences through reload and return',async()=>{
+  const {c,element,storage}=fixture();c.state.replacement={};
+  element('#videoVae').value='fp16';element('#memoryOptimization').checked=true;
+  element('#qualityMode').value='native';element('#steps').value=28;element('#scheduler').value='beta';element('#refImageSize').value='max';
+  c.state.customLoras=[{name:'kept.safetensors',strength:.7}];c.persistForm();
+  c.recipe={request:{mode:'t2v',video_model:'freevideo_vdn_h3',freevideo_quality:'high',prompt:'Saved'},assets:{},job:{}};
+  await c.applyJobRecipe('saved');
+  assert.equal(c.currentSettings().video_model,'freevideo_vdn_h3');assert.equal(c.currentSettings().freevideo_quality,'high');
+  c.state=JSON.parse(storage.get('state'));c.restoreForm();
+  element('#videoModel').value='h3';c.changeVideoModel();
+  assert.equal(element('#videoVae').value,'fp16');assert.equal(element('#memoryOptimization').checked,true);
+  assert.equal(element('#qualityMode').value,'native');assert.equal(element('#steps').value,28);assert.equal(element('#scheduler').value,'beta');
+  assert.equal(element('#refImageSize').value,'max');assert.equal(c.state.customLoras[0].name,'kept.safetensors');assert.equal(c.state.customLoras[0].strength,.7);
+});
+
+test('a newly applied H3 history becomes the preferences preserved by the next dedicated recipe',async()=>{
+  const {c,element}=fixture();c.state.replacement={};
+  element('#steps').value=28;element('#scheduler').value='beta';element('#videoVae').value='fp16';element('#memoryOptimization').checked=true;
+  c.state.customLoras=[{name:'old.safetensors',strength:.7}];c.persistForm();
+  element('#videoModel').value='freevideo_vdn_h3';c.changeVideoModel();
+  c.recipe={request:{mode:'t2v',video_model:'h3',quality_mode:'native',steps:32,scheduler:'karras',video_vae:'int8',memory_optimization:false,custom_loras:[{name:'new.safetensors',strength:.9}],prompt:'Native recipe'},assets:{},job:{}};
+  await c.applyJobRecipe('new-native');
+  assert.equal(element('#videoModel').value,'h3');assert.equal(element('#steps').value,32);assert.equal(element('#scheduler').value,'karras');
+  assert.equal(element('#videoVae').value,'int8');assert.equal(c.state.customLoras[0].name,'new.safetensors');
+  c.recipe={request:{mode:'t2v',video_model:'freevideo_vdn_h3',freevideo_quality:'light',prompt:'Another dedicated recipe'},assets:{},job:{}};
+  await c.applyJobRecipe('next-dedicated');element('#videoModel').value='h3';c.changeVideoModel();
+  assert.equal(element('#steps').value,32);assert.equal(element('#scheduler').value,'karras');assert.equal(element('#videoVae').value,'int8');
+  assert.equal(element('#memoryOptimization').checked,false);assert.equal(c.state.customLoras[0].name,'new.safetensors');assert.equal(c.state.customLoras[0].strength,.9);
+});
+
+test('generation review shows the FreeVideo two-pass recipe and preserves the exact sent prompt',()=>{
+  const {c}=fixture();const prompt='subject_definitions:\n<Subject 1>\ndetailed_description:\n<d>[Chinese] 原句不改。</d>';
+  for(const [quality,steps] of [['light','8＋3 步（兩階段）'],['medium','8＋3 步（兩階段）'],['high','16 步（單階段）'],['max','20 步（單階段）']]) {
+    const review=c.generationReviewPromptText({video_model:'freevideo_vdn_h3',freevideo_quality:quality,steps:8,prompt,actual_duration:5.167});
+    assert.match(review,/模型：FreeVideo／VDN-H3/);assert.ok(review.includes('採樣步數：'+steps));assert.ok(review.endsWith(prompt));
+    assert.ok(review.includes('FreeVideo '+quality[0].toUpperCase()+quality.slice(1)));
+  }
+});
+
+test('short-film FreeVideo settings expose a separate quality without rewriting stored H3 preferences',()=>{
+  const {c,element}=fixture();
+  c.project={video_model:'freevideo_vdn_h3',freevideo_quality:'high',quality_mode:'turbo_ref_quality_v11',memory_optimization:true,video_vae:'int8',custom_loras:[{name:'kept'}]};
+  const before=JSON.stringify(c.project);c.syncShortFilmAcceleration();
+  assert.equal(element('#sfFreevideoQuality').value,'high');assert.equal(element('#sfFreevideoQualityWrap').classes.has('hidden'),false);
+  assert.equal(element('#sfVideoVae').disabled,true);assert.equal(element('#sfH3QualityWrap').classes.has('hidden'),true);
+  assert.equal(JSON.stringify(c.project),before);
+});
+
+test('small-resolution FreeVideo hints disclose equivalent Light and Medium plans in quick and short-film views',()=>{
+  const {c,element}=fixture();element('#videoModel').value='freevideo_vdn_h3';element('#megapixels').value='0.4';
+  for(const quality of ['light','medium']){
+    element('#freevideoQuality').value=quality;c.syncQualityMode(864,480);
+    const hint=element('#freevideoQualityHint').textContent;
+    assert.match(hint,/小尺寸/);assert.match(hint,/相同/);
+    assert.doesNotMatch(hint,/通常比 Light 耗時|第一階段保留較多細節/);
+    const review=c.generationReviewPromptText({video_model:'freevideo_vdn_h3',freevideo_quality:quality,width:864,height:480,prompt:'Saved prompt'});
+    assert.match(review,/小尺寸的 Light／Medium 可能使用相同計畫/);assert.ok(review.endsWith('Saved prompt'));
+    c.project={video_model:'freevideo_vdn_h3',freevideo_quality:quality,megapixels:.4};c.syncShortFilmAcceleration();
+    assert.match(element('#sfFreevideoQualityHint').textContent,/小尺寸/);assert.match(element('#sfFreevideoQualityHint').textContent,/相同/);
+  }
+});
+
+test('FreeVideo storyboards retain exact-guide drafts but explain their unsupported image constraint',()=>{
+  const {c,element}=fixture();c.escapeHtml=String;
+  const start=source.indexOf('function renderStoryboards(');
+  vm.runInContext(source.slice(start,source.indexOf('\n}',start)+2),c);
+  c.state.mode='r2v';c.state.storyboards=[{id:'one',duration:2,guideMode:'exact',image:{id:'image',url:'/api/assets/image'}}];
+  element('#videoModel').value='freevideo_vdn_h3';c.renderStoryboards();
+  assert.match(element('#storyboardHint').textContent,/文字分鏡可用/);
+  assert.match(element('#storyboardList').innerHTML,/value="exact" selected disabled/);
+  assert.match(element('#storyboardList').innerHTML,/FreeVideo 不支援精確錨定/);
+  assert.equal(c.state.storyboards[0].guideMode,'exact');
+  assert.match(c.videoModelSelectionError('freevideo_vdn_h3','r2v'),/分鏡圖片精確錨定/);
+  c.state.storyboards[0].guideMode='reference';c.renderStoryboards();
+  assert.match(element('#storyboardList').innerHTML,/作為柔性構圖參考/);
+  element('#videoModel').value='h3';c.state.storyboards[0].guideMode='exact';c.renderStoryboards();
+  assert.match(element('#storyboardHint').textContent,/官方 Guide/);
+  assert.match(element('#storyboardList').innerHTML,/鎖定 0.000 秒畫面/);
 });

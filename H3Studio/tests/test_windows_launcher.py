@@ -135,6 +135,13 @@ class WindowsStartLauncherTests(unittest.TestCase):
         venv.EnvBuilder(with_pip=False).create(self.studio / ".venv")
         for name in ("start_h3_studio.bat", "start_h3_studio_8789.bat"):
             shutil.copyfile(REPOSITORY_ROOT / name, self.root / name)
+        for name in ("studio_launcher.py", "studio_startup.py", "studio_runtime_identity.py"):
+            shutil.copyfile(REPOSITORY_ROOT / "H3Studio" / name, self.studio / name)
+        # Execute the real supervisor and its standard-library dependencies.
+        # Only replace discovery in this temporary copy so an early fixture
+        # failure can never probe/reuse the user's Studio or start recovery.
+        with (self.studio / "studio_startup.py").open("a", encoding="utf-8") as module:
+            module.write("\n\ndef find_matching_running_studio(*args, **kwargs):\n    return None\n")
         # The real -c dependency probe imports harmless local modules. Missing
         # one exercises automatic repair without calling pip or a real setup.
         for name in ("aiohttp", "av", "numpy", "PIL", "huggingface_hub"):
@@ -146,12 +153,15 @@ class WindowsStartLauncherTests(unittest.TestCase):
         self.env.pop("PYTHONHOME", None)
         self.env.pop("PYTHONPATH", None)
 
-    def write_app(self, exit_code=0):
+    def write_app(self, exit_code=0, stderr=""):
         (self.studio / "app.py").write_text(
             "import json, sys\nfrom pathlib import Path\n"
+            "count = Path('launch-count.txt')\n"
+            "count.write_text(str(int(count.read_text()) + 1) if count.exists() else '1')\n"
             "Path('launch-args.json').write_text(json.dumps({'args': sys.argv[1:], "
             "'cwd': str(Path.cwd()), 'python': sys.executable}), encoding='utf-8')\n"
             "print('LAUNCHER_FIXTURE_APP')\n"
+            f"sys.stderr.buffer.write({stderr.encode('utf-8')!r})\n"
             f"sys.exit({exit_code})\n", encoding="utf-8",
         )
 
@@ -175,6 +185,14 @@ class WindowsStartLauncherTests(unittest.TestCase):
     def setup_calls(self):
         path = self.root / "setup-calls.txt"
         return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+    def diagnostics(self):
+        records = list((self.studio / "data" / "logs" / "studio").glob("*/launcher.json"))
+        self.assertEqual(len(records), 1, records)
+        path = records[0]
+        return (json.loads(path.read_text(encoding="utf-8")),
+                (path.parent / "stdout.log").read_bytes(),
+                (path.parent / "stderr.log").read_bytes())
 
     def assert_launched(self, code, output, arguments):
         self.assertEqual(code, 0, output)
@@ -240,13 +258,37 @@ class WindowsStartLauncherTests(unittest.TestCase):
         self.assertEqual(self.setup_calls(), ["--auto"])
 
     def test_app_failure_returns_its_original_exit_code_after_message(self):
-        self.write_app(exit_code=23)
+        stderr = "LAUNCHER_FIXTURE_ERROR: source missing\n保留錯誤原文\n"
+        self.write_app(exit_code=23, stderr=stderr)
         code, output = self.launch()
         self.assertEqual(code, 23, output)
         self.assertIn("LAUNCHER_FIXTURE_APP", output)
-        self.assertIn("could not start", output)
+        self.assertIn("Studio exited with code 23", output)
+        self.assertNotIn("could not start or reuse", output)
+        self.assertIn("LAUNCHER_FIXTURE_ERROR", output)
         self.assertTrue(self.marker.exists())
         self.assertEqual(self.setup_calls(), [])
+        receipt, stdout_log, stderr_log = self.diagnostics()
+        self.assertEqual(receipt["wrapper_exit_code"], 23)
+        self.assertEqual(receipt["restart_count"], 0)
+        self.assertEqual(len(receipt["attempts"]), 1)
+        self.assertEqual(receipt["attempts"][0]["original_exit_code"], 23)
+        self.assertIn(b"LAUNCHER_FIXTURE_APP", stdout_log)
+        self.assertEqual(stderr_log, stderr.encode("utf-8"))
+        self.assertEqual((self.studio / "launch-count.txt").read_text(), "1")
+
+    def test_normal_exit_keeps_diagnostics_without_failure_message_or_recovery(self):
+        code, output = self.launch()
+        self.assert_launched(code, output, ["--auto-port", "--launcher-fixture"])
+        self.assertNotIn("Studio exited with code", output)
+        receipt, stdout_log, stderr_log = self.diagnostics()
+        self.assertEqual(receipt["wrapper_exit_code"], 0)
+        self.assertEqual(receipt["restart_count"], 0)
+        self.assertEqual(len(receipt["attempts"]), 1)
+        self.assertEqual(receipt["attempts"][0]["original_exit_code"], 0)
+        self.assertIn(b"LAUNCHER_FIXTURE_APP", stdout_log)
+        self.assertEqual(stderr_log, b"")
+        self.assertEqual((self.studio / "launch-count.txt").read_text(), "1")
 
     @unittest.skipUnless(shutil.which("git"), "Requires Git for isolated archive roundtrip")
     def test_git_blob_and_zip_roundtrip_preserve_crlf_and_archived_launcher_executes(self):

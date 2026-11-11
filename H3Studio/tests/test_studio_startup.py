@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 import app as studio
 import studio_startup as startup
+from studio_runtime_identity import current_studio_identity, studio_source_fingerprint, studio_workspace_fingerprint
 
 
 class StudioStartupTests(unittest.TestCase):
@@ -41,6 +42,19 @@ class StudioStartupTests(unittest.TestCase):
         port = sock.getsockname()[1]
         sock.close()
         return port
+
+    def workspace(self):
+        root = self.lock_file.parent / "H3Studio"
+        root.mkdir()
+        (root / "app.py").write_text("first backend version", encoding="utf-8")
+        (root / "static").mkdir()
+        (root / "static/index.html").write_text("first interface", encoding="utf-8")
+        return root
+
+    def version(self, root, **changes):
+        # This intentionally is not the test process PID: an HTTP runtime must
+        # not be rejected because its launcher wrapper had a different PID.
+        return {**current_studio_identity(root), "pid": 987654321, "started_at": "2020-01-01T00:00:00Z", **changes}
 
     def server(self, body=startup.STUDIO_TITLE, status=200, *, redirect=None, gate=None, dribble=False,
                capabilities=None, capability_status=200, capability_redirect=None, capability_gate=None,
@@ -114,6 +128,165 @@ class StudioStartupTests(unittest.TestCase):
                                      "ALL_PROXY": "http://127.0.0.1:1", "NO_PROXY": ""}):
             self.assertTrue(startup.probe_studio(port, timeout=.3))
         self.assertEqual(requests, ["/"])
+
+    def test_matching_query_only_reads_the_version_endpoint_without_startup_side_effects(self):
+        root = self.workspace()
+        identity = self.version(root)
+        port, requests = self.server(version_body=json.dumps(identity).encode())
+        with (
+            patch.object(startup, "plan_startup", side_effect=AssertionError("query must not start")),
+            patch.object(startup, "_try_lock", side_effect=AssertionError("query must not lock")),
+            patch.object(startup, "_reserve_port", side_effect=AssertionError("query must not bind")),
+            patch.object(studio, "create_app", side_effect=AssertionError("query must not create engines")),
+            patch.object(subprocess, "Popen", side_effect=AssertionError("query must not spawn")),
+        ):
+            self.assertEqual(startup.find_matching_running_studio(root, port, timeout=.3),
+                             {"port": port, "pid": identity["pid"], "identity": identity})
+        self.assertEqual(requests, ["/api/studio/version"])
+        self.assertFalse(self.lock_file.exists())
+        self.assertFalse((root / "data").exists())
+
+    def test_matching_query_recomputes_disk_source_on_every_call(self):
+        root = self.workspace()
+        old = self.version(root)
+        stale_port, requests = self.server(version_body=json.dumps(old).encode())
+        self.assertIsNotNone(startup.find_matching_running_studio(root, stale_port, timeout=.3))
+        (root / "app.py").write_text("second backend version", encoding="utf-8")
+        self.assertIsNone(startup.find_matching_running_studio(root, stale_port, timeout=.3))
+        fresh = self.version(root, pid=123)
+        fresh_port, fresh_requests = self.server(version_body=json.dumps(fresh).encode())
+        found = startup.find_matching_running_studio(root, fresh_port, timeout=.3)
+        self.assertEqual(found["identity"]["source_fingerprint"], current_studio_identity(root)["source_fingerprint"])
+        self.assertEqual(found["pid"], 123)
+        self.assertEqual(requests, ["/api/studio/version"] * 2)
+        self.assertEqual(fresh_requests, ["/api/studio/version"])
+
+    def test_matching_query_rejects_other_identity_and_nonpositive_or_noninteger_pids(self):
+        root = self.workspace()
+        version = self.version(root)
+        cases = [{**version, key: "wrong"} for key in ("studio", "source_fingerprint", "workspace_fingerprint")]
+        cases += [{**version, "pid": value} for value in (None, 0, -1, True, False, "123", 123.0, [], {})]
+        cases += [{key: value for key, value in version.items() if key != missing}
+                  for missing in ("pid", "studio", "source_fingerprint", "workspace_fingerprint")]
+        for identity in cases:
+            with self.subTest(identity=identity):
+                port, requests = self.server(version_body=json.dumps(identity).encode())
+                self.assertIsNone(startup.find_matching_running_studio(root, port, timeout=.3))
+                self.assertEqual(requests, ["/api/studio/version"])
+
+    def test_matching_query_rejects_unhealthy_invalid_and_oversized_bodies(self):
+        root = self.workspace()
+        valid = json.dumps(self.version(root)).encode()
+        cases = [(valid, 503), (b"not json", 200), (b"\xff", 200), (b"[]", 200),
+                 (b"null", 200), (b"true", 200), (b"123", 200),
+                 (valid + b" " * (8193 - len(valid)), 200)]
+        for body, status in cases:
+            with self.subTest(status=status, body=body[:60]):
+                port, requests = self.server(version_body=body, version_status=status)
+                self.assertIsNone(startup.find_matching_running_studio(root, port, timeout=.3))
+                self.assertEqual(requests, ["/api/studio/version"])
+        port, _ = self.server(version_body=valid + b" " * (8192 - len(valid)))
+        self.assertIsNotNone(startup.find_matching_running_studio(root, port, timeout=.3))
+        self.assertIsNone(startup.find_matching_running_studio(root, self.free_port(), timeout=.3))
+
+    def test_matching_query_bypasses_proxies_and_does_not_follow_redirects(self):
+        root = self.workspace()
+        identity = self.version(root)
+        proxy, proxy_requests = self.server(b"proxy must remain unused")
+        target, target_requests = self.server(version_body=json.dumps(identity).encode())
+        redirect, redirect_requests = self.server(version_status=302,
+                                                  version_redirect=f"http://127.0.0.1:{target}/api/studio/version")
+        url = f"http://127.0.0.1:{proxy}"
+        environment = {key: url for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")}
+        environment.update(NO_PROXY="", no_proxy="")
+        with patch.dict(os.environ, environment):
+            self.assertIsNotNone(startup.find_matching_running_studio(root, target, timeout=.3))
+            self.assertIsNone(startup.find_matching_running_studio(root, redirect, timeout=.3))
+        self.assertEqual(proxy_requests, [])
+        self.assertEqual(target_requests, ["/api/studio/version"])
+        self.assertEqual(redirect_requests, ["/api/studio/version"])
+
+    def test_matching_query_stalls_and_dripping_headers_obey_total_deadline(self):
+        root = self.workspace()
+        stalled, stalled_requests = self.server(version_gate=threading.Event())
+        trickling, trickling_requests = self.server(version_dribble=True)
+        for port, requests in ((stalled, stalled_requests), (trickling, trickling_requests)):
+            with self.subTest(port=port):
+                began = time.monotonic()
+                self.assertIsNone(startup.find_matching_running_studio(root, port, timeout=.12))
+                self.assertLess(time.monotonic() - began, .45)
+                self.assertEqual(requests, ["/api/studio/version"])
+
+    def test_matching_auto_query_checks_known_ports_concurrently_and_only_once(self):
+        root = self.workspace()
+        preferred, preferred_requests = self.server(version_gate=threading.Event())
+        other, other_requests = self.server(version_gate=threading.Event())
+        matching, matching_requests = self.server(version_body=json.dumps(self.version(root)).encode())
+        with patch.object(startup, "AUTO_PORTS", (preferred, other, matching, matching)):
+            began = time.monotonic()
+            found = startup.find_matching_running_studio(root, preferred, auto_port=True, timeout=.15)
+            self.assertLess(time.monotonic() - began, .45)
+        self.assertEqual(found["port"], matching)
+        for requests in (preferred_requests, other_requests, matching_requests):
+            self.assertEqual(requests, ["/api/studio/version"])
+        with patch.object(startup, "AUTO_PORTS", (preferred, other)):
+            self.assertIsNone(startup.find_matching_running_studio(root, preferred, auto_port=False, timeout=.12))
+        self.assertEqual(other_requests, ["/api/studio/version"])
+
+    def test_matching_auto_query_uses_preferred_priority_with_one_global_timeout(self):
+        root = self.workspace()
+        valid = json.dumps(self.version(root)).encode()
+        preferred, _ = self.server(version_body=valid)
+        alternative, _ = self.server(version_body=valid)
+        with patch.object(startup, "AUTO_PORTS", (alternative,)):
+            self.assertEqual(startup.find_matching_running_studio(root, preferred, True, .3)["port"], preferred)
+        stalls = [self.server(version_gate=threading.Event()) for _ in range(4)]
+        with patch.object(startup, "AUTO_PORTS", tuple(port for port, _ in stalls[1:])):
+            began = time.monotonic()
+            self.assertIsNone(startup.find_matching_running_studio(root, stalls[0][0], True, .15))
+            self.assertLess(time.monotonic() - began, .45)
+        self.assertTrue(all(requests == ["/api/studio/version"] for _, requests in stalls))
+
+    def test_matching_query_rejects_invalid_arguments_without_network_access(self):
+        root = self.workspace()
+        cases = [dict(preferred_port=value) for value in (True, 0, -1, 65536, "8787")]
+        cases += [dict(timeout=value) for value in (True, False, 0, -1, "2", float("nan"), float("inf"))]
+        cases += [dict(auto_port=value) for value in (1, "true", None)]
+        with patch.object(startup, "_read_local_http", side_effect=AssertionError("invalid query must not connect")):
+            for arguments in cases:
+                with self.subTest(arguments=arguments):
+                    self.assertIsNone(startup.find_matching_running_studio(root, **arguments))
+            self.assertIsNone(startup.find_matching_running_studio(root / "missing"))
+            self.assertIsNone(startup.find_matching_running_studio(None))
+
+    def test_shared_identity_keeps_original_fingerprint_scope_and_workspace_path(self):
+        root = self.workspace()
+        original = studio_source_fingerprint(root)
+        self.assertEqual(original, studio.studio_source_fingerprint(root))
+        for name in ("config.json", "data/jobs.json", "tests/example.py", "models/weight.py", ".venv/runtime.py", "static/image.png"):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("mutable", encoding="utf-8")
+        self.assertEqual(studio_source_fingerprint(root), original)
+        skill = root / "writing_skills/official/prompt.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("official skill", encoding="utf-8")
+        changed = studio_source_fingerprint(root)
+        self.assertNotEqual(changed, original)
+        skill.write_text("updated official skill", encoding="utf-8")
+        self.assertNotEqual(studio_source_fingerprint(root), changed)
+        self.assertEqual(studio_workspace_fingerprint(root / "static/.."), studio_workspace_fingerprint(root))
+        other = self.lock_file.parent / "other-workspace"
+        other.mkdir()
+        self.assertNotEqual(studio_workspace_fingerprint(root), studio_workspace_fingerprint(other))
+
+    def test_query_and_identity_modules_import_without_site_packages_or_application(self):
+        script = ("import sys; import studio_startup,studio_runtime_identity; "
+                  "assert 'app' not in sys.modules and 'aiohttp' not in sys.modules and 'comfy_client' not in sys.modules")
+        completed = subprocess.run([sys.executable, "-S", "-c", script], cwd=Path(startup.__file__).parent,
+                                   text=True, capture_output=True, timeout=3,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_runtime_version_matches_before_reusing_ready_workspace(self):
         version = {**studio.STUDIO_RUNTIME_VERSION, "pid": 12345, "started_at": "2020-01-01T00:00:00+00:00"}

@@ -20,7 +20,7 @@ function fixture(initial = null) {
     $: element, $$: () => context.annotations, AbortController, setTimeout, clearTimeout,
     async api() { return emptyQueue(); },
   });
-  for (const name of ['escapeHtml', 'statusLabel', 'queueJobPresentation', 'queueJobAttributes', 'queueJobBadgeHtml', 'queueProgressContent', 'queueJobProgressHtml', 'refreshQueueJobAnnotations', 'queueRowsHtml', 'renderSharedQueue', 'loadSharedQueue', 'formatExecutionTime', 'jobExecutionSeconds', 'jobExecutionLabel', 'batchSegmentsHtml']) {
+  for (const name of ['escapeHtml', 'statusLabel', 'queueJobPresentation', 'queueJobAttributes', 'queueJobBadgeHtml', 'queueProgressContent', 'queueJobProgressHtml', 'refreshQueueJobAnnotations', 'queueRowsHtml', 'renderSharedQueue', 'loadSharedQueue', 'formatExecutionTime', 'jobTimingValue', 'jobExecutionSeconds', 'jobExecutionLabel', 'batchSegmentsHtml']) {
     const start = source.search(new RegExp(`(?:async )?function ${name}\\(`));
     assert.notEqual(start, -1, `function ${name} is present`);
     vm.runInContext(source.slice(start, source.indexOf('\n}', start) + 2), context);
@@ -228,7 +228,7 @@ test('unknown in-flight jobs are distinguished from confirmed local processing',
   assert.doesNotMatch(element('#queueStatusMessage').textContent, /正在準備或處理/);
 });
 
-test('active time is explicitly waiting-inclusive while completed generation time is unchanged', () => {
+test('active elapsed includes waiting while only engine-confirmed seconds use the generation-time label', () => {
   const { context, run } = fixture(waitingQueue());
   context.job = { id: 'video', status: 'running', created_at: new Date(Date.now() - 60000).toISOString(), generation_started_at: new Date(Date.now() - 50000).toISOString() };
   const label = run('jobExecutionLabel(job)');
@@ -237,7 +237,156 @@ test('active time is explicitly waiting-inclusive while completed generation tim
   assert.doesNotMatch(label, /已執行|生成耗時/);
   context.job.status = 'completed';
   context.job.execution_seconds = 90;
+  assert.equal(run('jobExecutionLabel(job)'), '歷史記錄耗時 1 分 30 秒（未經引擎確認）');
+  context.job.execution_timing_source = 'engine';
   assert.equal(run('jobExecutionLabel(job)'), '生成耗時 1 分 30 秒');
+});
+
+test('a six-day cancelled or interrupted legacy job never claims 147 hours of generation', () => {
+  const { context, run } = fixture();
+  for (const status of ['cancelled', 'interrupted', 'failed']) {
+    context.job = { status, execution_seconds: 531304.985, generation_started_at: '2026-11-04T11:11:46+08:00', finished_at: '2026-11-10T14:46:51+08:00' };
+    assert.equal(run('jobExecutionSeconds(job)'), null);
+    assert.equal(run('jobExecutionLabel(job)'), '生成耗時未確認');
+  }
+});
+
+test('legacy completed values stay visible as historical unconfirmed records while explicit unknown is not inferred', () => {
+  const { context, run } = fixture();
+  context.job = { status: 'completed', execution_seconds: 90 };
+  assert.equal(run('jobExecutionLabel(job)'), '歷史記錄耗時 1 分 30 秒（未經引擎確認）');
+  context.job.execution_timing_source = 'unknown';
+  assert.equal(run('jobExecutionLabel(job)'), '生成耗時未確認');
+});
+
+test('engine and observed timing retain their distinct meanings and never grow from an old wall clock', () => {
+  const { context, run } = fixture();
+  context.job = { status: 'running', execution_seconds: 90, execution_timing_source: 'engine', generation_started_at: '2026-11-04T11:11:46+08:00' };
+  assert.equal(run('jobExecutionSeconds(job)'), 90);
+  assert.equal(run('jobExecutionLabel(job)'), '生成耗時 1 分 30 秒');
+  context.job.execution_timing_source = 'observed';
+  assert.equal(run('jobExecutionLabel(job)'), '處理經過 1 分 30 秒（非引擎計時）');
+  delete context.job.execution_seconds;
+  assert.equal(run('jobExecutionSeconds(job)'), null);
+});
+
+test('missing and malformed timing values are not coerced to zero seconds or historical elapsed time', () => {
+  const { context, run } = fixture();
+  for (const value of [null, undefined, '', '   ', false, true, NaN, Infinity, -1, {}, []]) {
+    context.job = { status: 'completed', execution_timing_source: 'engine', execution_seconds: value };
+    assert.equal(run('jobExecutionSeconds(job)'), null);
+    assert.equal(run('jobExecutionLabel(job)'), '生成耗時未確認');
+  }
+  context.job.execution_seconds = 0;
+  assert.equal(run('jobExecutionLabel(job)'), '生成耗時 0 秒');
+  context.job.execution_seconds = '90';
+  assert.equal(run('jobExecutionLabel(job)'), '生成耗時 1 分 30 秒');
+});
+
+test('recovery monitoring replaces waiting-inclusive wall time and terminal unknown state stops promising recovery', () => {
+  const { context, run } = fixture();
+  for (const recovery_state of ['monitoring', 'unknown']) {
+    context.job = { status: 'running', recovery_state, execution_timing_source: 'unknown', execution_seconds: null,
+      created_at: '2026-11-04T11:11:46+08:00', generation_started_at: '2026-11-04T11:11:46+08:00' };
+    assert.equal(run('jobExecutionLabel(job)'), '等待恢復引擎紀錄 · 生成耗時未確認');
+    context.job.status = 'cancelled';
+    assert.equal(run('jobExecutionLabel(job)'), '引擎紀錄未確認 · 生成耗時未確認');
+  }
+});
+
+test('missing engine work has a clear terminal label and retains any genuinely confirmed engine timing', () => {
+  const { context, run } = fixture(waitingQueue());
+  context.job = { id: 'video', status: 'interrupted', recovery_state: 'engine_missing', progress: 45,
+    execution_timing_source: 'unknown', execution_seconds: null };
+  assert.equal(run('jobExecutionLabel(job)'), '引擎已無此工作 · 生成耗時未確認');
+  const presentation = run('queueJobPresentation(job)');
+  assert.equal(presentation.label, '引擎紀錄遺失');
+  assert.equal(presentation.progress, null);
+  assert.equal(presentation.waiting, false);
+  assert.match(presentation.detail, /重新確認稿件/);
+  context.job.execution_timing_source = 'engine'; context.job.execution_seconds = 90;
+  assert.equal(run('jobExecutionLabel(job)'), '引擎已無此工作 · 生成耗時 1 分 30 秒');
+  context.job.status = 'cancelled';
+  assert.equal(run('queueJobPresentation(job)').label, '已取消');
+});
+
+test('unconfirmed recovery suppresses stale progress until the job is confirmed present again', () => {
+  const { context, run } = fixture({ ...emptyQueue(), jobs: { video: { phase: 'engine_running', progress: 45 } } });
+  context.job = { id: 'video', status: 'running', recovery_state: 'monitoring', progress: 45 };
+  const presentation = run('queueJobPresentation(job)');
+  assert.equal(presentation.label, '等待恢復確認');
+  assert.equal(presentation.progress, null);
+  assert.equal(presentation.waiting, true);
+  context.job.recovery_state = 'present';
+  assert.equal(run('queueJobPresentation(job)').label, '引擎生成中');
+  assert.equal(run('queueJobPresentation(job)').progress, 45);
+});
+
+test('a present recovered engine job stays indeterminate when only its pre-restart percentage is available', () => {
+  const { context, run } = fixture({ ...emptyQueue(), jobs: { video: { phase: 'engine_running', progress: 30 } } });
+  context.job = { id: 'video', status: 'running', recovery_state: 'present', progress_is_stale: true, progress: 30,
+    current_node: '舊採樣節點', generation_started_at: '2026-11-04T11:11:46+08:00' };
+  const presentation = run('queueJobPresentation(job)');
+  assert.equal(presentation.label, '引擎生成中');
+  assert.equal(presentation.detail, '引擎仍在執行，進度待同步');
+  assert.equal(presentation.progress, null);
+  assert.equal(presentation.waiting, false);
+  assert.equal(run('jobExecutionSeconds(job)'), null);
+  assert.doesNotMatch(run('queueProgressContent(queueJobPresentation(job))'), /30%|舊採樣節點/);
+  context.sharedQueueData.jobs.video.progress_is_stale = true;
+  delete context.job.progress_is_stale;
+  assert.equal(run('queueJobPresentation(job)').progress, null, 'queue snapshots also preserve stale-progress evidence for nested segment cards');
+  context.sharedQueueData.jobs.video.progress_is_stale = false;
+  assert.equal(run('queueJobPresentation(job)').progress, 30);
+});
+
+test('completed engine timing and final percentage ignore a leftover stale-progress flag', () => {
+  const { context, run } = fixture({ ...emptyQueue(), jobs: { video: { phase: 'engine_running', progress: 30, progress_is_stale: true } } });
+  context.job = { id: 'video', status: 'completed', recovery_state: 'present', progress_is_stale: true,
+    progress: 100, execution_timing_source: 'engine', execution_seconds: 90 };
+  assert.equal(run('queueJobPresentation(job)').label, '已完成');
+  assert.equal(run('queueJobPresentation(job)').progress, 100);
+  assert.equal(run('jobExecutionLabel(job)'), '生成耗時 1 分 30 秒');
+});
+
+test('stale progress survives annotation-only refresh and is hidden in the shared queue rows', () => {
+  const { context, element, run } = fixture({ ...emptyQueue(), jobs: { video: { phase: 'engine_running', progress: 30 } } });
+  context.job = { id: 'video', status: 'running', recovery_state: 'present', progress: 30, progress_is_stale: true };
+  assert.match(run('queueJobAttributes(job)'), /data-queue-progress-is-stale="true"/);
+  const progress = element('stale-progress');
+  progress.dataset = { queueJob: 'video', queueStatus: 'running', queueProgress: '30', queueRecoveryState: 'present', queueProgressIsStale: 'true' };
+  progress.attributes['data-queue-progress-panel'] = '';
+  context.annotations = [progress];
+  run('refreshQueueJobAnnotations()');
+  assert.match(progress.innerHTML, /引擎仍在執行，進度待同步/);
+  assert.doesNotMatch(progress.innerHTML, /30%/);
+  context.rows = [{ job_id: 'video', kind: 'video', phase: 'engine_running', title: '恢復中影片', progress: 30, progress_is_stale: true }];
+  const rows = run('queueRowsHtml(rows, "running")');
+  assert.match(rows, /進度待同步/);
+  assert.doesNotMatch(rows, /30%/);
+  progress.dataset.queueProgressIsStale = 'false';
+  run('refreshQueueJobAnnotations()');
+  assert.match(progress.innerHTML, /30%/);
+});
+
+test('queue-only annotation refresh retains recovery state instead of restoring a stale generating badge', () => {
+  const { context, element, run } = fixture({ ...emptyQueue(), jobs: { video: { phase: 'engine_running', progress: 45 } } });
+  context.job = { id: 'video', status: 'running', recovery_state: 'monitoring', progress: 45, error_code: 'engine_status_unconfirmed' };
+  const attributes = run('queueJobAttributes(job)');
+  assert.match(attributes, /data-queue-recovery-state="monitoring"/);
+  assert.match(attributes, /data-queue-error-code="engine_status_unconfirmed"/);
+  const badge = element('recovering-badge');
+  badge.dataset = { queueJob: 'video', queueStatus: 'running', queueProgress: '45', queueRecoveryState: 'monitoring' };
+  badge.attributes['data-queue-badge'] = '';
+  const progress = element('recovering-progress'); progress.dataset = badge.dataset; progress.attributes['data-queue-progress-panel'] = '';
+  context.annotations = [badge, progress];
+  run('refreshQueueJobAnnotations()');
+  assert.equal(badge.textContent, '等待恢復確認');
+  assert.doesNotMatch(progress.innerHTML, /45%/);
+  badge.dataset.queueRecoveryState = 'present';
+  run('refreshQueueJobAnnotations()');
+  assert.equal(badge.textContent, '引擎生成中');
+  assert.match(progress.innerHTML, /45%/);
 });
 
 test('long replacement child segment uses its actual engine rank with no fake percentage', () => {

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "version": "2026.11.11-freevideo-1",
+  "source_url": "https://github.com/FlashML-org/FreeVideo.git",
+  "source_revision": "5fe4c02a529612927275a2e9f95e6b3203359133",
+  "release": "v0.5.0 plus upstream fixes",
+  "node_directory": "FreeVideo",
+  "minimum_python": "3.12",
+  "prepared_format": "int8_convrot",
+  "model_repo": "OpenVDN/vdn-minimax-h3",
+  "model_revision": "751739ee5b9e3ac802dca5d5111075fdaeb47885",
+  "prepared_repo": "OpenVDN/vdn-minimax-h3-edge",
+  "prepared_revision": "da37681f5a1f7015fdb63482142b865111b687d3",
+  "prepared_manifest_sha256": "58a5d48cb4b3769e69cf6b8f5f990d6801edd4f217e798635acf4840e8171fdf",
+  "license_url": "https://huggingface.co/OpenVDN/vdn-minimax-h3/blob/main/LICENSE",
+  "source_files": {
+    "freevideo_engine/dependencies.json": "0296096569132d7b29dd7c4e86263b775e549e56aa0deb9162f8b423d52f00fc",
+    "freevideo_engine/prepared_models.json": "0d667ed93152414afe9e4bab41e05097b783eaab466ab5dd2193ac655d948438",
+    "freevideo_engine/model_files.json": "3169881362ed7b3dff3f842af1b534edd5fda8e2b86245dff66ad5176edd627b",
+    "freevideo_engine/bootstrap_versions.json": "5f165fee377fa0827bb7223bacb59d2f0e7a7cc3461b06ea273cb6578d6d1f1b",
+    "constraints/windows-unified.txt": "89145170b03593b0f60545e6352f42c2bb6dae7ff9146caa9df5d1e0ae42cd12",
+    "freevideo_engine/torch_downloads.json": "c24d762cb086043271003244e0f3a37f8021cafa86978026233ca9d5908b63a8"
+  }
+}

@@ -4,13 +4,14 @@
     if (path.startsWith("/editor")) return "editor";
     if (path.startsWith("/scripts")) return "scripts";
     if (path.startsWith("/images")) return "images";
+    if (path.startsWith("/effects")) return "effects";
     const params = new URLSearchParams(search);
     if (["voice", "music", "sfx"].includes(params.get("tool"))) return params.get("tool");
     return params.get("workspace") === "shortfilm" ? "shortfilm" : "quick";
   }
   const destinations = [
     ["scripts", "腳本", "/scripts"], ["images", "圖片", "/images"],
-    ["quick", "影片", "/?workspace=quick"], ["shortfilm", "短片", "/?workspace=shortfilm"],
+    ["quick", "影片", "/?workspace=quick"], ["effects", "特效動畫", "/effects"], ["shortfilm", "短片", "/?workspace=shortfilm"],
     ["editor", "剪輯", "/editor"], ["voice", "語音", "/?tool=voice"], ["music", "音樂", "/?tool=music"], ["sfx", "音效", "/?tool=sfx"],
   ];
   function setupNavigation(doc) {

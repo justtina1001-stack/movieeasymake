@@ -25,6 +25,15 @@ def job(status="queued", **values):
 
 
 class QueuePresentationTests(unittest.TestCase):
+    def test_engine_presence_does_not_turn_old_recovered_progress_into_live_progress(self):
+        video = {"recovered": job("running", prompt_id="accepted", progress=45,
+                                  recovery_state="present", progress_is_stale=True)}
+        view = build_queue_view(snapshot(["accepted"]), video, {}, {})
+        self.assertEqual(view["running_count"], 1)
+        self.assertEqual(view["jobs"]["recovered"]["phase"], "engine_running")
+        self.assertIsNone(view["running"][0]["progress"])
+        self.assertTrue(view["running"][0]["progress_is_stale"])
+
     def test_remote_voice_uses_host_progress_without_claiming_local_processing_or_comfy_rank(self):
         voice = {state: job(state, engine_mode="remote", progress=35,
                             remote_base_url="http://private-gateway", remote_job_id="private-host-job")

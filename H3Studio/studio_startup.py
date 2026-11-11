@@ -19,6 +19,8 @@ import socket
 import threading
 import time
 
+from studio_runtime_identity import current_studio_identity
+
 
 AUTO_PORTS = (8787, 8789, 8790, 8791, 8792)
 PROBE_TIMEOUT = 1.5
@@ -148,6 +150,55 @@ def probe_studio(port: int, timeout: float = 1.5) -> bool:
     """
     body = _read_local_http(port, "/", timeout)
     return body is not None and STUDIO_TITLE in body
+
+
+def find_matching_running_studio(root: Path, preferred_port: int = 8787, auto_port: bool = False,
+                                 timeout: float = 2.0) -> dict | None:
+    """Query current local runtime identities without starting or reserving anything.
+
+    Each call rehashes the workspace on disk. Only the small version endpoint is
+    queried; neither application imports nor process ownership guesses are needed.
+    All candidate ports share one deadline and use direct loopback connections.
+    """
+    if (not _valid_port(preferred_port) or type(auto_port) is not bool or isinstance(timeout, bool) or
+            not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0):
+        return None
+    deadline = time.monotonic() + timeout
+    try:
+        root = Path(root).resolve()
+        if not root.is_dir():
+            return None
+        expected = current_studio_identity(root)
+    except (OSError, TypeError, ValueError, RuntimeError):
+        return None
+    if time.monotonic() >= deadline:
+        return None
+    ports = tuple(dict.fromkeys((preferred_port, *AUTO_PORTS))) if auto_port else (preferred_port,)
+
+    def query(port):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        # One extra byte detects an oversized body even when its first 8192
+        # bytes would otherwise parse as valid JSON followed by whitespace.
+        body = _read_local_http(port, "/api/studio/version", remaining,
+                                max_bytes=8193, accept="application/json")
+        if body is None or len(body) > 8192:
+            return None
+        try:
+            identity = json.loads(body)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return None
+        if (not isinstance(identity, dict) or type(identity.get("pid")) is not int or identity["pid"] <= 0 or
+                any(identity.get(key) != value for key, value in expected.items())):
+            return None
+        return {"port": port, "pid": identity["pid"], "identity": identity}
+
+    if len(ports) == 1:
+        return query(ports[0])
+    with ThreadPoolExecutor(max_workers=len(ports), thread_name_prefix="studio-identity") as pool:
+        results = list(pool.map(query, ports))
+    return next((match for match in results if match is not None), None)
 
 
 def _existing_plan(port, required_editor_capabilities):

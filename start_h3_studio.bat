@@ -21,11 +21,11 @@ if errorlevel 1 (
 )
 echo Checking the running MiniMax H3 Studio version...
 cd /d "%~dp0H3Studio"
-".venv\Scripts\python.exe" -u app.py --auto-port %*
+".venv\Scripts\python.exe" -u studio_launcher.py --auto-port %*
 set "STUDIO_EXIT=%errorlevel%"
 if not "%STUDIO_EXIT%"=="0" (
   echo.
-  echo [ERROR] MiniMax H3 Studio could not start or reuse the running version. Review the error above.
+  echo [ERROR] Studio exited with code %STUDIO_EXIT%. See diagnostic/log path above.
   pause
 )
 exit /b %STUDIO_EXIT%

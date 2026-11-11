@@ -21,6 +21,7 @@
       <span id="statusText">檢查生成引擎...</span>
       <span id="studioRoleBadge" class="studio-role-badge client">一般使用者</span>
       <a class="button ghost small" href="/images" target="_blank" rel="noopener">▧ 圖片</a>
+      <a class="button ghost small" href="/effects" target="_blank" rel="noopener">✦ 特效動畫</a>
       <a class="button ghost small" href="/editor" target="_blank" rel="noopener">✂ 影片剪輯</a>
       <a class="button ghost small" href="/scripts" target="_blank" rel="noopener">✎ 腳本編寫</a>
       <button id="openMusicStudio" class="button ghost small music-toolbar-button" type="button" aria-haspopup="dialog"><b>♫</b><span>Music 3</span></button>
@@ -139,20 +140,24 @@
             <div><label for="seed">Seed</label><div class="seed-row"><input id="seed" type="number" min="0" value="1" aria-describedby="videoSeedHelp"><button id="videoSeedAuto" class="button ghost small seed-auto-button" type="button" aria-label="每次影片生成自動更換 Seed" aria-pressed="true">AUTO</button><button id="randomSeed" class="icon-button" type="button" title="隨機 Seed">↻</button></div><small id="videoSeedHelp" class="field-help">每次生成前自動換新 Seed，欄位保留本次使用值。</small></div>
           </div>
           <div class="quality-selector">
-            <label>影片模型<select id="videoModel" aria-describedby="videoModelHint"><option value="h3">MiniMax H3 · 原有模型</option><option value="fasth3_omni_nvfp4">FastH3-Omni NVFP4 · 試用</option><option value="pika_h3_flex">Pika H3 Flex · 6 步</option><option value="h3_ref_patch">H3 FL2VA + Ref Patch · 實驗參考</option></select></label>
+            <label>影片模型<select id="videoModel" aria-describedby="videoModelHint"><option value="h3">MiniMax H3 · 原有模型</option><option value="fasth3_omni_nvfp4">FastH3-Omni NVFP4 · 試用</option><option value="pika_h3_flex">Pika H3 Flex · 6 步</option><option value="h3_ref_patch">H3 FL2VA + Ref Patch · 實驗參考</option><option value="freevideo_vdn_h3">FreeVideo／VDN-H3</option></select></label>
             <div><strong>影片模型切換</strong><span id="videoModelHint" role="status">原有 H3 設定會保留；正在檢查模型。</span></div>
           </div>
-          <div class="quality-selector">
+          <div id="h3QualityWrap" class="quality-selector">
             <label>生成品質<select id="qualityMode"><option value="native">原生品質 · 最終輸出</option><option value="turbo">Turbo 快速預覽 · 自動適配</option><option value="turbo_fast_v13">FL2VA Turbo · 4-step v1.3 768p</option><option value="turbo_quality_v11">FL2VA Turbo · 8-step v1.1 768p</option><option value="turbo_ref_fast_v10">Ref Turbo · 4-step v1.0 768p</option><option value="turbo_ref_quality_v11">Ref Turbo · 8-step v1.1 768p</option><option value="turbo_fast">Turbo 舊版 · 4-step v1.1 768p</option><option value="turbo_quality">Turbo 舊版 · 8-step v1.0 768p</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2 768p</option><option value="turbo_ref_quality">Ref Turbo 舊版 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速 · 4-step（原版）</option></select></label>
             <div><strong id="qualityModeTitle">原生品質模式</strong><span id="qualityModeHint">使用 res_multistep，保留目前步數與 Scheduler。</span></div>
           </div>
+          <div id="freevideoQualityWrap" class="quality-selector hidden">
+            <label>FreeVideo 品質<select id="freevideoQuality" aria-describedby="freevideoQualityHint"><option value="light">Light · 快速預覽</option><option value="medium" selected>Medium · 標準</option><option value="high">High · 精細</option><option value="max">Max · 極致</option></select></label>
+            <div><strong>FreeVideo 專用生成設定</strong><span id="freevideoQualityHint">正在確認生成設定。</span></div>
+          </div>
           <div id="qualityBuiltinLoraHelp" class="lora-builtin-help"></div>
           <details class="settings-optional"><summary>進階品質、動態與完成後處理</summary>
-          <div class="quality-selector">
+          <div id="videoVaeWrap" class="quality-selector">
             <label>影片解碼<select id="videoVae" aria-describedby="videoVaeHint"><option value="auto">自動（優先 INT8）</option><option value="int8">INT8（較快、省記憶體）</option><option value="fp16">FP16（相容模式）</option></select></label>
             <div><strong>影片解碼效能</strong><span id="videoVaeHint">自動優先使用 INT8；引擎不支援或缺少模型時使用 FP16。主要加速解碼、降低記憶體占用；整體生成時間仍依鏡頭而定。</span></div>
           </div>
-          <label class="check-option shortfilm-export-option"><input id="memoryOptimization" type="checkbox" checked aria-describedby="memoryOptimizationHint"><span><strong>省顯存 · H3 記憶體最佳化</strong><small id="memoryOptimizationHint">獨立於生成品質，減少運算暫存峰值；不保證更快，也不保證高解析長影片不會記憶體不足。</small></span></label>
+          <label id="memoryOptimizationWrap" class="check-option shortfilm-export-option"><input id="memoryOptimization" type="checkbox" checked aria-describedby="memoryOptimizationHint"><span><strong>省顯存 · H3 記憶體最佳化</strong><small id="memoryOptimizationHint">獨立於生成品質，減少運算暫存峰值；不保證更快，也不保證高解析長影片不會記憶體不足。</small></span></label>
           <div class="retime-selector">
             <label class="check-option"><input id="retimeEnabled" type="checkbox"><span><strong>產生節奏預覽版</strong><small>H3 仍生成至少 5 秒；完成後另外輸出指定秒數，原始影片會保留。</small></span></label>
             <label id="retimeDurationWrap">節奏版長度<div class="field-unit"><input id="retimeDuration" type="number" min="0.5" max="60" step="0.1" value="2" disabled><span>秒</span></div></label>
@@ -162,7 +167,7 @@
             <label class="check-option"><input id="exportFrames" type="checkbox"><span><strong>完成後自動匯出 PNG 連續圖</strong><small>以最終播放版本逐幀輸出並打包成 ZIP；啟用節奏預覽時會匯出節奏版畫面。</small></span></label>
             <div><strong>PNG · 六位數序號 · ZIP</strong><small>例如：任務名稱_000001.png；高解析度或長影片會使用較多磁碟空間。</small></div>
           </div>
-          <details class="advanced">
+          <details id="nativeSamplingWrap" class="advanced">
             <summary>進階採樣設定</summary>
             <div class="form-grid three">
               <label>採樣步數<input id="steps" type="number" min="4" max="40" value="20"></label>
@@ -447,17 +452,18 @@
               <div class="form-grid three">
                 <label>畫面比例<select id="sfAspectRatio"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></label>
                 <label>解析度<select id="sfMegapixels"><option value="0.4">快速預覽 · 0.4MP</option><option value="0.7">標準 · 0.7MP</option><option value="0.9">高畫質 · 0.9MP</option><option value="0.98">最高精細 · 0.98MP</option></select></label>
-                <label>影片模型<select id="sfVideoModel" aria-describedby="sfVideoModelHint"><option value="h3">MiniMax H3 · 原有模型</option><option value="fasth3_omni_nvfp4">FastH3-Omni NVFP4 · 試用</option><option value="pika_h3_flex">Pika H3 Flex · 6 步</option><option value="h3_ref_patch">H3 FL2VA + Ref Patch · 實驗參考</option></select></label>
-                <label>生成品質<select id="sfQuality" aria-describedby="sfQualityHint"><option value="native">原生品質</option><option value="turbo">Turbo 快速預覽</option><option value="turbo_fast_v13">FL2VA Turbo · 4-step v1.3</option><option value="turbo_quality_v11">FL2VA Turbo · 8-step v1.1</option><option value="turbo_ref_fast_v10">Ref Turbo · 4-step v1.0</option><option value="turbo_ref_quality_v11">Ref Turbo · 8-step v1.1</option><option value="turbo_fast">Turbo 舊版 · 4-step v1.1</option><option value="turbo_quality">Turbo 舊版 · 8-step v1.0</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2</option><option value="turbo_ref_quality">Ref Turbo 舊版 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速（原版）</option></select></label>
+                <label>影片模型<select id="sfVideoModel" aria-describedby="sfVideoModelHint"><option value="h3">MiniMax H3 · 原有模型</option><option value="fasth3_omni_nvfp4">FastH3-Omni NVFP4 · 試用</option><option value="pika_h3_flex">Pika H3 Flex · 6 步</option><option value="h3_ref_patch">H3 FL2VA + Ref Patch · 實驗參考</option><option value="freevideo_vdn_h3">FreeVideo／VDN-H3</option></select></label>
+                <label id="sfH3QualityWrap">生成品質<select id="sfQuality" aria-describedby="sfQualityHint"><option value="native">原生品質</option><option value="turbo">Turbo 快速預覽</option><option value="turbo_fast_v13">FL2VA Turbo · 4-step v1.3</option><option value="turbo_quality_v11">FL2VA Turbo · 8-step v1.1</option><option value="turbo_ref_fast_v10">Ref Turbo · 4-step v1.0</option><option value="turbo_ref_quality_v11">Ref Turbo · 8-step v1.1</option><option value="turbo_fast">Turbo 舊版 · 4-step v1.1</option><option value="turbo_quality">Turbo 舊版 · 8-step v1.0</option><option value="turbo_audio">Turbo 聲音改善 · 4-step v1.2</option><option value="turbo_ref_quality">Ref Turbo 舊版 · 8-step v1.0</option><option value="turbo_sla">實驗性 Turbo-SLA · 4-step</option><option value="sparse_experimental">實驗性稀疏加速（原版）</option></select></label>
               </div>
+              <div id="sfFreevideoQualityWrap" class="quality-selector hidden"><label>FreeVideo 品質<select id="sfFreevideoQuality" aria-describedby="sfFreevideoQualityHint"><option value="light">Light · 快速預覽</option><option value="medium" selected>Medium · 標準</option><option value="high">High · 精細</option><option value="max">Max · 極致</option></select></label><div><strong>全片共用</strong><span id="sfFreevideoQualityHint">各鏡頭使用相同的 FreeVideo 品質。</span></div></div>
               <p id="sfVideoModelHint" class="field-help" role="status"></p>
               <p id="sfQualityHint" class="field-help"></p>
               <div id="sfBuiltinLoraHelp" class="lora-builtin-help"></div>
-              <div class="quality-selector">
+              <div id="sfVideoVaeWrap" class="quality-selector">
                 <label>影片解碼<select id="sfVideoVae" aria-describedby="sfVideoVaeHint"><option value="auto">自動（優先 INT8）</option><option value="int8">INT8（較快、省記憶體）</option><option value="fp16">FP16（相容模式）</option></select></label>
                 <div><strong>每個鏡頭共用</strong><span id="sfVideoVaeHint">自動優先使用 INT8；引擎不支援或缺少模型時使用 FP16。主要加速解碼、降低記憶體占用；整體生成時間仍依鏡頭而定。</span></div>
               </div>
-              <label class="check-option shortfilm-export-option"><input id="sfMemoryOptimization" type="checkbox" checked aria-describedby="sfMemoryOptimizationHint"><span><strong>全片省顯存 · H3 記憶體最佳化</strong><small id="sfMemoryOptimizationHint">每個鏡頭共用；減少運算暫存峰值，不保證更快，也不保證完全避免記憶體不足。</small></span></label>
+              <label id="sfMemoryOptimizationWrap" class="check-option shortfilm-export-option"><input id="sfMemoryOptimization" type="checkbox" checked aria-describedby="sfMemoryOptimizationHint"><span><strong>全片省顯存 · H3 記憶體最佳化</strong><small id="sfMemoryOptimizationHint">每個鏡頭共用；減少運算暫存峰值，不保證更快，也不保證完全避免記憶體不足。</small></span></label>
               <label class="check-option shortfilm-export-option"><input id="sfExportFrames" type="checkbox"><span><strong>每個鏡頭完成後自動匯出 PNG 連續圖</strong><small>依各鏡頭最終節奏版本打包 ZIP，可從生成工作下載。</small></span></label>
               <div id="sfLoraPanel"></div>
               <label class="shortfilm-wide-field">視覺風格<input id="sfStyle" placeholder="例如：cinematic realism, warm tungsten lighting, restrained camera motion"></label>
@@ -951,9 +957,9 @@ non_diegetic_music: ...</pre></div>
   <script src="/static/lora-help.js?v=20261005-lora-recommendations"></script>
   <script src="/static/shortfilm_persistence.js?v=20261017-ux"></script>
   <script src="/static/audio_workspace.js?v=20261017-ux"></script>
-  <script src="/static/app.js?v=20261103-connection-recovery"></script>
+  <script src="/static/app.js?v=20261111-freevideo"></script>
   <script src="/static/sfx.js?v=20261030-sfx"></script>
   <script src="/static/face-repair.js?v=20260917-face-repair"></script>
-  <script src="/static/workspace_ui.js?v=20261030-sfx"></script>
+  <script src="/static/workspace_ui.js?v=20261104-effects"></script>
 </body>
 </html>

@@ -48,6 +48,7 @@ function normalizeScriptVideoSettings(value) {
   const settings = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return {
     ...(settings.video_model !== undefined && settings.video_model !== null && settings.video_model !== "" ? { video_model: String(settings.video_model) } : {}),
+    ...(settings.freevideo_quality !== undefined || settings.video_model === "freevideo_vdn_h3" ? { freevideo_quality: String(settings.freevideo_quality || "medium") } : {}),
     aspect_ratio: SCRIPT_VIDEO_ASPECTS.includes(settings.aspect_ratio) ? settings.aspect_ratio : SCRIPT_VIDEO_DEFAULTS.aspect_ratio,
     megapixels: SCRIPT_VIDEO_PRECISION.includes(settings.megapixels) ? settings.megapixels : SCRIPT_VIDEO_DEFAULTS.megapixels,
     output_resolution: ["native", "720p", "1080p"].includes(settings.output_resolution) ? settings.output_resolution : SCRIPT_VIDEO_DEFAULTS.output_resolution,
@@ -230,7 +231,7 @@ function scriptPipelineVideoModel(pipeline) {
 }
 
 function scriptVideoModelLabel(selection) {
-  return ({ h3: "MiniMax H3", fasth3_omni_nvfp4: "FastH3-Omni NVFP4", pika_h3_flex: "Pika H3 Flex", h3_ref_patch: "H3 FL2VA + Ref Patch" })[selection || "h3"] || "未知影片模型";
+  return ({ h3: "MiniMax H3", fasth3_omni_nvfp4: "FastH3-Omni NVFP4", pika_h3_flex: "Pika H3 Flex", h3_ref_patch: "H3 FL2VA + Ref Patch", freevideo_vdn_h3: "FreeVideo／VDN-H3" })[selection || "h3"] || "未知影片模型";
 }
 
 function scriptVideoHistoryRecord(pipeline) {
@@ -345,7 +346,7 @@ if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
   const clientId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const fieldIds = { title: "scriptTitle", idea: "scriptIdea", genre: "scriptGenre", duration: "scriptDuration", characters: "scriptCharacters", style: "scriptStyle", instructions: "scriptInstructions", content: "scriptContent", writing_skill: "scriptWritingSkill" };
-  const videoFieldIds = { aspect_ratio: "scriptVideoAspectRatio", megapixels: "scriptVideoMegapixels", output_resolution: "scriptVideoResolution", video_model: "scriptVideoModel" };
+  const videoFieldIds = { aspect_ratio: "scriptVideoAspectRatio", megapixels: "scriptVideoMegapixels", output_resolution: "scriptVideoResolution", video_model: "scriptVideoModel", freevideo_quality: "scriptFreevideoQuality" };
   const state = { project: createNewScriptProject(), projects: [], jobs: [], job: null, selectedJobId: null, ready: false, visionReady: false, referencesSupported: false, referencesSupportKnown: false, referencesSaveWaiting: false, engineCheckPromise: null, messageKind: "", settings: null, dirty: false, loading: false, saving: false, starting: false, importing: false, pollBusy: false, settingsDirty: false, settingsSaving: false, conflict: null, recovery: null, ownDrafts: {}, newDraftCounter: 1, newDraftId: "__new__-1", draftAvailable: true, jobsRevision: 0, generation: 0, referenceControls: new Map(), referenceUploads: new Map(), referenceCounter: 0, historyScope: "all", historyPersistent: false, historyStorage: "loading", historyError: "", activeJobs: [], deletingJobIds: new Set(), deletedJobIds: new Set(), historyDeleteControls: new Map(), autoVideo: false, videoPipelinesSupported: false, videoReady: false, videoError: "", pipelines: [], pipeline: null, selectedPipelineId: null, pipelineStarting: false, pipelinePollBusy: false, pipelinesRevision: 0 };
   Object.assign(state, { writingSkills: [], skillsSupported: false, skillsSupportKnown: false, skillsCatalogReady: false, skillsLoading: false, skillsError: "", skillsSaveWaiting: false, previewRequestFailed: false, previewView: "readable", previewViewJobId: null });
   Object.assign(state, { videoHistoryScope: "all", historyVideos: [], selectedHistoryVideoId: null, historyPreviewVideo: null, historyPreviewError: "", videoHistoryStatus: "loading", videoHistoryError: "", videoHistoryWarning: "", videoHistoryBusy: false });
@@ -395,6 +396,7 @@ if (typeof document !== "undefined") {
     for (const [field, id] of Object.entries(fieldIds)) value[field] = field === "duration" ? Number($(id).value) : $(id).value;
     const videoSettings = Object.fromEntries(Object.entries(videoFieldIds).map(([field, id]) => [field, field === "megapixels" ? Number($(id).value) : $(id).value]));
     if ((!videoSettings.video_model || videoSettings.video_model === "h3") && !state.videoModelTouched && !state.project.video_settings?.video_model) delete videoSettings.video_model;
+    if (videoSettings.video_model !== "freevideo_vdn_h3" && state.project.video_settings?.freevideo_quality === undefined) delete videoSettings.freevideo_quality;
     value.video_settings = normalizeScriptVideoSettings(videoSettings);
     return value;
   }
@@ -404,8 +406,8 @@ if (typeof document !== "undefined") {
     renderWritingSkills(value.writing_skill);
     for (const [field, id] of Object.entries(fieldIds)) $(id).value = value[field];
     const videoModel = value.video_settings.video_model || "h3";
-    if (!Array.from($("scriptVideoModel").options).some(option => option.value === videoModel)) $("scriptVideoModel").add(new Option(["h3", "fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch"].includes(videoModel) ? videoModel : `不支援的影片模型：${videoModel}`, videoModel));
-    for (const [field, id] of Object.entries(videoFieldIds)) $(id).value = String(value.video_settings[field] ?? (field === "video_model" ? "h3" : ""));
+    if (!Array.from($("scriptVideoModel").options).some(option => option.value === videoModel)) $("scriptVideoModel").add(new Option(["h3", "fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch", "freevideo_vdn_h3"].includes(videoModel) ? videoModel : `不支援的影片模型：${videoModel}`, videoModel));
+    for (const [field, id] of Object.entries(videoFieldIds)) $(id).value = String(value.video_settings[field] ?? (field === "video_model" ? "h3" : field === "freevideo_quality" ? "medium" : ""));
     state.videoModelTouched = false;
     state.project = value;
     renderWritingSkillDetails();
@@ -687,9 +689,11 @@ if (typeof document !== "undefined") {
     for (const id of Object.values(videoFieldIds)) $(id).disabled = state.loading;
     const selectedVideoProject = readProject();
     const selectedVideoModel = selectedVideoProject.video_settings?.video_model || "h3";
-    const fixedVideo = ["fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch"].includes(selectedVideoModel);
+    const fixedVideo = ["fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch", "freevideo_vdn_h3"].includes(selectedVideoModel);
+    const freevideo = selectedVideoModel === "freevideo_vdn_h3";
+    $("scriptFreevideoQualityWrap").classList.toggle("hidden", !freevideo);
     const videoModelError = scriptVideoModelError(selectedVideoProject);
-    $("scriptVideoModelHint").textContent = videoModelError || (fixedVideo
+    $("scriptVideoModelHint").textContent = videoModelError || (freevideo ? "FreeVideo 自動管理顯存與解碼；多模態仍屬實驗，角色外觀、聲線與嘴型需檢查生成結果。原本 H3 LoRA 選擇會保留。" : fixedVideo
       ? `${scriptVideoModelLabel(selectedVideoModel)}；每鏡使用專用 ${selectedVideoModel === "pika_h3_flex" ? 6 : selectedVideoModel === "h3_ref_patch" ? 20 : 8} 步設定，不另套 H3 Turbo、自訂 LoRA 或 H3 省顯存。原本 H3 LoRA 選擇會保留。`
       : "使用原有 H3 自動影片設定；可保留目前的 H3 LoRA 選擇。");
     $("scriptVideoLoraSection").classList.toggle("hidden", fixedVideo);
@@ -790,7 +794,7 @@ if (typeof document !== "undefined") {
       if (generation !== state.generation || state.saving || state.loading || state.conflict && !copy) return false;
     }
     const sent = readProject();
-    if (!["h3", "fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch"].includes(sent.video_settings?.video_model || "h3")) { state.dirty = true; storeDraft(); updateControls(); message("這份設定使用尚未支援的影片模型；原選擇與草稿已保留，請明確選擇清單中的模型後再儲存。", true); return false; }
+    if (!["h3", "fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch", "freevideo_vdn_h3"].includes(sent.video_settings?.video_model || "h3")) { state.dirty = true; storeDraft(); updateControls(); message("這份設定使用尚未支援的影片模型；原選擇與草稿已保留，請明確選擇清單中的模型後再儲存。", true); return false; }
     if (sent.custom_loras.length && !state.lorasSupported) { state.dirty = true; storeDraft(); renderScriptLoras(); updateControls(); message("目前主機尚未確認支援劇本 LoRA 儲存，所選 LoRA、編輯稿與本機草稿已保留；請更新主機後重新檢查，或明確移除選擇再儲存。", true, "loras-support"); return false; }
     if (sent.character_references.length && !state.referencesSupported) {
       state.dirty = true; storeDraft(); updateControls();
@@ -1084,7 +1088,7 @@ if (typeof document !== "undefined") {
     if (!state.videoReady) return state.videoError || "影片引擎尚未就緒，請先在影片工作室檢查連線與模型。";
     const modelError = scriptVideoModelError(project); if (modelError) return modelError;
     if (state.referenceUploads.size) return "角色參考圖還在上傳，請完成後再開始製作影片。";
-    if (!["fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch"].includes(project.video_settings?.video_model)) {
+    if (!["fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch", "freevideo_vdn_h3"].includes(project.video_settings?.video_model)) {
       if (project.custom_loras?.length && !state.lorasSupported) return "主機尚未確認支援劇本 LoRA；選擇已保留，請更新主機後重新檢查，或明確移除選擇。";
       const loraError = scriptLoraSelectionError(project.custom_loras, { video: true, catalog: state.loraCatalog }); if (loraError) return loraError;
     }
@@ -1093,7 +1097,7 @@ if (typeof document !== "undefined") {
 
   function scriptVideoModelError(project) {
     const selection = project?.video_settings?.video_model || "h3";
-    if (!["h3", "fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch"].includes(selection)) return "這份設定使用尚未支援的影片模型；原選擇已保留，請明確選擇清單中的模型後再製作影片。";
+    if (!["h3", "fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch", "freevideo_vdn_h3"].includes(selection)) return "這份設定使用尚未支援的影片模型；原選擇已保留，請明確選擇清單中的模型後再製作影片。";
     if (!state.videoModelSupported) return selection === "h3" ? "" : "所選模型需要新版 Studio；請重新啟動主機，再按「重新檢查」。";
     const profile = state.videoModels.find(item => item.id === selection);
     if (!profile) return "目前主機未提供所選影片模型，選擇已保留。";
@@ -1112,9 +1116,12 @@ if (typeof document !== "undefined") {
     return (review?.prompts || []).map((item, index) => {
       const materials = (item.mapping || []).map(mapping => `${mapping.alias || "參考素材"} → ${[mapping.subject_tag, ...(mapping.picture_tags || []), ...(mapping.video_tags || []), ...(mapping.video_audio_tags || []), mapping.audio_tag].filter(Boolean).join("、") || "文字設定"}`).join("\n") || "依本鏡保存的參考素材";
       const quality = item.quality_mode || "native";
-      const qualityLabel = ({ native: "原生／模型專用設定", turbo: "Turbo 快速預覽 · 自動適配", turbo_fast: "FL2VA Turbo · 4 步 v1.1", turbo_quality: "FL2VA Turbo · 8 步 v1.0", turbo_audio: "FL2VA Turbo · 4 步 v1.2", turbo_ref_quality: "Ref Turbo · 8 步 v1.0", turbo_fast_v13: "FL2VA Turbo · 4 步 v1.3", turbo_quality_v11: "FL2VA Turbo · 8 步 v1.1", turbo_ref_fast_v10: "Ref Turbo · 4 步 v1.0", turbo_ref_quality_v11: "Ref Turbo · 8 步 v1.1", turbo_sla: "實驗性 Turbo-SLA", sparse_experimental: "實驗性稀疏加速" })[quality] || quality;
+      const freevideo = item.video_model === "freevideo_vdn_h3";
+      const freevideoQuality = item.freevideo_quality || "medium";
+      const qualityLabel = freevideo ? ({ light: "FreeVideo Light · 快速預覽", medium: "FreeVideo Medium · 標準", high: "FreeVideo High · 精細", max: "FreeVideo Max · 極致" })[freevideoQuality] || freevideoQuality : ({ native: "原生／模型專用設定", turbo: "Turbo 快速預覽 · 自動適配", turbo_fast: "FL2VA Turbo · 4 步 v1.1", turbo_quality: "FL2VA Turbo · 8 步 v1.0", turbo_audio: "FL2VA Turbo · 4 步 v1.2", turbo_ref_quality: "Ref Turbo · 8 步 v1.0", turbo_fast_v13: "FL2VA Turbo · 4 步 v1.3", turbo_quality_v11: "FL2VA Turbo · 8 步 v1.1", turbo_ref_fast_v10: "Ref Turbo · 4 步 v1.0", turbo_ref_quality_v11: "Ref Turbo · 8 步 v1.1", turbo_sla: "實驗性 Turbo-SLA", sparse_experimental: "實驗性稀疏加速" })[quality] || quality;
+      const stepsLabel = freevideo ? ({ light: "8＋3 步（兩階段）", medium: "8＋3 步（兩階段）", high: "16 步（單階段）", max: "20 步（單階段）" })[freevideoQuality] || "依 FreeVideo 品質設定" : `${item.steps ?? "依模型設定"}${Number.isFinite(item.steps) ? " 步" : ""}`;
       const adapter = item.model_adapter || item.turbo_lora;
-      const recipe = [`生成品質：${qualityLabel}`, `採樣步數：${item.steps ?? "依模型設定"}${Number.isFinite(item.steps) ? " 步" : ""}`, ...(adapter ? [`內建組件：${String(adapter).split(/[\\/]/).pop()}`] : []), ...(item.scheduler === "manual" ? ["時間表：作者專用設定"] : [])].join("\n");
+      const recipe = [`生成品質：${qualityLabel}`, `採樣步數：${stepsLabel}`, ...(freevideo && ["light", "medium"].includes(freevideoQuality) ? ["品質提醒：小尺寸的 Light／Medium 可能使用相同計畫，實際尺寸依作者保護規則調整，不保證品質或速度差異。"] : []), ...(adapter ? [`內建組件：${String(adapter).split(/[\\/]/).pop()}`] : []), ...(item.scheduler === "manual" ? ["時間表：作者專用設定"] : [])].join("\n");
       return `鏡頭 ${index + 1 + startIndex} · ${item.scene_title || item.scene_id || ""}／${item.shot_title || item.shot_id || ""}\n模型：${scriptVideoModelLabel(item.video_model || "h3")} · ${item.duration ?? "?"} 秒 · ${item.width || "?"} × ${item.height || "?"} · Seed：${item.seed ?? "依保存設定"}\n${recipe}\n素材對應：\n${materials}\n${item.warnings?.length ? `提醒：${item.warnings.join("；")}\n` : ""}\n${item.prompt || ""}`;
     }).join("\n\n────────────────\n\n");
   }
@@ -1320,7 +1327,7 @@ if (typeof document !== "undefined") {
     const settings = pipeline.video_settings || pipeline.snapshot?.video_settings || pipeline.snapshot?.project?.video_settings;
     const modelError = scriptVideoModelError({ video_settings: settings });
     if (modelError) { message(modelError, true); return; }
-    const loras = ["fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch"].includes(settings?.video_model) ? [] : pipeline.snapshot?.custom_loras || pipeline.snapshot?.project?.custom_loras || [];
+    const loras = ["fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch", "freevideo_vdn_h3"].includes(settings?.video_model) ? [] : pipeline.snapshot?.custom_loras || pipeline.snapshot?.project?.custom_loras || [];
     if (loras.length && !state.lorasSupported) { message("主機尚未確認支援原流程的 LoRA 設定；原設定與已完成片段仍保留，請重新檢查後再接續。", true, "loras-support"); return; }
     const loraError = scriptLoraSelectionError(loras, { video: true, catalog: state.loraCatalog }); if (loraError) { message(loraError, true); return; }
     state.pipelineStarting = true; updateControls();
@@ -1493,8 +1500,8 @@ if (typeof document !== "undefined") {
   async function importStoryboard() {
     if (!scriptJobPresentation(state.job).canImport || state.importing || state.job.project_id !== state.project.id) return;
     const selection = state.job.input?.project?.video_settings?.video_model || "h3";
-    if (!["h3", "fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch"].includes(selection)) { message("這筆紀錄使用尚未支援的影片模型；未匯入分鏡，請更新 Studio 或選擇其他紀錄。", true); return; }
-    const loras = ["fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch"].includes(state.job.input?.project?.video_settings?.video_model) ? [] : state.job.input?.project?.custom_loras || [];
+    if (!["h3", "fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch", "freevideo_vdn_h3"].includes(selection)) { message("這筆紀錄使用尚未支援的影片模型；未匯入分鏡，請更新 Studio 或選擇其他紀錄。", true); return; }
+    const loras = ["fasth3_omni_nvfp4", "pika_h3_flex", "h3_ref_patch", "freevideo_vdn_h3"].includes(state.job.input?.project?.video_settings?.video_model) ? [] : state.job.input?.project?.custom_loras || [];
     if (loras.length && !state.lorasSupported) { message("主機尚未確認支援劇本 LoRA，生成紀錄與原選擇仍保留；請更新主機後重新檢查再匯入分鏡。", true, "loras-support"); return; }
     const loraError = scriptLoraSelectionError(loras, { video: true, catalog: state.loraCatalog }); if (loraError) { message(loraError, true); return; }
     const id = state.job.id;

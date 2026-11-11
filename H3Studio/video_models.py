@@ -8,10 +8,21 @@ VIDEO_MODEL_H3 = "h3"
 VIDEO_MODEL_FAST = "fasth3_omni_nvfp4"
 VIDEO_MODEL_PIKA = "pika_h3_flex"
 VIDEO_MODEL_REF_PATCH = "h3_ref_patch"
-VIDEO_MODELS = (VIDEO_MODEL_H3, VIDEO_MODEL_FAST, VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH)
+VIDEO_MODEL_FREEVIDEO = "freevideo_vdn_h3"
+VIDEO_MODELS = (VIDEO_MODEL_H3, VIDEO_MODEL_FAST, VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH, VIDEO_MODEL_FREEVIDEO)
 VIDEO_MODES = ("t2v", "fl2va", "r2v", "replace", "extend", "symbol_loop", "popup_panel", "mg_animation")
 REFERENCE_VIDEO_MODES = ("r2v", "replace", "popup_panel", "mg_animation")
-FIXED_RECIPE_MODELS = (VIDEO_MODEL_FAST, VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH)
+FIXED_RECIPE_MODELS = (VIDEO_MODEL_FAST, VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH, VIDEO_MODEL_FREEVIDEO)
+# Pinned FreeVideo v0.5-era tiers.py recipes. Weight placement is managed by its
+# isolated worker; none of the native-H3 sampling or VAE patches are layered on.
+FREEVIDEO_QUALITY_RECIPES = {
+    "light": {"two_pass": True, "base_steps": 8, "refine_steps": 3, "step_cache": "none", "upscale_factor": "2"},
+    "medium": {"two_pass": True, "base_steps": 8, "refine_steps": 3, "step_cache": "none", "upscale_factor": "1.5"},
+    "high": {"two_pass": False, "base_steps": 16, "refine_steps": 3, "step_cache": "easycache-av", "upscale_factor": "2"},
+    "max": {"two_pass": False, "base_steps": 20, "refine_steps": 3, "step_cache": "easycache-av", "upscale_factor": "2"},
+}
+FREEVIDEO_REFERENCE_WARNING = "VDN-H3 的多模態參考屬實驗功能，作者未以參考任務訓練底模；角色一致性、聲線與嘴型需檢查生成結果。"
+FREEVIDEO_QUALITIES = tuple(FREEVIDEO_QUALITY_RECIPES)
 PIKA_LORA_FILENAMES = {
     "fl2va": "pika_h3_flex_fl2va_v1_bf16.safetensors",
     "ref2va": "pika_h3_flex_ref2va_v1_bf16.safetensors",
@@ -38,7 +49,15 @@ def normalize_video_model(value):
     if value is None or value == "":
         return VIDEO_MODEL_H3
     if not isinstance(value, str) or value not in VIDEO_MODELS:
-        raise ValueError("影片模型必須是原版 H3、FastH3、Pika H3 Flex 或 H3 Ref Patch。")
+        raise ValueError("影片模型必須是原版 H3、FastH3、Pika H3 Flex、H3 Ref Patch 或 FreeVideo／VDN-H3。")
+    return value
+
+
+def normalize_freevideo_quality(value):
+    if value is None or value == "":
+        return "medium"
+    if not isinstance(value, str) or value not in FREEVIDEO_QUALITY_RECIPES:
+        raise ValueError("FreeVideo 品質必須是 light、medium、high 或 max。")
     return value
 
 
@@ -126,6 +145,27 @@ def ref_patch_node_support(schemas):
             and list(patch.get("output", []))[:1] == ["MODEL"])
 
 
+def freevideo_node_support(schemas):
+    """Validate the file-backed media/worker interface, never generic CLIP inputs."""
+    contracts = {
+        "FreeVideoGenerate": {"text": "STRING", "width": "INT", "height": "INT", "seconds": "FLOAT", "seed": "INT",
+                              "media": "FREEVIDEO_MEDIA", "frames": "INT", "two_pass": "BOOLEAN", "base_steps": "INT",
+                              "refine_steps": "INT", "force_regenerate": "BOOLEAN", "preview": "BOOLEAN"},
+        "FreeVideoMedia": {"assets": "STRING"},
+        "SaveVideo": {"video": "VIDEO", "filename_prefix": "STRING"},
+    }
+    try:
+        for name, fields in contracts.items():
+            if not all(_input(schemas[name], field)[:1] == [kind] for field, kind in fields.items()):
+                return False
+        return (list(schemas["FreeVideoGenerate"].get("output", []))[:1] == ["VIDEO"]
+                and list(schemas["FreeVideoMedia"].get("output", []))[:1] == ["FREEVIDEO_MEDIA"]
+                and {"none", "easycache-av"}.issubset(input_choices(schemas["FreeVideoGenerate"], "step_cache"))
+                and {"1.5", "2"}.issubset(input_choices(schemas["FreeVideoGenerate"], "upscale_factor")))
+    except (KeyError, TypeError, AttributeError):
+        return False
+
+
 def video_model_profiles(inventory):
     inventory = inventory if isinstance(inventory, dict) else {}
     shared = bool(inventory.get("text_encoder") and inventory.get("audio_vae") and inventory.get("video_vae"))
@@ -147,6 +187,11 @@ def video_model_profiles(inventory):
                  and bool(inventory.get("pika_nodes_ready")) for mode in VIDEO_MODES}
     patch_ready = {mode: mode in REFERENCE_VIDEO_MODES and shared and bool(inventory.get("fl2va"))
                   and bool(inventory.get("ref_patch_nodes_ready")) for mode in VIDEO_MODES}
+    freevideo_error = None
+    if not inventory.get("freevideo_nodes_ready"):
+        freevideo_error = "FreeVideo 所需的生成與素材節點尚未就緒，請在 GPU 主機執行 setup_freevideo.bat 並重啟引擎。"
+    elif not inventory.get("freevideo_runtime_ready"):
+        freevideo_error = inventory.get("freevideo_runtime_error") or "FreeVideo 的獨立執行環境或模型尚未準備完成，請在 GPU 主機執行 setup_freevideo.bat。"
     return [
         {"id": VIDEO_MODEL_H3, "label": "MiniMax H3 原版", "ready": any(h3_mode_ready.values()),
          "modes": list(VIDEO_MODES), "mode_ready": h3_mode_ready,
@@ -170,4 +215,11 @@ def video_model_profiles(inventory):
          "fixed_ref_image_size": "match", "quality_modes_supported": False,
          "custom_loras_supported": False, "memory_optimization_supported": False,
          "license_url": FASTH3_LICENSE_URL},
+        {"id": VIDEO_MODEL_FREEVIDEO, "label": "FreeVideo／VDN-H3", "ready": freevideo_error is None,
+         "modes": list(VIDEO_MODES), "mode_ready": {mode: freevideo_error is None for mode in VIDEO_MODES},
+         "error": freevideo_error, "fixed_steps": None, "freevideo_quality_supported": True,
+         "freevideo_quality_modes": list(FREEVIDEO_QUALITY_RECIPES), "quality_modes_supported": False,
+         "custom_loras_supported": False, "memory_optimization_supported": False,
+         "video_vae_supported": False, "storyboard_image_guides_supported": False,
+         "reference_warning": FREEVIDEO_REFERENCE_WARNING, "license_url": FASTH3_LICENSE_URL},
     ]

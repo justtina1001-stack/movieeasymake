@@ -51,18 +51,21 @@ def build_queue_view(
             if isinstance(segment, int):
                 title += f" · 第 {segment} 段"
         progress = None
-        if phase in {"engine_running", "remote_processing"}:
+        if phase in {"engine_running", "remote_processing"} and not job.get("progress_is_stale"):
             try:
                 value = float(job.get("progress") or 0)
                 if math.isfinite(value):
                     progress = min(100.0, max(0.0, value))
             except (TypeError, ValueError):
                 pass
-        return {
+        row = {
             "job_id": parent_id if parent_id in video_jobs else job_id,
             "kind": kind, "title": title, "owner": "我的工作", "phase": phase,
             "position": None, "ahead_count": None, "progress": progress,
         }
+        if job.get("progress_is_stale"):
+            row["progress_is_stale"] = True
+        return row
 
     jobs: dict[str, dict[str, Any]] = {}
     engine_job_ids: set[str] = set()

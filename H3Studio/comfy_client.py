@@ -4,6 +4,7 @@ import asyncio
 import ast
 import json
 import mimetypes
+import math
 import os
 import re
 import subprocess
@@ -19,17 +20,21 @@ import aiohttp
 from domain import TURBO_LORA_CANDIDATES, VIDEO_VAE_FILENAMES
 from video_models import (FASTH3_FILENAME, FASTH3_SIZE, VIDEO_MODEL_FAST, PIKA_LORA_FILENAMES,
                           PIKA_LORA_SIZE, REF_PATCH_FILENAME, REF_PATCH_SIZE, blackwell_device,
-                          fasth3_node_support, input_choices, pika_node_support, ref_patch_node_support)
+                          fasth3_node_support, input_choices, pika_node_support, ref_patch_node_support,
+                          freevideo_node_support)
 
 from settings import ConnectionSettings
 from runtime_env import inspect_python_candidates
 from queue_snapshot import fetch_queue_snapshot
 from queue_cancel import cancel_queue_prompt
+from engine_prompt_presence import EnginePromptPresenceGuard, ComfyJobMissingError
 
 
 ProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 MODEL_INVENTORY_TIMEOUT = 7
 MODEL_INVENTORY_CONCURRENCY = 4
+PROMPT_PRESENCE_INTERVAL = 5.0
+HISTORY_QUERY_TIMEOUT = 15.0
 
 
 class ComfyExecutionError(RuntimeError):
@@ -148,7 +153,10 @@ class ComfyClient:
                     "--preview-method", "taesd", "--listen", "127.0.0.1",
                 ],
                 cwd=self.comfy_dir,
-                env={**os.environ, "H3_FACEREFINE_STRICT_PATHS": "1"},
+                # On 16 GB hosts, release the external worker after each video
+                # so switching back to native H3 does not retain its GPU cache.
+                env={**os.environ, "H3_FACEREFINE_STRICT_PATHS": "1",
+                     "FREEVIDEO_KEEP_MODELS": os.environ.get("FREEVIDEO_KEEP_MODELS", "0")},
                 stdout=self.log_handle,
                 stderr=subprocess.STDOUT,
                 creationflags=creationflags,
@@ -210,11 +218,13 @@ class ComfyClient:
                        "h3_sla_attention": False, "h3_sigma_shift": False,
                        "video_vae_int8_supported": False, "fasth3_blackwell": False,
                        "fasth3_core_supported": False, "fasth3_nodes_ready": False,
-                       "pika_nodes_ready": False, "ref_patch_nodes_ready": False})
+                       "pika_nodes_ready": False, "ref_patch_nodes_ready": False,
+                       "freevideo_nodes_ready": False, "freevideo_runtime_ready": False})
         capability_nodes = (
             "H3MemoryOptimization", "H3SparseAttention", "BlockSparseAttention", "MiniMaxH3SigmaShift",
             "MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "MiniMaxH3AddGuide",
             "ManualSigmas", "KSamplerSelect", "MiniMaxH3RefPatchLoader",
+            "FreeVideoGenerate", "FreeVideoMedia", "SaveVideo",
         )
         nodes = tuple(dict.fromkeys([*(entry[0] for entry in expected.values()), *capability_nodes]))
         base_url, headers = self.base_url, self.auth_headers()
@@ -249,6 +259,31 @@ class ComfyClient:
         result["fasth3_nodes_ready"] = fasth3_node_support(schemas)
         result["pika_nodes_ready"] = pika_node_support(schemas)
         result["ref_patch_nodes_ready"] = ref_patch_node_support(schemas)
+        result["freevideo_nodes_ready"] = freevideo_node_support(schemas)
+        if result["freevideo_nodes_ready"]:
+            if self.mode == "local":
+                try:
+                    from freevideo_runtime import freevideo_runtime_status
+                    runtime = await asyncio.to_thread(freevideo_runtime_status, self.comfy_dir)
+                    result["freevideo_runtime_ready"] = isinstance(runtime, dict) and runtime.get("ready") is True
+                    if not result["freevideo_runtime_ready"]:
+                        result["freevideo_runtime_error"] = str(runtime.get("error") or "FreeVideo 獨立環境尚未完成。") if isinstance(runtime, dict) else "FreeVideo 獨立環境尚未完成。"
+                except (ImportError, OSError, ValueError, TypeError, KeyError):
+                    result["freevideo_runtime_error"] = "FreeVideo 獨立環境尚未完成，請在 GPU 主機執行 setup_freevideo.bat。"
+            else:
+                # Node presence alone does not prove the remote worker/models
+                # exist. Read the author's setup readiness without caching its
+                # settings, paths, credentials, or setup token in our inventory.
+                try:
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as remote:
+                        async with remote.get(f"{base_url}/freevideo/setup", headers=headers, allow_redirects=False) as response:
+                            if response.status == 200:
+                                runtime = await response.json()
+                                result["freevideo_runtime_ready"] = isinstance(runtime, dict) and runtime.get("ready") is True
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, UnicodeError):
+                    pass
+                if not result["freevideo_runtime_ready"]:
+                    result["freevideo_runtime_error"] = "尚未確認遠端主機的 FreeVideo 環境；請 GPU 主機管理者完成安裝與就緒檢查。"
         sparse_inputs = schemas["BlockSparseAttention"].get("input", {}).get("required", {})
         selection = sparse_inputs.get("selection", [])
         options = selection[1].get("options", []) if len(selection) > 1 and isinstance(selection[1], dict) else []
@@ -390,12 +425,71 @@ class ComfyClient:
             if owns_session:
                 await session.close()
 
+    async def get_history_snapshot(
+        self, prompt_id: str, session: aiohttp.ClientSession | None = None,
+    ) -> dict[str, Any]:
+        """Distinguish a reliable empty history from an unavailable response."""
+        owns_session = session is None
+        if session is None:
+            session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=HISTORY_QUERY_TIMEOUT))
+        unavailable = {"available": False, "history": {}}
+        try:
+            try:
+                async with session.get(f"{self.base_url}/history/{prompt_id}", headers=self.auth_headers(),
+                                       timeout=aiohttp.ClientTimeout(total=HISTORY_QUERY_TIMEOUT),
+                                       allow_redirects=False) as response:
+                    if response.status != 200:
+                        return unavailable
+                    payload = await response.json()
+                if not isinstance(payload, dict):
+                    return unavailable
+                if prompt_id in payload:
+                    history = payload[prompt_id]
+                elif not payload:
+                    history = {}
+                elif "status" in payload or "outputs" in payload:
+                    history = payload
+                else:
+                    return unavailable
+                if not isinstance(history, dict):
+                    return unavailable
+                if history and not any(isinstance(history.get(key), dict) for key in ("status", "outputs")):
+                    return unavailable
+                if any(key in history and not isinstance(history[key], dict) for key in ("status", "outputs")):
+                    return unavailable
+                return {"available": True, "history": history}
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, UnicodeError):
+                return unavailable
+        finally:
+            if owns_session:
+                await session.close()
+
+    async def _checked_prompt_history(self, prompt_id, guard, callback, session):
+        snapshot = await self.get_history_snapshot(prompt_id, session)
+        history = snapshot["history"]
+        if self.history_state(history) in {"success", "error"}:
+            guard.mark_present()
+            await callback(guard.fields())
+            return history
+        queue = await self.queue_status() if snapshot["available"] and not history else None
+        guard.observe(snapshot, queue)
+        fields = guard.fields()
+        if guard.state in {"monitoring", "unknown"}:
+            fields["recovery_started_at"] = getattr(guard, "recovery_started_at", None)
+            if fields["recovery_started_at"] is None:
+                fields["recovery_started_at"] = guard.recovery_started_at = fields["recovery_last_checked_at"]
+        await callback(fields)
+        guard.raise_if_missing()
+        return history
+
     async def run_prompt(
         self,
         workflow: dict[str, Any],
         callback: ProgressCallback,
         cancel_event: asyncio.Event,
     ) -> tuple[str, dict[str, Any]]:
+        freevideo_nodes = {str(node_id) for node_id, node in workflow.items()
+                           if isinstance(node, dict) and node.get("class_type") == "FreeVideoGenerate"}
         client_id = uuid.uuid4().hex
         ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://")
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=None)
@@ -423,15 +517,18 @@ class ComfyClient:
                     await asyncio.wait_for(cancel_event.wait(), timeout=1)
                 except asyncio.TimeoutError:
                     pass
-            await callback({"prompt_id": prompt_id, "status": "running", "progress": 0})
+            await callback({"prompt_id": prompt_id, "status": "running", "progress": None if freevideo_nodes else 0,
+                            **({"progress_scope": "phase", "freevideo_phase": "preparing", "phase_progress": None,
+                                "freevideo_phase_label": "準備 FreeVideo 工作"} if freevideo_nodes else {})})
 
             reconnect_delay = 1.0
+            presence = EnginePromptPresenceGuard(prompt_id)
             while True:
                 if cancel_event.is_set():
                     await self.interrupt(prompt_id)
                     raise asyncio.CancelledError
 
-                history = await self.get_history(prompt_id, session)
+                history = await self._checked_prompt_history(prompt_id, presence, callback, session)
                 state = self.history_state(history)
                 if state == "success":
                     return prompt_id, history
@@ -448,31 +545,72 @@ class ComfyClient:
                             if cancel_event.is_set():
                                 await self.interrupt(prompt_id)
                                 raise asyncio.CancelledError
-                            try:
-                                message = await asyncio.wait_for(ws.receive(), timeout=2)
-                            except asyncio.TimeoutError:
-                                if time.monotonic() - last_history_check < 5:
-                                    continue
+                            # Check independently of websocket traffic: shared
+                            # status events can otherwise keep a lost prompt
+                            # watching forever without a receive timeout.
+                            if time.monotonic() - last_history_check >= PROMPT_PRESENCE_INTERVAL:
+                                history = await self._checked_prompt_history(prompt_id, presence, callback, session)
                                 last_history_check = time.monotonic()
-                                history = await self.get_history(prompt_id, session)
                                 state = self.history_state(history)
                                 if state == "success":
                                     return prompt_id, history
                                 if state == "error":
                                     raise self.history_exception(history)
+                            try:
+                                message = await asyncio.wait_for(ws.receive(), timeout=2)
+                            except asyncio.TimeoutError:
                                 continue
                             if message.type == aiohttp.WSMsgType.TEXT:
                                 event = json.loads(message.data)
+                                if not isinstance(event, dict):
+                                    continue
                                 data = event.get("data") or {}
+                                if not isinstance(data, dict):
+                                    continue
                                 if data.get("prompt_id") not in {None, prompt_id}:
                                     continue
+                                if event.get("type") == "freevideo_progress":
+                                    fields = self.freevideo_progress_fields(data, prompt_id, freevideo_nodes)
+                                    if fields is None:
+                                        continue
+                                    presence.mark_present()
+                                    await callback({**fields, "progress_is_stale": False, **presence.fields()})
+                                    continue
+                                if data.get("prompt_id") == prompt_id and event.get("type") in {"progress", "executing", "execution_start"}:
+                                    presence.mark_present()
                                 if event.get("type") == "progress":
+                                    if freevideo_nodes:
+                                        # FreeVideo also emits ordinary Comfy
+                                        # counters for preparation frames and
+                                        # model blocks. Their 100% is not the
+                                        # completion of this video workflow.
+                                        continue
                                     maximum = max(1, int(data.get("max") or 1))
                                     value = int(data.get("value") or 0)
-                                    await callback({"status": "running", "progress": round(value / maximum * 100, 1)})
+                                    await callback({"status": "running", "progress": round(value / maximum * 100, 1),
+                                                    **({"progress_is_stale": False} if data.get("prompt_id") == prompt_id else {}),
+                                                    **(presence.fields() if presence.state == "present" else {})})
                                 elif event.get("type") == "executing":
-                                    await callback({"status": "running", "current_node": data.get("node")})
+                                    if freevideo_nodes and data.get("prompt_id") != prompt_id:
+                                        continue
+                                    node = data.get("node")
+                                    phase_fields = {}
+                                    if freevideo_nodes:
+                                        source = workflow.get(str(node), {})
+                                        kind = source.get("class_type") if isinstance(source, dict) else None
+                                        phase, label = {"FreeVideoMedia": ("preparing", "準備 FreeVideo 素材"),
+                                                        "FreeVideoGenerate": ("generating", "執行 FreeVideo（包含素材編碼、採樣與解碼）"),
+                                                        "SaveVideo": ("saving", "儲存 FreeVideo 影片")}.get(kind, ("checking", "確認 FreeVideo 輸出"))
+                                        node = label
+                                        phase_fields = {"progress": None, "progress_scope": "phase", "phase_progress": None,
+                                                        "freevideo_phase": phase, "freevideo_phase_label": label}
+                                    await callback({"status": "running", "current_node": node,
+                                                    **phase_fields,
+                                                    **({"progress_is_stale": False, **presence.fields()}
+                                                       if data.get("prompt_id") == prompt_id else {})})
                                 elif event.get("type") == "execution_error":
+                                    if freevideo_nodes and data.get("prompt_id") != prompt_id:
+                                        continue
                                     raise ComfyExecutionError(data.get("exception_message") or "ComfyUI 執行失敗。", data)
                             elif message.type == aiohttp.WSMsgType.BINARY:
                                 preview = self.decode_preview_message(message.data)
@@ -484,15 +622,49 @@ class ComfyClient:
                 except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
                     pass
 
-                history = await self.get_history(prompt_id, session)
+                history = await self._checked_prompt_history(prompt_id, presence, callback, session)
                 state = self.history_state(history)
                 if state == "success":
                     return prompt_id, history
                 if state == "error":
                     raise self.history_exception(history)
-                await callback({"status": "running", "current_node": "進度連線中斷，正在自動重連"})
+                await callback({"status": "running", "current_node": "進度連線中斷，正在自動重連",
+                                **({"progress": None, "progress_scope": "phase", "phase_progress": None,
+                                    "freevideo_phase": "reconnecting", "freevideo_phase_label": "進度連線中斷，正在自動重連"}
+                                   if freevideo_nodes else {})})
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(10.0, reconnect_delay * 2)
+
+    @staticmethod
+    def freevideo_progress_fields(data: dict[str, Any], prompt_id: str, nodes: set[str]) -> dict[str, Any] | None:
+        """Phase-local evidence only, scoped to this accepted prompt and node.
+
+        Estimated overall/display fractions are deliberately not displayed as
+        generation completion. Only successful terminal history completes it.
+        """
+        if (not nodes or data.get("prompt_id") != prompt_id or not isinstance(data.get("node"), str)
+                or data["node"] not in nodes):
+            return None
+        phase = data.get("phase") or data.get("timing_phase") or "preparing"
+        phase = str(phase)[:60]
+        label = data.get("label")
+        if not isinstance(label, str) or not label.strip():
+            label = {"preparing": "準備工作", "load": "載入模型", "encoding": "整理參考素材與敘述",
+                     "sampling": "生成採樣", "decode": "解碼影片與聲音", "complete": "整理輸出檔案",
+                     "recovery": "調整記憶體配置"}.get(phase, "處理工作")
+        label = " ".join(label.split())[:240]
+        done, total = data.get("done"), data.get("total")
+        percent = None
+        try:
+            valid_count = (type(done) in (int, float) and type(total) in (int, float)
+                           and math.isfinite(done) and math.isfinite(total) and total > 0 and done >= 0)
+        except (OverflowError, ValueError):
+            valid_count = False
+        if valid_count:
+            percent = round(min(1.0, done / total) * 100, 1)
+        detail = "FreeVideo · " + label + (f" · 階段進度 {percent:g}%" if percent is not None else "")
+        return {"status": "running", "progress": None, "progress_scope": "phase", "phase_progress": percent,
+                "freevideo_phase": phase, "freevideo_phase_label": label, "current_node": detail}
 
     @staticmethod
     def decode_preview_message(data: bytes) -> tuple[bytes, str] | None:

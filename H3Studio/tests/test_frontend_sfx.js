@@ -81,7 +81,7 @@ test('all workspaces expose the sound effect entry and refresh the shared naviga
   assert.match(home,/sfx\.js\?v=20261030-sfx/);
   for (const file of ['index','editor','images','scripts']) {
     const html=fs.readFileSync(path.join(__dirname,`../static/${file}.html`),'utf8');
-    assert.match(html,/workspace_ui\.js\?v=20261030-sfx/);
+    assert.match(html,/workspace_ui\.js\?v=20261104-effects/);
   }
 });
 

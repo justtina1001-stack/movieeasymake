@@ -72,12 +72,13 @@
           <h3 id="scriptVideoSetupTitle">劇本接續影片</h3>
           <label class="script-auto-video-option"><input id="scriptAutoVideo" type="checkbox"><span><strong>接續影片製作（先確認生成稿）</strong><small>編寫完整劇本或潤飾完成後，先整理分鏡與完整生成稿；等待你確認後才開始影片生成與組片。一般手動編寫預設關閉。</small></span></label>
           <div class="script-video-format-fields">
-            <label>影片模型<select id="scriptVideoModel" aria-describedby="scriptVideoModelHint"><option value="h3">MiniMax H3 · 原有模型</option><option value="fasth3_omni_nvfp4">FastH3-Omni NVFP4 · 試用</option><option value="pika_h3_flex">Pika H3 Flex · 6 步</option><option value="h3_ref_patch">H3 FL2VA + Ref Patch · 實驗參考</option></select></label>
+            <label>影片模型<select id="scriptVideoModel" aria-describedby="scriptVideoModelHint"><option value="h3">MiniMax H3 · 原有模型</option><option value="fasth3_omni_nvfp4">FastH3-Omni NVFP4 · 試用</option><option value="pika_h3_flex">Pika H3 Flex · 6 步</option><option value="h3_ref_patch">H3 FL2VA + Ref Patch · 實驗參考</option><option value="freevideo_vdn_h3">FreeVideo／VDN-H3</option></select></label>
             <label>畫面比例<select id="scriptVideoAspectRatio"><option value="16:9">16:9 橫式</option><option value="9:16">9:16 直式</option><option value="1:1">1:1 正方形</option><option value="4:3">4:3 橫式</option><option value="3:4">3:4 直式</option><option value="21:9">21:9 寬螢幕</option></select></label>
             <label>生成精細度<select id="scriptVideoMegapixels"><option value="0.4">快速預覽 · 0.4 MP</option><option value="0.7">標準 · 0.7 MP</option><option value="0.9">高精細 · 0.9 MP</option><option value="0.98">最高精細 · 0.98 MP</option></select></label>
             <label>成片解析度<select id="scriptVideoResolution"><option value="native">跟隨生成尺寸</option><option value="720p">720p</option><option value="1080p">1080p</option></select></label>
           </div>
-          <p id="scriptVideoModelHint" class="script-hint" role="status">正在檢查影片模型。</p>
+          <div id="scriptFreevideoQualityWrap" class="form-grid two hidden"><label>FreeVideo 品質<select id="scriptFreevideoQuality" aria-describedby="scriptFreevideoQualityHint"><option value="light">Light · 快速預覽</option><option value="medium" selected>Medium · 標準</option><option value="high">High · 精細</option><option value="max">Max · 極致</option></select></label><p id="scriptFreevideoQualityHint" class="script-hint">Light／Medium 為兩階段 8＋3 步；小尺寸時可能使用相同計畫，依作者尺寸保護規則調整，不保證品質或速度差異。High 為 16 步，Max 為 20 步。</p></div>
+        <p id="scriptVideoModelHint" class="script-hint" role="status">正在檢查影片模型。</p>
           <p id="scriptVideoFormatSummary" class="script-video-format-summary" role="status" aria-live="polite">生成 864 × 480 → 成片 864 × 480 · MP4 · 24 fps</p>
           <p class="script-hint">提高生成精細度會增加生成負擔。成片升尺度不會新增細節；影片比例與成片尺寸不同時，會補上必要黑邊以保留完整畫面。</p>
           <p id="scriptVideoFormatFutureHint" class="script-hint hidden">影片流程使用啟動時保存的格式；目前變更只供下一個新流程使用。接續仍沿用原格式。</p>
@@ -124,7 +125,7 @@
     <footer class="script-page-footer">MiniMax H3 Studio <span>從文字開始，把故事帶到畫面。</span></footer>
   </main>
   <script src="/static/lora-help.js?v=20261005-lora-recommendations" defer></script>
-  <script src="/static/scripts.js?v=20261103-connection-recovery" defer></script>
-  <script src="/static/workspace_ui.js?v=20261030-sfx"></script>
+  <script src="/static/scripts.js?v=20261111-freevideo" defer></script>
+  <script src="/static/workspace_ui.js?v=20261104-effects"></script>
 </body>
 </html>

@@ -57,6 +57,18 @@ test('Fast requests require explicit host support before either preview or queue
   assert.equal(c.calls[1].payload.video_model, 'fasth3_omni_nvfp4');
 });
 
+test('unsupported FreeVideo exact image guides stop before translation or rendering and retain the draft', async () => {
+  const {c,element}=fixture();element('#videoModel').value='freevideo_vdn_h3';
+  c.state.mode='r2v';c.state.storyboards=[{id:'shot',guideMode:'exact',image:{id:'kept-image'}}];
+  c.videoModelSupported=true;c.videoModelProfiles=[{id:'freevideo_vdn_h3',ready:true,modes:['r2v'],mode_ready:{r2v:true}}];
+  const before=JSON.stringify(c.state.storyboards);
+  await c.compilePreview();await c.renderVideo();
+  assert.equal(c.calls.length,0);assert.match(c.messages.at(-1),/精確錨定/);
+  assert.equal(JSON.stringify(c.state.storyboards),before);
+  c.state.storyboards[0].guideMode='reference';await c.compilePreview();
+  assert.deepEqual(c.calls.map(item=>item.url),['/api/compile']);
+});
+
 test('changing seed or creative inputs requires a new exact compilation', async () => {
   const { c } = fixture();
   await c.compilePreview();

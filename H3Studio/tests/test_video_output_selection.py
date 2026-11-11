@@ -8,6 +8,15 @@ def video(filename, media_type="output", subfolder="H3Studio"):
 
 
 class VideoOutputSelectionTests(unittest.TestCase):
+    def test_self_saving_generator_prefers_studios_named_saved_copy(self):
+        internal = video("generated_0123.mp4", subfolder="FreeVideo")
+        named = video("驗收_FreeVideo_00001_.mp4")
+        history = {"outputs": {"2": {"videos": [internal]}, "15": {"images": [named]}}}
+        self.assertEqual(find_video_output(history), named)
+        self.assertEqual(find_video_output({"outputs": {"2": {"videos": [internal]}}}), internal)
+        gateway_copy = video("驗收_FreeVideo_00001_.mp4", subfolder="H3Gateway/owner")
+        self.assertEqual(find_video_output([internal, gateway_copy]), gateway_copy)
+
     def test_load_video_preview_before_save_video_does_not_become_result(self):
         source = video("uploaded-source.mov", "input", "h3studio/job-id")
         generated = video("人物影片測試_00004_.mp4")
@@ -105,7 +114,7 @@ class VideoOutputSelectionTests(unittest.TestCase):
 
     def test_nested_results_preserve_first_same_priority_result(self):
         first = video("first.mp4", subfolder="generated")
-        second = video("second.mp4")
+        second = video("second.mp4", subfolder="generated")
         self.assertEqual(find_video_output([None, {"nodes": [[first], [second]]}]), first)
 
     def test_selection_does_not_mutate_history(self):

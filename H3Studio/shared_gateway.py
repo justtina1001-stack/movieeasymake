@@ -291,6 +291,7 @@ class SharedComfyGateway:
         app.router.add_get("/system_stats", self.proxy_system_stats)
         app.router.add_get("/queue", self.proxy_queue)
         app.router.add_get("/object_info/{tail:.*}", self.proxy_object_info)
+        app.router.add_get("/freevideo/setup", self.proxy_freevideo_readiness)
         app.router.add_post("/upload/image", self.proxy_upload)
         app.router.add_post("/prompt", self.proxy_prompt)
         app.router.add_get("/history/{prompt_id}", self.proxy_history)
@@ -343,6 +344,22 @@ class SharedComfyGateway:
         tail = request.match_info.get("tail", "").strip("/")
         return await self._forward_json_get(request, f"/object_info/{tail}" if tail else "/object_info")
 
+    async def proxy_freevideo_readiness(self, request: web.Request) -> web.Response:
+        """Expose readiness, never the upstream setup token, paths or controls."""
+        self._authenticated_user(request)
+        ready = False
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=1.5), trust_env=False) as session:
+                # Deliberately omit client query parameters: setup discovery can
+                # otherwise accept a local installation/download path.
+                async with session.get(f"{self.upstream_url}/freevideo/setup", allow_redirects=False) as response:
+                    if response.status == 200:
+                        state = await response.json()
+                        ready = isinstance(state, dict) and state.get("ready") is True
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, UnicodeError):
+            pass
+        return web.json_response({"ready": ready}, headers={"Cache-Control": "no-store"})
+
     async def proxy_upload(self, request: web.Request) -> web.Response:
         user = self._authenticated_user(request)
         reader = await request.multipart()
@@ -394,6 +411,24 @@ class SharedComfyGateway:
         final = SAFE_NAME.sub("_", final).strip("_.")
         return final or "output"
 
+    @staticmethod
+    def _validate_freevideo_media(inputs: dict[str, Any], prefix: str) -> None:
+        serialized = inputs.get("assets", "[]")
+        if not isinstance(serialized, str) or len(serialized) > 128 * 1024:
+            raise GatewayError("FreeVideo 素材必須是可驗證的已上傳素材清單。")
+        try:
+            rows = json.loads(serialized)
+        except (json.JSONDecodeError, ValueError, RecursionError):
+            raise GatewayError("FreeVideo 素材清單格式錯誤。") from None
+        if not isinstance(rows, list) or len(rows) > 32:
+            raise GatewayError("FreeVideo 素材清單最多 32 項。")
+        for row in rows:
+            name = row.get("file") if isinstance(row, dict) else None
+            if (not isinstance(name, str) or not name.startswith(prefix)
+                    or "\\" in name or ":" in name or any(ord(char) < 32 for char in name)
+                    or any(part in {"", ".", ".."} or part.rstrip(" .") != part for part in name.split("/"))):
+                raise GatewayError("FreeVideo 只能讀取這個使用者經 Gateway 上傳的素材，不可使用絕對路徑或跨使用者路徑。")
+
     def _rewrite_workflow(self, workflow: dict[str, Any], user_id: str) -> dict[str, Any]:
         rewritten = json.loads(json.dumps(workflow))
         prefix = f"H3Gateway/{user_id}/"
@@ -406,6 +441,13 @@ class SharedComfyGateway:
                 continue
             if class_type.startswith("Save") and "filename_prefix" in inputs:
                 inputs["filename_prefix"] = prefix + self._safe_output_name(inputs.get("filename_prefix"))
+            if class_type == "FreeVideoMedia":
+                self._validate_freevideo_media(inputs, prefix)
+            if class_type == "FreeVideoGenerate":
+                for field in ("refine_from", "continue_from"):
+                    value = inputs.get(field)
+                    if value is not None and (not isinstance(value, str) or value.strip()):
+                        raise GatewayError("遠端 FreeVideo 尚未開放從既有輸出續算；請使用這次經 Gateway 上傳的首尾圖片或參考素材。")
             if class_type in {"LoadImage", "LoadVideo", "LoadAudio"}:
                 for field in ("image", "file", "audio"):
                     value = inputs.get(field)
@@ -495,6 +537,15 @@ class SharedComfyGateway:
                     async def upstream_to_client() -> None:
                         async for message in upstream_ws:
                             if message.type == aiohttp.WSMsgType.TEXT:
+                                try:
+                                    event = json.loads(message.data)
+                                except (json.JSONDecodeError, ValueError):
+                                    event = None
+                                if isinstance(event, dict) and event.get("type") == "freevideo_progress":
+                                    data = event.get("data")
+                                    prompt_id = data.get("prompt_id") if isinstance(data, dict) else None
+                                    if not isinstance(prompt_id, str) or not self.store.owns_prompt(prompt_id, str(user["id"])):
+                                        continue
                                 await client_ws.send_str(message.data)
                             elif message.type == aiohttp.WSMsgType.BINARY:
                                 await client_ws.send_bytes(message.data)

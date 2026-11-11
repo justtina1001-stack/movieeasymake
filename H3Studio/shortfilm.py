@@ -13,7 +13,7 @@ from dialogue import format_dialogue
 from h3_prompt_format import number_speakers
 from domain import FL_ONLY_QUALITY_MODES, REF_ONLY_QUALITY_MODES, QUALITY_MODES
 from video_models import (VIDEO_MODEL_FAST, VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH,
-                          FIXED_RECIPE_MODELS, normalize_video_model)
+                          FIXED_RECIPE_MODELS, normalize_video_model, normalize_freevideo_quality)
 
 
 SAFE_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -218,6 +218,11 @@ def normalize_project(
     if "video_model" in raw or existing and "video_model" in existing:
         try:
             base["video_model"] = normalize_video_model(raw.get("video_model", (existing or {}).get("video_model")))
+        except ValueError as error:
+            raise ShortFilmError(str(error)) from error
+    if "freevideo_quality" in raw or "freevideo_quality" in (existing or {}) or base.get("video_model") == "freevideo_vdn_h3":
+        try:
+            base["freevideo_quality"] = normalize_freevideo_quality(raw.get("freevideo_quality", (existing or {}).get("freevideo_quality")))
         except ValueError as error:
             raise ShortFilmError(str(error)) from error
     quality_mode = text(raw.get("quality_mode"), limit=40) or "native"
@@ -784,6 +789,9 @@ def compile_shot_payload(
     }
     if "video_model" in project:
         payload["video_model"] = project["video_model"]
+    if project.get("video_model") == "freevideo_vdn_h3":
+        payload.update(freevideo_quality=project.get("freevideo_quality", "medium"), video_vae="auto",
+                       quality_mode="native", memory_optimization=False, custom_loras=[])
     if project.get("video_model") == VIDEO_MODEL_FAST:
         payload.update(quality_mode="native", steps=8, scheduler="simple", memory_optimization=False, custom_loras=[])
     elif project.get("video_model") == VIDEO_MODEL_PIKA:

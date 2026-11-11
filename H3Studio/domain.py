@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import re
 from dataclasses import dataclass, field
 from custom_loras import normalize_loras, active_loras, required_lora_trigger_specs, validate_lora_requirements
@@ -10,6 +11,8 @@ from h3_prompt_references import validate_reference_sections, validate_uploaded_
 from typing import Any
 from video_models import (FASTH3_FILENAME, FASTH3_STEPS, VIDEO_MODEL_FAST, VIDEO_MODEL_H3,
                           VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH,
+                          VIDEO_MODEL_FREEVIDEO, FREEVIDEO_QUALITY_RECIPES, FREEVIDEO_REFERENCE_WARNING,
+                          normalize_freevideo_quality,
                           REFERENCE_VIDEO_MODES, PIKA_LORA_FILENAMES, PIKA_STEPS, PIKA_SIGMAS,
                           PIKA_SIGMAS_TEXT, REF_PATCH_FILENAME, normalize_video_model, video_model_profiles)
 
@@ -155,11 +158,16 @@ class CompiledRequest:
     model_adapter: str | None = None
     model_adapter_strength: float = 0.0
     manual_sigmas: list[float] = field(default_factory=list)
+    freevideo_quality: str = "medium"
 
 
-def resolve_video_vae(compiled: CompiledRequest, inventory: dict[str, bool]) -> str:
+def resolve_video_vae(compiled: CompiledRequest, inventory: dict[str, bool]) -> str | None:
     """Resolve auto against the selected engine; explicit choices never fall back."""
     choice = compiled.video_vae
+    if compiled.video_model == VIDEO_MODEL_FREEVIDEO:
+        if choice != "auto":
+            raise RequestError("FreeVideo 使用獨立執行環境管理影片解碼，請將影片 VAE 設為自動；原版 H3 的 VAE 選項不適用。")
+        return None
     if choice not in VIDEO_VAE_MODES:
         raise RequestError("不支援的影片解碼選項，請選擇自動、INT8 或 FP16。")
     # Older inventory producers only advertised the FP16 VAE under video_vae.
@@ -185,6 +193,12 @@ def validate_runtime_inventory(compiled: CompiledRequest, inventory: dict[str, b
         normalize_video_model(compiled.video_model)
     except ValueError as error:
         raise RequestError(str(error)) from error
+    if compiled.video_model == VIDEO_MODEL_FREEVIDEO:
+        profile = next(item for item in video_model_profiles(inventory) if item["id"] == VIDEO_MODEL_FREEVIDEO)
+        if not profile["mode_ready"].get(compiled.mode):
+            raise RequestError(profile["error"] or "FreeVideo 尚未準備好。")
+        resolve_video_vae(compiled, inventory)
+        return
     if compiled.video_model == VIDEO_MODEL_FAST:
         profile = next(item for item in video_model_profiles(inventory) if item["id"] == VIDEO_MODEL_FAST)
         if not profile["ready"]:
@@ -496,6 +510,14 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         raise RequestError("不支援的生成模式。")
     if video_model == VIDEO_MODEL_REF_PATCH and mode not in REFERENCE_VIDEO_MODES:
         raise RequestError("Ref Patch 只支援多模態參考、角色替換、彈窗面板與 MG 動畫；文生、首尾、續接與圖騰循環請選擇其他模型。")
+    try:
+        freevideo_quality = normalize_freevideo_quality(payload.get("freevideo_quality"))
+    except ValueError as error:
+        if video_model == VIDEO_MODEL_FREEVIDEO:
+            raise RequestError(str(error)) from error
+        freevideo_quality = "medium"
+    if video_model == VIDEO_MODEL_FREEVIDEO and video_vae != "auto":
+        raise RequestError("FreeVideo 使用獨立執行環境管理影片解碼，請將影片 VAE 設為自動。")
 
     aspect_ratio = _clean_text(payload.get("aspect_ratio")) or "16:9"
     megapixels = _safe_float(payload.get("megapixels"), 0.4)
@@ -516,6 +538,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     seed = _safe_int(payload.get("seed"), 1)
     if seed < 0:
         seed = 1
+    if video_model == VIDEO_MODEL_FREEVIDEO and seed > 2**53 - 1:
+        raise RequestError("FreeVideo Seed 不可超過 9007199254740991，請重新產生 Seed。")
     steps = min(40, max(4, _safe_int(payload.get("steps"), 20)))
     reference_mode = mode in {"r2v", "replace", "popup_panel", "mg_animation"}
     scheduler = _clean_text(payload.get("scheduler")) or "simple"
@@ -527,6 +551,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         raise RequestError("FastH3 已內建 8 步生成，請關閉原版 H3 的 Turbo／SLA／品質加速選項。")
     if video_model in {VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH} and quality_mode != "native":
         raise RequestError("Pika H3 Flex／Ref Patch 使用獨立配方，請關閉額外 Turbo／SLA／品質加速選項。")
+    if video_model == VIDEO_MODEL_FREEVIDEO and quality_mode != "native":
+        raise RequestError("FreeVideo 使用自己的品質配方，請關閉原版 H3 的 Turbo／SLA 選項。")
     if quality_mode not in QUALITY_MODES:
         quality_mode = "native"
     if reference_mode and quality_mode in FL_ONLY_QUALITY_MODES:
@@ -542,6 +568,9 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     if video_model in {VIDEO_MODEL_PIKA, VIDEO_MODEL_REF_PATCH}:
         if memory_optimization or any(item["enabled"] and item["strength"] != 0 for item in custom_loras):
             raise RequestError("Pika H3 Flex／Ref Patch 尚未驗證額外省顯存或自訂 LoRA；請停用後再生成，或切回原版 H3。")
+    if video_model == VIDEO_MODEL_FREEVIDEO:
+        if memory_optimization or any(item["enabled"] and item["strength"] != 0 for item in custom_loras):
+            raise RequestError("FreeVideo 由獨立執行環境管理顯存，尚未驗證額外 H3 省顯存節點或自訂 LoRA；請停用後再生成。")
     if quality_mode == "turbo_sla" and memory_optimization:
         raise RequestError("SLA 已內建分塊 QKV，請關閉額外省顯存以避免節點衝突。")
     sampler_name = "res_multistep"
@@ -566,6 +595,8 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         manual_sigmas = list(PIKA_SIGMAS)
     elif video_model == VIDEO_MODEL_REF_PATCH:
         steps, scheduler, sampler_name, ref_image_size = 20, "simple", "res_multistep", "match"
+    elif video_model == VIDEO_MODEL_FREEVIDEO:
+        steps, scheduler, sampler_name, ref_image_size = FREEVIDEO_QUALITY_RECIPES[freevideo_quality]["base_steps"], "freevideo", "freevideo", "match"
     if quality_mode != "native":
         scheduler = "simple"
         sampler_name = "euler"
@@ -1090,6 +1121,15 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
     if has_unassigned_dialogue(final_prompt):
         warnings.append("部分台詞無法確定發話來源，尚未配置穩定的 (Sx) 聲源編號；請在台詞前寫明角色名稱加 says／whispers，或使用「旁白：」，避免台詞換人。")
 
+    if video_model == VIDEO_MODEL_FREEVIDEO:
+        if guides:
+            raise RequestError("FreeVideo 目前未驗證分鏡圖片的逐幀錨定；請保留文字分鏡並移除分鏡圖片，或切回原版 H3。素材不會被忽略或自動改成普通參考圖。")
+        if reference_images or reference_videos or reference_audios:
+            warnings.append(FREEVIDEO_REFERENCE_WARNING)
+        if any(item.get("audio_tag") and item.get("voice_mode") == "reuse" for item in mapping):
+            warnings.append("FreeVideo 的「沿用原聲內容」會請模型參考重現原話與表演，不保證逐字或原音軌完整一致；需要精確保留原音時，請在剪輯室加入原音軌。")
+        warnings.append("FreeVideo 使用獨立執行環境的固定品質配方與解碼器，不疊加原版 H3 的 Turbo、額外省顯存或 VAE 設定。")
+
     return CompiledRequest(
         mode=mode,
         prompt=final_prompt,
@@ -1130,7 +1170,80 @@ def compile_request(payload: dict[str, Any]) -> CompiledRequest:
         model_adapter=model_adapter,
         model_adapter_strength=model_adapter_strength,
         manual_sigmas=manual_sigmas,
+        freevideo_quality=freevideo_quality,
     )
+
+
+def _build_freevideo_workflow(
+    compiled: CompiledRequest, uploaded_assets: dict[str, str], output_stem: str,
+    video_vae_name: str | None = None,
+) -> dict[str, Any]:
+    """File-backed references retain prompt numbering without decoding clips in Studio.
+
+    FreeVideo owns its model loading, sampling, both decoders and GPU placement.
+    Its graph is still accepted and monitored by the same ComfyUI queue.
+    """
+    recipe = FREEVIDEO_QUALITY_RECIPES.get(compiled.freevideo_quality)
+    if (not recipe or compiled.quality_mode != "native" or compiled.memory_optimization
+            or compiled.face_repair or compiled.video_vae != "auto" or video_vae_name is not None
+            or any(item["enabled"] and item["strength"] != 0 for item in compiled.custom_loras)
+            or compiled.turbo_profile is not None or compiled.turbo_lora is not None
+            or compiled.model_adapter is not None or compiled.manual_sigmas
+            or compiled.shift_video is not None or compiled.shift_audio is not None
+            or compiled.steps != recipe["base_steps"] or compiled.scheduler != "freevideo"
+            or compiled.sampler_name != "freevideo" or compiled.ref_image_size != "match"):
+        raise RequestError("FreeVideo 工作需要相符的獨立品質配方，不能疊加原版 H3 的 LoRA、採樣或解碼設定；請重新預覽。")
+    if compiled.guides:
+        raise RequestError("FreeVideo 目前未驗證分鏡圖片的逐幀錨定，請移除分鏡圖片或切回原版 H3。")
+    if (type(compiled.length) is not int or compiled.length < 39 or compiled.length % 17 != 5
+            or type(compiled.width) is not int or type(compiled.height) is not int
+            or not 256 <= compiled.width <= 4096 or not 256 <= compiled.height <= 4096
+            or compiled.width % 32 or compiled.height % 32
+            or type(compiled.seed) is not int or not 0 <= compiled.seed <= 2**53 - 1
+            or abs(compiled.actual_duration - round(compiled.length / FPS, 3)) > .0005):
+        raise RequestError("FreeVideo 畫布或幀數與預覽不一致，請重新預覽。")
+    if len(compiled.reference_videos) != len(compiled.reference_video_use_audio):
+        raise RequestError("FreeVideo 影片參考與聲音設定不一致，請重新預覽。")
+
+    rows: list[dict[str, Any]] = []
+
+    def media(asset_id: str, role: str, **options: Any) -> dict[str, Any]:
+        name = uploaded_assets.get(asset_id)
+        if not isinstance(name, str) or not name:
+            raise RequestError("FreeVideo 缺少已上傳的素材，請確認原素材仍存在後重試。")
+        return {"file": name, "role": role, **options}
+
+    # Reference prompt tags count each modality independently. Videos with sound
+    # precede standalone audio, just as the official compiler assigned Audio N.
+    if compiled.mode in REFERENCE_VIDEO_MODES:
+        rows.extend(media(asset, "reference") for asset in compiled.reference_images)
+        rows.extend(media(asset, "reference", sound=enabled)
+                    for asset, enabled in zip(compiled.reference_videos, compiled.reference_video_use_audio))
+        rows.extend(media(asset, "reference", use="reference") for asset in compiled.reference_audios)
+    else:
+        if compiled.reference_images or compiled.reference_videos or compiled.reference_audios:
+            raise RequestError("FreeVideo 不能混用首尾幀與多模態參考，請分開選擇模式後重新預覽。")
+        if compiled.first_image:
+            rows.append(media(compiled.first_image, "first"))
+        if compiled.last_image:
+            rows.append(media(compiled.last_image, "last"))
+
+    generate_inputs = {
+        "text": compiled.prompt, "width": compiled.width, "height": compiled.height,
+        "seconds": compiled.actual_duration, "frames": compiled.length, "seed": compiled.seed,
+        **recipe, "force_regenerate": True, "preview": False,
+    }
+    workflow: dict[str, Any] = {}
+    if rows:
+        workflow["1"] = {"class_type": "FreeVideoMedia", "inputs": {"assets": json.dumps(rows, ensure_ascii=False)},
+                         "_meta": {"title": "FreeVideo Ordered Media References"}}
+        generate_inputs["media"] = ["1", 0]
+    workflow["2"] = {"class_type": "FreeVideoGenerate", "inputs": generate_inputs,
+                     "_meta": {"title": "FreeVideo／VDN-H3 · " + compiled.freevideo_quality}}
+    workflow["3"] = {"class_type": "SaveVideo", "inputs": {
+        "video": ["2", 0], "filename_prefix": f"H3Studio/{output_stem}", "format": "auto", "codec": "auto",
+    }, "_meta": {"title": "Save FreeVideo Video"}}
+    return workflow
 
 
 def build_workflow(
@@ -1145,6 +1258,8 @@ def build_workflow(
         normalize_video_model(compiled.video_model)
     except ValueError as error:
         raise RequestError(str(error)) from error
+    if compiled.video_model == VIDEO_MODEL_FREEVIDEO:
+        return _build_freevideo_workflow(compiled, uploaded_assets, output_stem, video_vae_name)
     if compiled.video_vae not in VIDEO_VAE_MODES:
         raise RequestError("不支援的影片解碼選項。")
     selected_vae = video_vae_name or VIDEO_VAE_FILENAMES.get(compiled.video_vae, VIDEO_VAE_FILENAMES["int8"])

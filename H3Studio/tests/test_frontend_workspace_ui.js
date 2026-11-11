@@ -179,7 +179,7 @@ test("a modal opened from the collapsed settings menu returns focus to its visib
 
 test("navigation selects the current work area from both dedicated pages and home query parameters", () => {
   const { ui } = fixture();
-  for (const [route, query, expected] of [["/editor", "?job=x", "editor"], ["/scripts", "", "scripts"], ["/images", "", "images"],
+  for (const [route, query, expected] of [["/editor", "?job=x", "editor"], ["/scripts", "", "scripts"], ["/images", "", "images"], ["/effects", "", "effects"],
     ["/", "?workspace=shortfilm", "shortfilm"], ["/", "?tool=voice", "voice"], ["/", "?tool=music", "music"], ["/", "?tool=sfx", "sfx"], ["/", "", "quick"]]) {
     assert.equal(ui.currentSection(route, query), expected);
   }
